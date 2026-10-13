@@ -79,7 +79,10 @@ check('context omits History body', !context.includes('Reviewed three requiremen
 check('context carries the memory map', context.includes('### Memory map') && context.includes(paths.file))
 check('context teaches memory_status', context.includes('memory_status'))
 check('context teaches memory_compact', context.includes('memory_compact'))
-check('context teaches the edit-not-rewrite rule', context.includes('Use Edit for routine updates'))
+// The registered tool is `edit`, lowercase: naming `Edit` would send the model after
+// a tool that does not exist.
+check('context teaches the edit-not-rewrite rule', context.includes('Use edit for routine updates'))
+check('the rule names the real tool', !/\b(Edit|Write)\(/.test(context))
 
 console.log('4) compaction')
 const big = `# now\n\n## State | big\n\n${'x'.repeat(COMPACTION_THRESHOLD_BYTES + 1024)}\n`

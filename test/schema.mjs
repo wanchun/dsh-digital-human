@@ -116,7 +116,11 @@ const service = provided.get('digitalHumans')
 
 console.log('1) preset-scoped tools')
 const scoped = buildHumanTools({ ctx, service, humanId: 'dev-assistant' })
-check('every scoped tool is declared', scoped.length === 9, String(scoped.length))
+check('every scoped tool is declared', scoped.length === 10, String(scoped.length))
+// Inventing a conversation id splits one subject across two Sessions, so the
+// capability to see what already exists is what lets a caller reuse it.
+check('a peer conversation list is offered',
+  scoped.some((tool) => tool.name === 'digital_human_conversations'), scoped.map((t) => t.name).join(','))
 check('the stop tool is exposed', scoped.some((tool) => tool.name === 'digital_human_stop'))
 for (const tool of scoped) assertTool(tool)
 
@@ -154,7 +158,8 @@ const calls = [
   ['digital_human_list', {}],
   ['digital_human_status', { to: 'pm-assistant' }],
   ['digital_human_messages', { to: 'pm-assistant' }],
-  ['digital_human_send', { to: 'pm-assistant', message: 'schema probe' }],
+  // An address, because the tool refuses a send that names none.
+  ['digital_human_send', { to: 'pm-assistant', message: 'schema probe', conversation_id: 'schema-probe' }],
   ['memory_status', {}],
   ['memory_compact', {}],
   ['list_bot_targets', { bot_id: 'bot-a' }],

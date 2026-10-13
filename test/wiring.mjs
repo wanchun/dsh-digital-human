@@ -108,7 +108,18 @@ check('mounts without a Connection service', bare._provided.has('digitalHumans')
 check('still registers the registry tool', bare._tools.has('digital_human'))
 
 let route = null
-const connection = { fetch: { register: (registered) => { route = registered; return async () => {} } } }
+const routes = []
+const connection = {
+  fetch: {
+    register: (registered) => {
+      routes.push(registered)
+      // The plugin registers a second, binary route beside the management one, so the
+      // management route is picked by its path rather than by being registered last.
+      if (registered.path === RPC_PATH) route = registered
+      return async () => {}
+    },
+  },
+}
 const dshIm = {
   send: async () => {},
   listBots: async () => [{ botId: 'bot-a', name: 'Bot A' }, { botId: 'bot-b', name: 'Bot B' }],
@@ -134,6 +145,8 @@ await applyPlatform(wired, { home: join(home, 'wired'), seed: true })
 // so keep this one under its own name for the checks that follow.
 const wiredRoute = route
 check('registers the management route', route !== null)
+check('registers the bundle route beside it',
+  routes.some((entry) => entry.path === RPC_PATH + '/bundle'), routes.map((entry) => entry.path).join(','))
 check('route owns the documented path', route.path === RPC_PATH && RPC_PATH === '/api/digital-human')
 check('route is POST-only and buffered', JSON.stringify(route.methods) === '["POST"]' && route.requestBody === 'buffered')
 
@@ -153,6 +166,19 @@ console.log('3) registry methods')
 const listed = await (await route.fetch(request(call('registry.list', {})))).json()
 check('list answers ok', listed.result.ok === true && listed.result.value.humans.length === 2)
 check('list names the registry file', listed.result.value.file.endsWith('humans.json'))
+// The page cannot resolve the config itself — the peer facts need every record's
+// name — so the Host attaches what the persona will actually see.
+const listedPm = listed.result.value.humans.find((entry) => entry.id === 'pm-assistant')
+check('list reports the resolved config', typeof listedPm.resolved?.values === 'object', JSON.stringify(listedPm.resolved))
+check('the resolved config carries a source per key',
+  Object.keys(listedPm.resolved.sources).length === Object.keys(listedPm.resolved.values).length,
+  JSON.stringify(listedPm.resolved.sources))
+const gotPm = await (await route.fetch(request(call('registry.get', { id: 'pm-assistant' })))).json()
+check('get reports the resolved config too', typeof gotPm.result.value.human.resolved?.values === 'object')
+// A failed push is otherwise invisible: the bot simply runs without its source
+// block or preset, and the only other trace is a log line on someone's terminal.
+check('list reports the last alignment per record',
+  Array.isArray(listedPm.alignment), JSON.stringify(listedPm.alignment))
 check('the envelope carries the rpcId', listed.rpcId === 'rpc-1' && listed.type === 'server-response')
 const got = await (await route.fetch(request(call('registry.get', { id: 'pm-assistant' })))).json()
 check('get resolves by id', got.result.value.human.name === '研发PM助手')
@@ -213,7 +239,7 @@ console.log('5) the browser bundle registers its slots')
 let loaded = null
 global.window = { __ModuleLoader__: { load: (entry) => { loaded = entry } } }
 await import('../client.js')
-check('the factory id equals the package name', loaded?.id === '@local/dsh-digital-human')
+check('the factory id equals the package name', loaded?.id === '@harrywan/dsh-digital-human')
 const React = {
   createElement: () => null,
   useState: (initial) => [initial, () => {}],
@@ -224,13 +250,26 @@ const React = {
 // The page renders through the same component library the schedule and plugin
 // pages use, so the stub must answer for it too.
 const Primitives = new Proxy({}, { get: (_target, name) => name })
+// Vite emits the automatic JSX runtime, so the bundle requires `react/jsx-runtime`
+// as well. Every shipped client bundle does the same, which is how the loader is
+// known to provide it.
+const JsxRuntime = { jsx: () => null, jsxs: () => null, Fragment: null }
 const module_ = loaded.factory((name) => {
   if (name === 'react') return React
+  if (name === 'react/jsx-runtime') return JsxRuntime
   if (name === '@deepseek-ai/dsh-client-ui-primitives') return Primitives
   throw new Error(`unexpected require: ${name}`)
 })
 check('the client loads the shared component library',
   loaded.factory.toString().includes('@deepseek-ai/dsh-client-ui-primitives'))
+// A coarse guard, but it is the only one available here: the React stub renders
+// nothing, so the config editor can only be checked for being in the bundle. A
+// build that dropped it — or a style comment that ended the template literal and
+// took the control with it — fails this.
+check('the bundle carries the config editor', loaded.factory.toString().includes('添加一项'))
+check('the config editor is laid out as rows', loaded.factory.toString().includes('dh-row-name'))
+check('the bundle renders declared fields', loaded.factory.toString().includes('SchemaFields'))
+check('the bundle shows a fact field as read-only', loaded.factory.toString().includes('平台自动提供'))
 check('the client injects slots and connection', JSON.stringify(module_.inject) === '["slots","connection"]')
 
 const registrations = []

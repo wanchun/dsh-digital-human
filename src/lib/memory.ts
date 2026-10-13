@@ -268,14 +268,14 @@ resolutions deserve detail. An unchanged routine check can be a single line.
 
 ### How to Update
 
-Use Edit for routine updates, so the rest of the file is untouched:
+Use edit for routine updates, so the rest of the file is untouched:
 
 \`\`\`
-Edit(memory.md, "- current_price: 1199", "- current_price: 1099")
-Edit(memory.md, "## State | old description", "## State | new description")
+edit(memory.md, "- current_price: 1199", "- current_price: 1099")
+edit(memory.md, "## State | old description", "## State | new description")
 \`\`\`
 
-Use Write only for the first creation or a full restructure.
+Use write only for the first creation or a full restructure.
 
 ### Archives
 

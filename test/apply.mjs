@@ -8,7 +8,7 @@
  *   node test/apply.mjs
  */
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply as applyPlatform } from '../build/host/index.js'
@@ -57,10 +57,30 @@ function makeCtx({ dshIm } = {}) {
       list: async () => [...presets.values()],
     },
     sessionController: {
+      // Mirrors the Host's contract, because both of its rules shape this plugin:
+      // a Workspace and a cwd together are refused, and an explicit id ADOPTS the
+      // Session — refusing when its preset or directory would change.
       create: async (options) => {
+        if (options?.workspaceId !== undefined && options?.cwd !== undefined) {
+          throw new Error('session.create accepts workspaceId or cwd, not both')
+        }
+        if (options?.sessionId !== undefined) {
+          const known = sessions.find((entry) => entry.sessionId === options.sessionId)
+          if (known) {
+            if (options.agentPreset !== undefined && known.agentPreset !== options.agentPreset) {
+              throw new Error(`session "${options.sessionId}" would change preset`)
+            }
+            if (options.cwd !== undefined && known.cwd !== undefined && known.cwd !== options.cwd) {
+              throw new Error(`session "${options.sessionId}" would change directory`)
+            }
+            return { sessionId: known.sessionId, agentPreset: known.agentPreset }
+          }
+          sessions.push({ sessionId: options.sessionId, running: false, agentAvailable: true, agentPreset: options.agentPreset, cwd: options.cwd, workspaceId: options.workspaceId })
+          return { sessionId: options.sessionId, agentPreset: options.agentPreset }
+        }
         counter += 1
         const sessionId = `session-${counter}`
-        sessions.push({ sessionId, running: false, agentAvailable: true, agentPreset: options?.agentPreset, cwd: options?.cwd })
+        sessions.push({ sessionId, running: false, agentAvailable: true, agentPreset: options?.agentPreset, cwd: options?.cwd, workspaceId: options?.workspaceId })
         return { sessionId, agentPreset: options?.agentPreset }
       },
       prompt: async (request, signal) => {
@@ -99,11 +119,21 @@ check('subscribes to the session event feed', platform.listeners.some((entry) =>
 check('lists both humans', (await service.list()).length === 2)
 
 console.log('2) chat system')
-const delivered = await service.send('dev-assistant', { message: 'please review requirement 12345', from: 'pm-assistant' })
+const delivered = await service.send('dev-assistant', { message: 'please review requirement 12345', from: 'pm-assistant', fromSession: 'session-sender-1' })
 check('send creates a session', typeof delivered.sessionId === 'string' && delivered.sessionId.startsWith('session-'))
 check('send is accepted', delivered.accepted === true)
 check('the created session carries the digital-human preset', platform.sessions[0].agentPreset === 'dh-dev-assistant', String(platform.sessions[0].agentPreset))
-check('the prompt carries the message', platform.prompts[0].content[0].text === 'please review requirement 12345')
+// The delivery also names the conversation it arrived in, so the receiver can reply
+// on the same one instead of trusting an id it remembered.
+check('the prompt carries the message', platform.prompts[0].content[0].text.endsWith('please review requirement 12345'))
+check('the prompt names the sender and the conversation it arrived in',
+  platform.prompts[0].content[0].text.includes('<dsh_peer_source')
+  && platform.prompts[0].content[0].text.includes('from="pm-assistant"')
+  && platform.prompts[0].content[0].text.includes('conversation="main"'))
+// The Session the message came from travels with it, so the reply can go back to
+// the Session that asked for the work rather than to a shared thread name.
+check('the prompt names the sending Session',
+  platform.prompts[0].content[0].text.includes('session="session-sender-1"'))
 check('status reports it is working', (await service.status('dev-assistant', 'main')).isGenerating === true)
 
 console.log('3) one session per conversation, reused')
@@ -173,13 +203,19 @@ check('the memory context renders the rules', scope.contexts[0].text().includes(
 check('refuses an empty human id', (() => { try { applyTools(makeCtx().ctx, {}) ; return false } catch { return true } })())
 
 console.log('7) tools drive the chat system')
-const outbound = await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'status please' })
+const outbound = await scope.tools.get('digital_human_send')
+  .execute({ to: 'pm-assistant', message: 'status please', conversation_id: 'main' })
 check('send resolves the peer by id', outbound.to === 'pm-assistant' && outbound.accepted === true)
 check('send reports the conversation', outbound.conversationId === 'main')
-const byName = await scope.tools.get('digital_human_send').execute({ to: '研发PM助手', message: 'ping' })
+const byName = await scope.tools.get('digital_human_send')
+  .execute({ to: '研发PM助手', message: 'ping', conversation_id: 'main' })
 check('send resolves the peer by display name', byName.to === 'pm-assistant')
-check('send refuses itself', await scope.tools.get('digital_human_send').execute({ to: 'dev-assistant', message: 'x' }).then(() => false, () => true))
-check('send refuses an unknown peer', await scope.tools.get('digital_human_send').execute({ to: 'nobody', message: 'x' }).then(() => false, () => true))
+// A send with no address at all would pour every requirement into one shared thread,
+// so the tool refuses it rather than defaulting.
+check('send refuses a missing address',
+  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x' }).then(() => false, () => true))
+check('send refuses itself', await scope.tools.get('digital_human_send').execute({ to: 'dev-assistant', message: 'x', conversation_id: 'main' }).then(() => false, () => true))
+check('send refuses an unknown peer', await scope.tools.get('digital_human_send').execute({ to: 'nobody', message: 'x', conversation_id: 'main' }).then(() => false, () => true))
 const listed = await scope.tools.get('digital_human_list').execute({})
 check('list names the caller as you', listed.detail.includes('you'))
 const mail = await scope.tools.get('digital_human_messages').execute({ to: 'pm-assistant', limit: 5 })
@@ -228,7 +264,287 @@ check('registry removes', (await registry.execute({ action: 'remove', id: 'reg-o
 check('registry rejects an unknown action', await registry.execute({ action: 'explode', id: 'x' }).then(() => false, () => true))
 check('registry requires an id', await registry.execute({ action: 'create' }).then(() => false, () => true))
 
-console.log('11) disposal')
+console.log('11) a digital-human session gets its permission preset')
+{
+  // The deployment default asks for approval, and an IM turn composes no
+  // answerer, so a digital human would stall on its first confined call. The
+  // override must reach its own sessions only.
+  const calls = []
+  platform.ctx.provide('permissionPresets', { set: (session, name) => { calls.push({ session, name }) } })
+  const created = platform.listeners.find((entry) => entry.event === 'session/created').handler
+  const mine = { id: 'session-dh', header: { agentPreset: presetIdOf('dev-assistant') } }
+  created(mine)
+  check('the preset is applied', calls.length === 1, String(calls.length))
+  check('the created session is the one changed', calls[0].session === mine)
+  check('full access is the default', calls[0].name === 'danger-full-access', String(calls[0].name))
+  created(mine)
+  check('a repeat applies nothing twice', calls.length === 1, String(calls.length))
+  created({ id: 'session-foreign', header: { agentPreset: 'standard' } })
+  check('a foreign session is left alone', calls.length === 1, String(calls.length))
+  created({ id: 'session-bare', header: {} })
+  check('a session with no preset is left alone', calls.length === 1, String(calls.length))
+
+  // A record that names its own preset must win over the default.
+  await service.upsert({ id: 'ro-one', name: 'RO', permissionPreset: 'read-only' })
+  created({ id: 'session-ro', header: { agentPreset: presetIdOf('ro-one') } })
+  check('a named preset is honoured', calls[1]?.name === 'read-only', String(calls[1]?.name))
+
+  // A preset chosen after creation is the other way in.
+  const onEvent = platform.listeners.find((entry) => entry.event === 'session/event').handler
+  onEvent({ id: 'session-late', header: {} }, { type: 'agent-preset/selected', data: { agentPreset: presetIdOf('dev-assistant') } })
+  check('a late preset selection is caught', calls.length === 3, String(calls.length))
+
+  // An absent service is a report, never a throw: a headless profile has none.
+  const bare = makeCtx()
+  await applyPlatform(bare.ctx, { home: join(home, 'noperm'), seed: true })
+  const bareCreated = bare.listeners.find((entry) => entry.event === 'session/created').handler
+  bareCreated({ id: 'session-x', header: { agentPreset: presetIdOf('dev-assistant') } })
+  check('an absent permissionPresets service is survivable', true)
+}
+
+console.log('12) an unclaimed owner is claimed at startup')
+{
+  // The claim must not wait for a save: a record that is already bound and
+  // already written to would otherwise run without an owner until someone
+  // happened to open and save it.
+  const root = await mkdtemp(join(tmpdir(), 'dh-startup-claim-'))
+  const claimHome = join(root, 'digital-human')
+  await mkdir(claimHome, { recursive: true })
+  await writeFile(join(claimHome, 'humans.json'), JSON.stringify([{
+    id: 'claimer',
+    name: 'Claimer',
+    description: '',
+    enabled: true,
+    systemPrompt: 'You claim things.',
+    workspace: '/tmp',
+    skills: [],
+    peers: [],
+    im: { botId: 'wecom_571e4e3104d704d7e99bcf79' },
+    subscriptions: [],
+    memory: false,
+    escalation: { enabled: false, timeoutHours: 24 },
+  }]))
+  const botDir = join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_571e4e3104d704d7e99bcf79')
+  await mkdir(botDir, { recursive: true })
+  await writeFile(join(botDir, 'state.json'), JSON.stringify({
+    version: 1,
+    sessions: { 'direct:wohR_owner': 'session-a' },
+  }))
+
+  const claimed = makeCtx()
+  await applyPlatform(claimed.ctx, { home: claimHome, seed: false })
+  const stored = await claimed.provided.get('digitalHumans').resolve('claimer')
+  check('the first direct caller is stored as the owner', stored.im.owner === 'wohR_owner', String(stored.im.owner))
+  const definition = claimed.presets.get(presetIdOf('claimer'))
+  const persona = definition.plugins.find((row) => row.id === 'persona')
+  check('the persona names the owner', persona.config.prefix.includes('wohR_owner'))
+  check('the owner survives a re-read', (await claimed.provided.get('digitalHumans').resolve('claimer')).im.owner === 'wohR_owner')
+
+  await rm(root, { recursive: true, force: true })
+}
+
+console.log('13) bound bots are aligned at startup, without a save')
+{
+  // IM holds these settings in memory, so a restart leaves it unaligned until
+  // something pushes them again. Waiting for a save would mean every restart
+  // silently drops the source block, the workspace, and the preset.
+  const root = await mkdtemp(join(tmpdir(), 'dh-startup-align-'))
+  const alignHome = join(root, 'digital-human')
+  await mkdir(alignHome, { recursive: true })
+  await writeFile(join(alignHome, 'humans.json'), JSON.stringify([{
+    id: 'aligned',
+    name: 'Aligned',
+    description: '',
+    enabled: true,
+    systemPrompt: 'You are aligned.',
+    workspace: '/tmp',
+    skills: [],
+    peers: [],
+    im: { botId: 'wecom_571e4e3104d704d7e99bcf79' },
+    subscriptions: [],
+    memory: false,
+    escalation: { enabled: false, timeoutHours: 24 },
+  }]))
+  const botDir = join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_571e4e3104d704d7e99bcf79')
+  await mkdir(botDir, { recursive: true })
+  await writeFile(join(botDir, 'state.json'), JSON.stringify({
+    version: 1,
+    sessions: { 'direct:wohR_owner': 'session-a' },
+  }))
+
+  const seen = []
+  const connection = {
+    createSharedFetchHandler: (channel) => ({
+      async fetch(request) {
+        const body = await request.json()
+        seen.push({ channel, method: body.payload.method, payload: body.payload.payload })
+        return Response.json({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: {} } })
+      },
+    }),
+  }
+  const aligned = makeCtx()
+  aligned.ctx.provide('connection', connection)
+  await applyPlatform(aligned.ctx, { home: alignHome, seed: false })
+
+  check('the workspace is pushed at startup', seen.some((entry) => entry.method === 'bot.workspace.set'))
+  check('the preset is pushed at startup', seen.some((entry) => entry.method === 'bot.preset.set'))
+  check('the source block is pushed at startup', seen.some((entry) => entry.method === 'bot.context-enhancement.set'))
+  const context = seen.find((entry) => entry.method === 'bot.context-enhancement.set')
+  check('the startup claim reaches the pushed guidance',
+    context.payload.config.group.guidance.includes('wohR_owner'), context.payload.config.group.guidance.slice(-90))
+  check('the pushed workspace is the digital human\'s',
+    seen.find((entry) => entry.method === 'bot.workspace.set').payload.workspace === '/tmp')
+
+  await rm(root, { recursive: true, force: true })
+}
+
+console.log('14) an alignment that found no connection recovers on a later refresh')
+{
+  // The live failure this pins: this plugin does not depend on the Connection
+  // service, so the loader can run its apply() first. The first alignment then
+  // has nothing to send through, and the record must be pushed once it exists.
+  const root = await mkdtemp(join(tmpdir(), 'dh-late-conn-'))
+  const lateHome = join(root, 'digital-human')
+  await mkdir(lateHome, { recursive: true })
+  await writeFile(join(lateHome, 'humans.json'), JSON.stringify([{
+    id: 'late',
+    name: 'Late',
+    description: '',
+    enabled: true,
+    systemPrompt: 'You start without a connection.',
+    workspace: '/tmp',
+    skills: [],
+    peers: [],
+    im: { botId: 'wecom_571e4e3104d704d7e99bcf79' },
+    subscriptions: [],
+    memory: false,
+    escalation: { enabled: false, timeoutHours: 24 },
+  }]))
+
+  const logs = []
+  const late = makeCtx()
+  late.ctx.logger = { warn: (message) => logs.push(message), info: () => {} }
+  await applyPlatform(late.ctx, { home: lateHome, seed: false })
+  check('the absent service is reported, not thrown',
+    logs.some((line) => line.includes('connection service is absent')))
+  check('the wait is reported', logs.some((line) => line.includes('waiting on a service')))
+
+  const seen = []
+  late.ctx.provide('connection', {
+    createSharedFetchHandler: (channel) => ({
+      async fetch(request) {
+        const body = await request.json()
+        seen.push({ channel, method: body.payload.method })
+        return Response.json({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: {} } })
+      },
+    }),
+  })
+  await late.provided.get('digitalHumans').refresh()
+  check('the later refresh pushes the workspace', seen.some((entry) => entry.method === 'bot.workspace.set'))
+  check('the later refresh pushes the preset', seen.some((entry) => entry.method === 'bot.preset.set'))
+  check('the later refresh pushes the source block', seen.some((entry) => entry.method === 'bot.context-enhancement.set'))
+
+  await rm(root, { recursive: true, force: true })
+}
+
+console.log('15) an owner no sender can match is reported, not obeyed silently')
+{
+  // The live failure this pins: the WeCom channel sends no display name, so an
+  // owner written as a name can never equal the senderId the persona receives.
+  // The persona then serves the owner as a stranger — and nothing says so.
+  const root = await mkdtemp(join(tmpdir(), 'dh-owner-mismatch-'))
+  const mismatchHome = join(root, 'digital-human')
+  await mkdir(mismatchHome, { recursive: true })
+  await writeFile(join(mismatchHome, 'humans.json'), JSON.stringify([{
+    id: 'named',
+    name: 'Named',
+    description: '',
+    enabled: true,
+    systemPrompt: 'You answer to a name.',
+    workspace: '/tmp',
+    skills: [],
+    peers: [],
+    im: { botId: 'wecom_571e4e3104d704d7e99bcf79', owner: 'harrywan' },
+    subscriptions: [],
+    memory: false,
+    escalation: { enabled: false, timeoutHours: 24 },
+  }]))
+  const botDir = join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_571e4e3104d704d7e99bcf79')
+  await mkdir(botDir, { recursive: true })
+  await writeFile(join(botDir, 'state.json'), JSON.stringify({
+    version: 1,
+    sessions: { 'direct:wohR_KCgAANNc-oBb9Z8h20IdfWja3lA': 'session-a' },
+  }))
+
+  const logs = []
+  const mismatch = makeCtx()
+  mismatch.ctx.logger = { warn: (message) => logs.push(message), info: () => {} }
+  await applyPlatform(mismatch.ctx, { home: mismatchHome, seed: false })
+  check('the mismatch is reported', logs.some((line) => line.includes('cannot match')), logs.join(' | ').slice(0, 200))
+  check('the report names the id the bot has seen',
+    logs.some((line) => line.includes('wohR_KCgAANNc-oBb9Z8h20IdfWja3lA')))
+  check('a configured owner is never silently replaced',
+    (await mismatch.provided.get('digitalHumans').resolve('named')).im.owner === 'harrywan')
+
+  await rm(root, { recursive: true, force: true })
+}
+
+console.log('16) a delivered session is filed under its Workspace')
+{
+  // A `cwd` alone puts the session in the right directory but leaves it out of the
+  // Workspace's session list, which is what the UI groups by — the session then
+  // shows as ungrouped even though it runs in the right place.
+  const root = await mkdtemp(join(tmpdir(), 'dh-ws-'))
+  const wsHome = join(root, 'digital-human')
+  await mkdir(wsHome, { recursive: true })
+  const target = join(wsHome, 'workspace')
+  await writeFile(join(wsHome, 'humans.json'), JSON.stringify([{
+    id: 'ws-one',
+    name: 'Ws',
+    description: '',
+    enabled: true,
+    systemPrompt: 'x',
+    workspace: target,
+    skills: [],
+    peers: [],
+    im: { botId: '' },
+    subscriptions: [],
+    memory: false,
+    escalation: { enabled: false, timeoutHours: 24 },
+  }]))
+
+  const items = [{ workspaceId: 'ws-digital-human', path: target, title: '数字人' }]
+  const filed = makeCtx()
+  filed.ctx.provide('workspaceController', {
+    follow: () => ({
+      async *[Symbol.asyncIterator]() { yield { type: 'baseline', value: { items } } },
+    }),
+    create: async () => ({ workspace: items[0] }),
+    rename: async () => ({ workspace: items[0] }),
+  })
+  await applyPlatform(filed.ctx, { home: wsHome, seed: false })
+  const sent = await filed.provided.get('digitalHumans').send('ws-one', { message: 'hi', conversationId: 'main' })
+  const row = filed.sessions.find((entry) => entry.sessionId === sent.sessionId)
+  check('the session carries the Workspace id', row.workspaceId === 'ws-digital-human', String(row.workspaceId))
+  // The directory is not sent with the id: the Host resolves it from the Workspace,
+  // and naming both is refused. So the id is the whole filing instruction.
+  check('the session names no directory of its own', row.cwd === undefined, String(row.cwd))
+
+  // Without a Workspace roster there is no id to file under, but the directory the
+  // record names must still be passed: an unfiled session is a display problem, a
+  // session in the wrong directory is a working one.
+  const bare = makeCtx()
+  await applyPlatform(bare.ctx, { home: join(root, 'bare'), seed: false })
+  await bare.provided.get('digitalHumans').upsert({ id: 'ws-two', name: 'W2', workspace: target, memory: false })
+  const bareSent = await bare.provided.get('digitalHumans').send('ws-two', { message: 'hi' })
+  const bareRow = bare.sessions.find((entry) => entry.sessionId === bareSent.sessionId)
+  check('no roster means no Workspace id', bareRow.workspaceId === undefined)
+  check('no roster still passes the named directory', bareRow.cwd === target, String(bareRow.cwd))
+
+  await rm(root, { recursive: true, force: true })
+}
+
+console.log('17) disposal')
 const platformForDisposal = makeCtx()
 let disposeAll = null
 platformForDisposal.ctx.effect = (fn) => { disposeAll = fn(); return () => {} }

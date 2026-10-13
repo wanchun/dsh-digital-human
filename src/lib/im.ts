@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+
 import type { Ctx } from './types.js'
 /**
  * Push a digital human's mode onto its bound IM bot.
@@ -46,12 +49,37 @@ const CONTEXT_FIELDS = Object.freeze([
   'channel', 'conversationType', 'senderId', 'senderName', 'chatId', 'botId',
 ])
 
-/** Instruction shipped with the source block. */
+/**
+ * Instruction shipped with the source block.
+ *
+ * These are facts about the platform's own fields, nothing more. What a persona
+ * does with an identified caller — which table to match it against, what
+ * authority to grant, whether a stranger may be served — is that persona's
+ * business, and a plugin that spelled it out here would only fit one of them.
+ */
 const CONTEXT_GUIDANCE = [
   '仅依据当前消息的 <dsh_im_source> 中实际提供的字段理解来源；没有提供的字段不要猜测或补全。',
-  'senderId / senderName 是来话人身份：先用它匹配成员登记表，再决定服务方式与权限；匹配不到时按新成员流程处理。',
+  'senderId 与 senderName 是来话人身份字段；渠道实际提供哪些字段以块内出现的为准。',
   'chatId 是回复与定向通知该来话人的地址。',
 ].join('\n')
+
+/**
+ * The owner clause appended when this digital human has a claimed owner.
+ *
+ * The IM platform injects a fixed field set, so it can never hand the model a
+ * precomputed `isOwner` flag. It does hand over the sender, and this clause
+ * hands over the owner — so the model has both operands and can compare them.
+ *
+ * The clause stops at the comparison. How the owner is then served is the
+ * persona's decision, not this plugin's.
+ */
+function ownerGuidance(owner: string): string {
+  return [
+    '',
+    `本数字人的负责人是 \`${owner}\`。`,
+    '当前消息的 senderId 或 senderName 等于该值时，来话人就是负责人。',
+  ].join('\n')
+}
 
 /**
  * The source-block setting this plugin installs.
@@ -59,9 +87,79 @@ const CONTEXT_GUIDANCE = [
  * IM requires exactly the keys `group` and `direct`, and each scope exactly
  * `enabled`, `fields`, and `guidance`.
  */
-function contextConfig(): Record<string, unknown> {
-  const scope = { enabled: true, fields: [...CONTEXT_FIELDS], guidance: CONTEXT_GUIDANCE }
+function contextConfig(owner?: string): Record<string, unknown> {
+  const guidance = owner ? `${CONTEXT_GUIDANCE}${ownerGuidance(owner)}` : CONTEXT_GUIDANCE
+  const scope = { enabled: true, fields: [...CONTEXT_FIELDS], guidance }
   return { group: { ...scope }, direct: { ...scope } }
+}
+
+/**
+ * The directory one channel keeps its per-bot state in.
+ *
+ * A bot id carries its channel as a prefix — `wecom_571e…` belongs to `wecom` —
+ * and each channel gets its own directory under the integrations root. Deriving
+ * it, rather than naming a channel here, is what keeps this plugin working for
+ * every channel instead of the one it was written against.
+ *
+ * @param botId - the bound bot.
+ * @returns the directory name, or undefined when the id names no channel.
+ */
+function channelStore(botId: string): string | undefined {
+  const channel = botId.split('_', 1)[0]
+  return /^[a-z][a-z0-9-]*$/.test(channel) ? `dsh-${channel}` : undefined
+}
+
+/**
+ * Every sender that has opened a direct conversation with one bot.
+ *
+ * Read-only, and the same file `claimOwner` reads. The IM platform never returns
+ * the caller's identity when a bot is created, so this is the only place an
+ * operator can learn it. A channel may also send no display name — WeCom sends
+ * only `from.userid` — in which case the opaque id is the only value a persona
+ * can match on.
+ *
+ * @param home - the registry root; the integration data sits one level up.
+ * @param botId - the bound bot.
+ * @returns the sender ids, in first-contact order.
+ */
+export function directSenders(home: string, botId?: string): string[] {
+  if (!botId) return []
+  const store = channelStore(botId)
+  if (!store) return []
+  const file = join(dirname(home), 'integrations', store, 'bots', botId, 'state.json')
+  let state: unknown
+  try {
+    state = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return []
+  }
+  if (!isRecord(state) || !isRecord(state.sessions)) return []
+  const senders: string[] = []
+  for (const key of Object.keys(state.sessions)) {
+    const senderId = key.startsWith('direct:') ? key.slice('direct:'.length).trim() : ''
+    if (senderId) senders.push(senderId)
+  }
+  return senders
+}
+
+/**
+ * Claim an owner from the IM integration's own session state.
+ *
+ * The IM platform never returns the caller's identity when a bot is created, so
+ * there is nothing to configure up front. It does record a session per direct
+ * conversation, keyed `direct:<senderId>` — so the first direct conversation is
+ * the first person who wrote to the bot, and that is the owner by the same
+ * reasoning Halo uses: a freshly created bot is visible only to its creator.
+ *
+ * Key order is insertion order in practice, which is what makes "first" mean
+ * "first".
+ *
+ * @param home - the registry root; the integration data sits one level up.
+ * @param botId - the bound bot, or empty for "nothing to claim".
+ * @returns the claimed sender id, or undefined when there is nothing to claim.
+ */
+export function claimOwner(home: string, botId?: string): string | undefined {
+  return directSenders(home, botId)[0]
 }
 
 /** One RPC result, or the reason the call could not be made. */
@@ -143,15 +241,17 @@ async function call(
  * @param options.botId - the bound bot.
  * @param options.workspace - the digital human's Workspace, if it has one.
  * @param options.presetId - the digital human's preset id.
+ * @param options.owner - the claimed owner, injected into the source block.
  * @param options.log - sink for the per-endpoint outcome.
  * @returns one result per attempted endpoint.
  */
 export async function syncBotToHuman(
   ctx: Ctx,
-  { botId, workspace, presetId, log = () => {} }: {
+  { botId, workspace, presetId, owner, log = () => {} }: {
     botId?: string
     workspace?: string
     presetId?: string
+    owner?: string
     log?: (message: string) => void
   },
 ): Promise<ImSyncResult[]> {
@@ -174,7 +274,7 @@ export async function syncBotToHuman(
   if (presetId) results.push(await call(handler, namespace, SET_PRESET, { botId, agentPreset: presetId }))
   // Always on: a persona that classifies callers is useless without knowing who
   // is writing, and the block is off by default.
-  results.push(await call(handler, namespace, SET_CONTEXT, { botId, config: contextConfig() }))
+  results.push(await call(handler, namespace, SET_CONTEXT, { botId, config: contextConfig(owner) }))
   for (const result of results) {
     log(result.ok
       ? `aligned ${botId}: ${result.endpoint}`

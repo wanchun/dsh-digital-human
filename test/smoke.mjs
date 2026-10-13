@@ -5,11 +5,12 @@
  *   node test/smoke.mjs
  */
 
+import { readFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HumanStore, normalizeHuman } from '../build/host/lib/store.js'
-import { buildPresetDefinition, presetIdOf } from '../build/host/lib/presets.js'
+import { buildPresetDefinition, builtinConfig, effectiveConfig, neutralizePlaceholders, presetIdOf, renderConfigBlock, resolveConfig, resolveConfigValues } from '../build/host/lib/presets.js'
 import { SEED_HUMANS } from '../build/host/lib/seed.js'
 
 const home = await mkdtemp(join(tmpdir(), 'dh-'))
@@ -156,6 +157,193 @@ for (const group of groups) {
 check('every row names a plugin or is a group', rows.every((row) => row.group === true || typeof row.name === 'string'))
 check('only the platform-conditional shells are disabled', rows.every((row) => row.disabled !== true
   || row.id === 'tool-bash' || row.id === 'tool-pwsh'))
+
+console.log('7) the config bag and its placeholders')
+{
+  // A persona names its own keys — a team name, the lead's name and honorific —
+  // so the bag is free-form. What matters is that "unset" stays distinguishable
+  // from "set to empty", because that is the difference a persona's fallback rule
+  // turns on.
+  const kept = normalizeHuman({
+    id: 'cfg-one',
+    name: 'Cfg',
+    config: { team_name: ' TCTP开发一室 ', leader_name: '万纯', blank: '   ', '': 'orphan' },
+  })
+  check('config is kept', kept.config?.team_name === 'TCTP开发一室', JSON.stringify(kept.config))
+  check('values are trimmed', kept.config?.leader_name === '万纯')
+  check('an empty value is dropped', kept.config?.blank === undefined)
+  check('a key with no name is dropped', Object.keys(kept.config ?? {}).length === 2)
+  check('a record without config has none', normalizeHuman({ id: 'cfg-two', name: 'No' }).config === undefined)
+  check('an all-empty config is dropped', normalizeHuman({ id: 'cfg-three', name: 'E', config: { a: '' } }).config === undefined)
+  check('a non-object config is rejected',
+    await Promise.resolve().then(() => normalizeHuman({ id: 'cfg-four', name: 'B', config: 'nope' })).then(() => false, () => true))
+
+  // Only configured names are replaced, so a platform variable survives.
+  check('a configured placeholder is replaced',
+    resolveConfig('组长为 {{leader_name}}。', { leader_name: '万纯' }) === '组长为 万纯。')
+  check('spacing inside the braces is tolerated',
+    resolveConfig('{{ leader_name }}', { leader_name: '万纯' }) === '万纯')
+  check('an unconfigured placeholder is left alone',
+    resolveConfig('{{cwd}} 与 {{leader_name}}', { leader_name: '万纯' }) === '{{cwd}} 与 万纯')
+  check('a platform variable survives untouched', resolveConfig('{{cwd}}', { leader_name: '万纯' }) === '{{cwd}}')
+  check('no config means no rewriting', resolveConfig('{{a}}', undefined) === '{{a}}')
+
+  // The declaration is authoritative, so a key the record declares but leaves
+  // empty is reported — while a placeholder the prose merely mentions is not,
+  // which is what keeps a platform variable like {{cwd}} out of the report.
+  const block = renderConfigBlock({
+    systemPrompt: '称呼 {{leader_name}}，通知 {{leader_chatid}}。',
+    config: { leader_name: '万纯' },
+    configSchema: [{ key: 'leader_name' }, { key: 'leader_chatid' }],
+  }).join('\n')
+  check('the block states the actual value', block.includes('| `leader_name` | 万纯 |'), block.slice(0, 200))
+  check('the block names the unset declared key', block.includes('leader_chatid'))
+  check('the block calls the unset ones unconfigured', block.includes('未配置'))
+
+  const built = buildPresetDefinition(
+    normalizeHuman({ id: 'cfg-five', name: 'Cfg', systemPrompt: '组长 {{leader_name}}。', config: { leader_name: '万纯' } }),
+    { store, toolsPluginName: '@local/dsh-digital-human/tools', order: 900 },
+  )
+  const prefix = built.plugins[0].config.prefix
+  check('the persona prefix carries the resolved value', prefix.includes('组长 万纯。'))
+  check('the placeholder itself is gone', !prefix.includes('{{leader_name}}'))
+  check('the platform suffix variable is untouched', built.plugins[0].config.suffix.includes('{{cwd}}'))
+  check('the prefix carries the config block', prefix.includes('## 配置（实际值）'))
+}
+
+console.log('8) platform facts are offered under generic names')
+{
+  // These names are general concepts, not one persona's vocabulary: a record maps
+  // its own key onto one of them, so the plugin never recognises a business key.
+  const owned = normalizeHuman({
+    id: 'own-one',
+    name: '研发PM助手',
+    systemPrompt: '通知 {{leader_chatid}}。',
+    peers: ['dev-assistant'],
+    im: { botId: 'wecom_1', owner: 'wohR_KCgAANNc-oBb9OpaqueIdValueHere' },
+  })
+  const facts = builtinConfig(owned, { 'dev-assistant': '开发助手' })
+  check('the record names itself', facts.self_name === '研发PM助手' && facts.self_id === 'own-one', JSON.stringify(facts))
+  check('the owner yields both id and address',
+    facts.owner_id === 'wohR_KCgAANNc-oBb9OpaqueIdValueHere' && facts.owner_chat === facts.owner_id)
+  check('the peer yields both id and name', facts.peer_id === 'dev-assistant' && facts.peer_name === '开发助手')
+  check('no owner yields no owner facts', builtinConfig({ im: { botId: 'x' } }).owner_chat === undefined)
+  check('an unresolvable peer yields no peer facts',
+    builtinConfig(normalizeHuman({ id: 'p', name: 'P', peers: ['gone'] })).peer_name === undefined)
+  check('a fact resolves without any declaration',
+    resolveConfig('通知 {{owner_chat}}', effectiveConfig(owned)) === '通知 wohR_KCgAANNc-oBb9OpaqueIdValueHere')
+}
+
+console.log('9) a declared schema decides what a persona sees')
+{
+  const declared = normalizeHuman({
+    id: 'schema-one',
+    name: '研发PM助手',
+    systemPrompt: '你是「{{bot_name}}」，{{team_name}} 的一员。通知组长用 {{leader_chatid}}。',
+    peers: ['dev-assistant'],
+    im: { botId: 'wecom_1', owner: 'wohR_owner' },
+    config: { team_name: 'TCTP开发一室', stale_key: 'should not leak' },
+    configSchema: [
+      { key: 'team_name', label: '团队名称', type: 'text' },
+      { key: 'bot_name', from: 'self_name' },
+      { key: 'peer_name', from: 'peer_name' },
+      { key: 'leader_chatid', from: 'owner_chat' },
+      { key: 'e2e_dir', default: 'docs/end-to-end' },
+      { key: 'default_project', type: 'select', options: [{ label: '不指定', value: 'none' }] },
+    ],
+  })
+  const peerNames = { 'dev-assistant': '开发助手' }
+  const { values, sources } = resolveConfigValues(declared, peerNames)
+  check('a declared key takes the configured value', values.team_name === 'TCTP开发一室' && sources.team_name === '配置')
+  check('a declared fact resolves', values.bot_name === '研发PM助手' && sources.bot_name === '自动')
+  check('a peer fact resolves from the registry', values.peer_name === '开发助手')
+  check('the owner address resolves', values.leader_chatid === 'wohR_owner')
+  check('a declared default is used', values.e2e_dir === 'docs/end-to-end' && sources.e2e_dir === '默认')
+  check('an undeclared key never leaks into the prompt', values.stale_key === undefined, JSON.stringify(values))
+  check('an unfilled optional key is reported as unconfigured', sources.default_project === '未配置')
+  check('a fact the schema omits is not offered', values.self_id === undefined)
+
+  const overridden = normalizeHuman({
+    id: 'schema-two',
+    name: 'X',
+    im: { botId: 'wecom_1', owner: 'wohR_owner' },
+    config: { leader_chatid: 'explicit-target' },
+    configSchema: [{ key: 'leader_chatid', from: 'owner_chat' }],
+  })
+  check('an explicit value wins over the fact', effectiveConfig(overridden).leader_chatid === 'explicit-target')
+
+  const block = renderConfigBlock(declared, peerNames).join('\n')
+  check('the block states a configured value', block.includes('| `team_name` | TCTP开发一室 | 配置 |'))
+  check('the block states an automatic value', block.includes('| `bot_name` | 研发PM助手 | 自动 |'))
+  check('the block states a default', block.includes('| `e2e_dir` | docs/end-to-end | 默认 |'))
+  check('the block names what is still unconfigured', block.includes('default_project') && block.includes('未配置'))
+  check('the block never leaks an undeclared key', !block.includes('stale_key'))
+
+  const built = buildPresetDefinition(declared, {
+    store, toolsPluginName: '@local/dsh-digital-human/tools', order: 901, peerNames,
+  })
+  const prefix = built.plugins[0].config.prefix
+  check('the prose carries the resolved values',
+    prefix.includes('你是「研发PM助手」，TCTP开发一室 的一员。'), prefix.slice(0, 90))
+  check('no declared placeholder survives', !/\{\{(team_name|bot_name|peer_name|leader_chatid)\}\}/.test(prefix))
+  check('the platform suffix variable is untouched', built.plugins[0].config.suffix.includes('{{cwd}}'))
+}
+
+console.log('10) an invalid declaration is refused, not ignored')
+{
+  const bad = (schema) => normalizeHuman({ id: 'bad-one', name: 'B', configSchema: schema })
+  const refuses = (fn) => { try { fn(); return false } catch { return true } }
+  check('a non-array schema is refused', refuses(() => bad('nope')))
+  check('a field with no key is refused', refuses(() => bad([{ label: 'x' }])))
+  check('an unknown type is refused', refuses(() => bad([{ key: 'a', type: 'color' }])))
+  check('an unknown source is refused', refuses(() => bad([{ key: 'a', from: 'owner_email' }])))
+  check('a malformed option is refused', refuses(() => bad([{ key: 'a', options: [{ label: 'x' }] }])))
+  check('a valid field is kept', bad([{ key: 'a', type: 'select', options: [{ label: 'A', value: 'a' }] }]).configSchema.length === 1)
+  // Hidden is presentation only: the field must still resolve and reach the prompt.
+  const hidden = normalizeHuman({
+    id: 'hidden-one',
+    name: 'H',
+    im: { botId: 'wecom_1', owner: 'wohR_owner' },
+    configSchema: [{ key: 'owner_where', from: 'owner_chat', hidden: true }],
+  })
+  check('a hidden field is recorded', hidden.configSchema[0].hidden === true)
+  check('a hidden field still resolves', effectiveConfig(hidden).owner_where === 'wohR_owner')
+  check('a hidden field still reaches the block', renderConfigBlock(hidden).join('\n').includes('owner_where'))
+  check('hidden is opt-in', normalizeHuman({ id: 'h2', name: 'H', configSchema: [{ key: 'a' }] }).configSchema[0].hidden === undefined)
+}
+
+
+console.log('11) no placeholder survives that the renderer would reject')
+{
+  // The renderer fails the WHOLE turn on a variable it does not know, so one stray
+  // placeholder in a persona costs a session. A visible marker is the right trade.
+  check('a registered variable survives', neutralizePlaceholders('dir {{cwd}}') === 'dir {{cwd}}')
+  check('every registered name survives',
+    neutralizePlaceholders('{{provider}} {{model}} {{cwd}}') === '{{provider}} {{model}} {{cwd}}')
+  check('an unknown name becomes a marker', neutralizePlaceholders('{{nope}}') === '〔未配置：nope〕')
+  // A Chinese name is what a hand-written example looks like, and it is exactly
+  // what a persona author writes without meaning it as a variable.
+  check('a non-ASCII name is neutralised too', neutralizePlaceholders('{{名称}}') === '〔未配置：名称〕')
+  check('surrounding text is kept', neutralizePlaceholders('用 {{x}} 表示') === '用 〔未配置：x〕 表示')
+  check('a deployment can extend the set',
+    neutralizePlaceholders('{{tenant}}', ['cwd', 'tenant']) === '{{tenant}}')
+  check('an empty or missing text is safe',
+    neutralizePlaceholders(undefined) === '' && neutralizePlaceholders('') === '')
+
+  // And the assembled prompt must be clean for every real record.
+  const humans = JSON.parse(readFileSync('/Users/harrywan/.dsh/digital-human/humans.json', 'utf8'))
+  const peerNames = Object.fromEntries(humans.map((entry) => [entry.id, entry.name]))
+  for (const human of humans) {
+    const config = buildPresetDefinition(normalizeHuman(human), {
+      store, toolsPluginName: '@local/dsh-digital-human/tools', order: 902, peerNames,
+    }).plugins[0].config
+    const left = (config.prefix + config.suffix).match(/\{\{[^}]*\}\}/g) ?? []
+    check(`${human.id} leaves only platform variables`,
+      left.every((token) => ['{{provider}}', '{{model}}', '{{cwd}}'].includes(token)), left.join(' '))
+    check(`${human.id} resolves every declared field`,
+      !left.some((token) => token.includes('team_name') || token.includes('peer_name') || token.includes('bot_name')))
+  }
+}
 
 await rm(home, { recursive: true, force: true })
 console.log(`\n${pass} passed, ${fail} failed`)

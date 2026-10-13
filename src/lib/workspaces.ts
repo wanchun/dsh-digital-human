@@ -22,14 +22,21 @@ export function defaultWorkspacePath(home) {
   return join(home, 'workspace')
 }
 
+/** How long to wait for the roster's first frame before giving up. */
+const ROSTER_TIMEOUT_MS = 5000
+
 /**
  * Read the Workspace roster. `follow` is a live stream whose first frame is a
  * complete baseline, so one frame is enough and the stream is then aborted.
  */
-export async function listWorkspaces(ctx) {
+export async function listWorkspaces(ctx, { timeoutMs = ROSTER_TIMEOUT_MS } = {}) {
   const controller = ctx.get?.('workspaceController')
   if (!controller || typeof controller.follow !== 'function') return []
   const abort = new AbortController()
+  // A stream that never emits its baseline would hold activation open forever, and
+  // a hang is worse than an empty roster: the caller logs and carries on.
+  const timer = setTimeout(() => abort.abort(), timeoutMs)
+  if (typeof timer.unref === 'function') timer.unref()
   try {
     for await (const frame of controller.follow(abort.signal)) {
       if (frame?.type !== 'baseline') continue
@@ -40,6 +47,7 @@ export async function listWorkspaces(ctx) {
   } catch {
     return []
   } finally {
+    clearTimeout(timer)
     abort.abort()
   }
 }
@@ -63,8 +71,15 @@ export async function ensureDefaultWorkspace(
     const workspace = created?.workspace
     if (!workspace) return undefined
     if (workspace.title === DEFAULT_WORKSPACE_TITLE || typeof controller.rename !== 'function') return workspace
-    const renamed = await controller.rename({ workspaceId: workspace.workspaceId, title: DEFAULT_WORKSPACE_TITLE })
-    return renamed?.workspace ?? workspace
+    try {
+      const renamed = await controller.rename({ workspaceId: workspace.workspaceId, title: DEFAULT_WORKSPACE_TITLE })
+      return renamed?.workspace ?? workspace
+    } catch (error) {
+      // The workspace exists and works; only its title is wrong. Discarding it here
+      // would leave the platform with no default workspace at all.
+      log(`default workspace "${DEFAULT_WORKSPACE_TITLE}" could not be renamed: ${error.message}`)
+      return workspace
+    }
   } catch (error) {
     log(`default workspace "${DEFAULT_WORKSPACE_TITLE}" unavailable: ${error.message}`)
     return undefined
@@ -92,13 +107,18 @@ export async function readBotMeta(dshRoot = join(homedir(), '.dsh')) {
   }
   // Every IM channel keeps its bots under its own `dsh-<channel>` directory, so
   // scan them all instead of naming one. A new channel is picked up for free.
+  // A plain object or nothing: spreading a string would turn it into an index map
+  // (`{0: 'n', 1: 'o'}`), which then reads as a bot named "0".
+  const asMap = (value: unknown): Record<string, unknown> => (
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  )
   for (const entry of entries) {
     try {
       const parsed = JSON.parse(await readFile(join(root, entry, 'workspaces.json'), 'utf8'))
-      for (const [botId, value] of Object.entries(parsed?.aliases ?? {})) {
+      for (const [botId, value] of Object.entries(asMap(parsed?.aliases))) {
         if (typeof value === 'string') aliases[botId] = value
       }
-      for (const [botId, value] of Object.entries(parsed?.workspaces ?? {})) {
+      for (const [botId, value] of Object.entries(asMap(parsed?.workspaces))) {
         if (typeof value === 'string') workspaces[botId] = value
       }
     } catch {

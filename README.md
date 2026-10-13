@@ -1,118 +1,231 @@
-# @local/dsh-digital-human
+# @harrywan/dsh-digital-human
 
 给 DeepSeek Harness 用的**可配置数字人**平台。
 
-数字人不是写死的两个实体，而是**一份注册表里的记录**。插件把每条启用的记录变成
-一个实时的 Agent preset（`dh-<id>`），所以新增、修改、停用、删除数字人都不需要改 YAML。
+数字人不是写死的实体，而是**一份注册表里的记录**。插件把每条启用的记录变成一个实时的
+Agent preset（`dh-<id>`），所以新增、修改、停用、删除数字人都**不需要改 YAML**。
 
-设计照搬 Halo 数字人的分层，但用 Harness 原生能力重建。
+## 设计
 
-## 它解决什么
+### 两个半
 
-Halo 里每个数字人有两套独立系统：Chat 系统（数字人之间互发消息）和执行系统（定时/手动触发）。
-本插件把两者都映射到 Harness 原生能力上：
+```
+┌─ 宿主行（src/index.ts，平台级，只挂一次）
+│    注册 preset · 提供 digitalHumans 服务 · 管 RPC · 订阅会话事件
+│    对齐 IM · 认领负责人 · 设权限 · 导入导出
+│
+├─ 预设行（src/tools.ts，每个数字人挂一次）
+│    注册该数字人的工具 · 注入记忆 · 挂载它的技能
+│
+└─ 浏览器半（src/client.tsx）
+     侧栏入口 + 主列配置页
+```
+
+预设行是「每个数字人一份」的，所以工具天然知道「我是谁」，不需要模型自报身份。
+
+### 核心概念
+
+| 概念 | 是什么 |
+| --- | --- |
+| **数字人记录** | `humans.json` 里的一条：id、名字、人设、工作区、同伴、IM bot、配置声明、技能 |
+| **Preset** | `dh-<id>`，由记录生成：baseline 行 + persona + 该数字人的工具行 |
+| **会话** | DSH 的 Session，一个数字人可以有很多条 |
+| **地址** | 发消息时指定的目标：**会话名**（线程名，如需求 slug）或**会话 id**（`session-…`） |
+
+### 配置 → persona
+
+记录里写 `systemPrompt`（人设），其中用 `{{键名}}` 占位。`configSchema` 声明这些键：
+类型（text/number/boolean/select）、来源（平台事实/默认值）、是否隐藏。
+
+渲染时按 **配置 > 平台事实 > 默认值** 取值，只替换**声明的**键；未解析的占位符变成
+`〔未配置：键〕`，防止整轮崩。
+
+**六个通用事实**：`self_name` `self_id` `owner_id` `owner_chat` `peer_name` `peer_id`。
+
+### 与 IM 的绑定与对齐
+
+把记录推给绑定的 bot（`bot.workspace.set`、`bot.preset.set`、`bot.context-enhancement.set`），
+并注入来源块与负责人身份。启动时对齐所有绑定的 bot；失败就重试
+（`alignRetryMs` / `alignRetryMax`），因为漏推是静默的。
+
+### 数字人之间通讯
+
+- 工具：`digital_human_send` / `_status` / `_stop` / `_messages` / `_conversations` / `_list`
+- **寻址**：传地址 → 表里有就**沿用**那条会话（按 id「收养」，归档/闲置的也能续上）；
+  没传或找不到 → 新建；**两个地址都不传 → 报错**，不给静默的 `main` 桶
+- **消息头**带发送方身份与会话 id：
+
+  ```
+  <dsh_peer_source from="pm-assistant" session="session-…" conversation="rtcpc-…" />
+  ```
+
+  接收方按 `session` 回，**活是谁派的就回给谁**
+- **信箱**：每个数字人一份 append-only JSONL，按**会话 id** 记账（旧文件自动迁移）
+
+### 记忆
+
+每个数字人一份 `memory.md`：`# now`（工作记忆，每轮注入）+ `# History`（时间线）。
+超过 100KB 提示压缩：归档到 `memory/<时间戳>.md` 并重建。
+工具：`memory_status`（看结构）、`memory_compact`（归档）。
+
+### 技能空间
+
+技能分两层，互不干扰：
+
+```
+全局 ~/.agents/skills/  ─┐
+项目目录的 skills/       ─┼─→  每个数字人默认加载，不用配置
+bundled 内置技能        ─┘
+
+插件技能空间            ──→  只有记录里勾选的才挂给这个数字人
+~/.dsh/digital-human/skills/
+```
+
+- 挂在 `~/.dsh/digital-human/skills/<名字>/SKILL.md`（+ `references/` 等资源）
+- 通过**预设作用域**的 `ctx.skills.register` 注册 —— 只对该数字人可见，
+  不碰全局目录，也不用符号链接
+- runtime 注册**压过** user（全局）同名技能，所以私有技能能覆盖全局的
+- 界面可**上传**（选目录，保留相对路径）、**勾选**启用、**移除**
+- 缺 `SKILL.md` 的目录照样列出（上传出错要看得见）；路径逃逸、超 2000 文件/32MB 会被拒
+
+### 导入导出
+
+一个数字人 = 一个 `.tar.gz` 包：
+
+```
+pm-assistant-202610131954.dh.tar.gz
+├── manifest.json      格式版本、导出时间、id、带了哪些技能
+├── human.json         记录（剥掉本机字段）
+├── memory.md          可选
+└── skills/<名字>/…    勾选的那些技能，原样目录树
+```
+
+- **tar 容器手写 + 内置 `zlib.gzipSync`** —— 插件零运行时依赖
+- 二进制安全；`tar tzf` 能直接看内容 —— **导入等于接受别人的提示词，先看得见很重要**
+- 长路径用 tar 的 `prefix` 字段承载，超长**拒绝**而不是截断
+- 符号链接/设备条目**跳过不跟随**
+- 导出**剥掉** `im.botId` / `im.targetId` / `im.owner`（都指向本机）
+- 两个二进制端点，浏览器就是普通下载/上传，不走 base64：
+
+  ```
+  GET  /api/digital-human/bundle/<id>    导出
+  POST /api/digital-human/bundle         导入（?preview=1 只读预览，?id= 换 id）
+  ```
+
+### 工具清单
+
+| 工具 | 作用 | 注册范围 |
+| --- | --- | --- |
+| `digital_human_send` | 给同伴发消息并起一轮 | 预设内 |
+| `digital_human_status` | 同伴在干活吗 | 预设内 |
+| `digital_human_stop` | 中止同伴的那一轮 | 预设内 |
+| `digital_human_messages` | 读同伴回复 | 预设内 |
+| `digital_human_conversations` | 列出与同伴的两种地址 | 预设内 |
+| `digital_human_list` | 列出所有数字人 | 预设内 |
+| `notify_bot` | 给人发 IM（只认目标名，不认 chatId） | 预设内 |
+| `list_bot_targets` | 列出可投递目标 | 预设内 |
+| `memory_status` / `memory_compact` | 记忆结构 / 压缩 | 预设内 |
+| `digital_human` | 注册表增删改查 | 全局 |
+
+### 宿主能力
+
+- **RPC**（一条 `/api/digital-human` 精确路由）：`registry.list/get/save/remove`、
+  `im.bots`、`im.targets`、`skills.list`、`skills.library/upload/remove`、
+  `workspaces.list`、`permissions.list`
+- **订阅事件**：`session/created`（上权限、重试对齐）、`session/event`（记信箱、识别 preset 切换）、
+  `session/disposed`（清理）
+- **读的服务**（都可选，缺了就降级）：`permissionPresets`、`workspaceController`、`dshIm`、
+  `skills`、`connection`
+
+### 配置界面
+
+一个入口：侧栏「数字人」→ 主列全高配置页。字段由记录自己的 `configSchema` 驱动。
+
+- 按类型渲染控件；声明 `from` 的是平台事实，只读且**不回显实际值**
+- `hidden: true` 的不显示（仍解析、仍进提示词）
+- 未声明的键单独一块「未声明」，可移除
+- 没声明 schema 的记录退回「名称 + 值」行编辑器
+- 保存是 partial merge，**不发送页面看不到的东西**（如 `targetId`）
+- 侧载失败会说明「读取失败」，而不是假装「空」
+
+### 落盘布局
+
+```
+~/.dsh/digital-human/
+├── humans.json                    注册表（记录 + 配置声明）
+├── skills/                        插件技能空间
+├── humans/<id>/
+│   ├── memory.md                  记忆（# now + # History）
+│   ├── sessions.json              地址 → 会话 id
+│   └── conversations/<地址>.jsonl  信箱
+└── workspace/                     数字人共享的工作区
+```
+
+### 插件配置项
+
+`home` · `seed` · `basePreset` · `toolsPluginName` · `permissionPreset` ·
+`platformVariables` · `alignRetryMs` · `alignRetryMax`
+
+`seed` 默认 **false**：全新安装从**空注册表**开始，数字人由你在页面上配，或导入一个包。
+插件不替谁决定业务人设。
+
+### 通用性
+
+| 设计 | 效果 |
+| --- | --- |
+| 配置词汇只有 **6 个平台事实** | 插件里**没有**任何业务键名 |
+| 业务键名由记录自己的 `configSchema` 声明 | 换一套人设不用改插件 |
+| IM 通道从 botId 前缀推导（`dsh-<channel>`） | 换通道不用改插件 |
+| 权限预设从宿主 `permissions.list` 读 | 平台改名/新增自动跟上 |
+| 工作区名册、技能目录、bot 列表都问宿主 | 同上 |
+| 自带文案只讲机制，不讲业务规则 | 一份插件适配任意团队 |
+| 目标名只用 IM 插件报出来的 | 不猜 id |
+
+### 测试
+
+```
+单测 519 项（vitest，17 个文件）      行 98.8%  分支 90.1%
+集成 410 项（6 个 .mjs，跑编译产物）  语句 97.4%  函数 96.3%
+零运行时依赖（只用 node 内置）
+```
+
+### 已知限制
+
+1. 同伴触发的 turn 会不会自动推到 IM 群，未验证 —— 目前靠主动 `notify_bot`
+2. IM 插件只能对「已经跟它说过话的会话」主动发 —— 新群/新联系人要先有入站消息
+3. 已存在的未分组会话补不回来 —— DSH 没有把旧会话登记进工作区的接口
+4. 归档的会话收到消息会被 DSH 拦下（`blocked`）—— 映射不能指向归档会话
+5. 会话改不了预设或目录 —— 记录改了这两样，那条会话只能重开（插件会写日志说明）
+6. 技能空间只收文本 —— 二进制资源要等 zip 方案
+
+## 参考借鉴 Halo
+
+分层思路参考了 Halo 数字人（记录/预设分离、会话隔离、持久信箱、记忆分 `# now` 与历史），
+并用 Harness 原生能力重建：
 
 | Halo | 本插件 |
 | --- | --- |
-| Chat 系统 `/chat/send` `/chat/status` `/chat/messages` `/chat/stop` | `sessionController` + 每个会话一份持久化信箱 |
-| `conversationId` 隔离 | 一个 `(数字人, conversationId)` 对应一个持久 Session |
-| 执行系统 `/trigger` `/state` | 官方 `@deepseek-ai/dsh-schedule`（`schedule_*` 工具） |
+| Chat 系统 `/chat/send` 等 | `sessionController` + 每个会话一份持久化信箱 |
+| `conversationId` 隔离 | 一个 `(数字人, 地址)` 对应一个持久 Session |
+| 执行系统 `/trigger` | 官方 `@deepseek-ai/dsh-schedule` |
 | `notify_bot` 推企微 | 绑定到该数字人的 IM bot，走 `dshIm.send` |
-| `platform/memory` app scope | 每个数字人一份 `memory.md`，`# now` 每次组装预载 |
+| `platform/memory` app scope | 每个数字人一份 `memory.md`，`# now` 每轮预载 |
 
-## 目录结构
-
-```
-index.js              宿主平台行：注册表、preset 生成、会话事件镜像
-tools.js              preset 作用域行：每个数字人自己的工具面
-client.js             客户端半：Web 设置页 + 侧栏面板
-lib/store.js          注册表读写与校验
-lib/chat.js           Chat 系统：Session 生命周期 + 信箱
-lib/memory.js         持久记忆：# now / # History、快照、归档压缩
-lib/presets.js        记录 -> Agent preset 投影
-lib/tools.js          模型可见的工具定义
-lib/rpc.js            管理通道：宿主 ctx.connection.fetch.register
-lib/seed.js           首次启动的种子数字人（开发助手 / 研发PM助手）
-test/                 四套离线测试，不需要跑 Harness
-```
-
-## 注册表
-
-默认位置 `~/.dsh/digital-human/humans.json`（`home` 配置项可改）。一条记录：
-
-```jsonc
-{
-  "id": "pm-assistant",              // slug，preset 名为 dh-pm-assistant
-  "name": "研发PM助手",
-  "description": "一句话角色说明",
-  "enabled": true,
-  "systemPrompt": "你是……",          // 成为 preset 的 persona 前缀
-  "workspace": "/path/to/repo",      // 它的会话工作目录
-  "skills": ["qs-assistant"],        // 额外挂载的技能目录
-  "peers": ["dev-assistant"],        // 它可以发消息的数字人
-  "im": { "botId": "", "targetId": "" },
-  "subscriptions": [                 // 声明的唤醒时机（提示模型去建 schedule）
-    { "cron": "0 22 * * *", "prompt": "汇总今日进展", "enabled": true }
-  ],
-  "memory": true,
-  "escalation": { "enabled": false, "timeoutHours": 24 }
-}
-```
-
-修改注册表后调用 `digital_human` 工具的 `update`，或重启，preset 会重新注册。
-
-## 工具
-
-每个数字人在自己的 preset 作用域里拿到：
-
-- `digital_human_send` — 给另一个数字人发消息并触发它的一轮工作（异步，像派活）。
-- `digital_human_status` — 对方那一轮跑完没有。
-- `digital_human_messages` — 读回信。
-- `digital_human_list` — 我能联系到谁。
-- `notify_bot` — 通过绑定到我的 IM bot 推消息给人（仅文本；要发文件/图片/@ 用 `tctp-send` 技能）。
-- `list_bot_targets` — 这个 bot 能发给谁。
-- `memory_status` / `memory_compact` — 记忆的结构与归档。
-
-全局只有一个：
-
-- `digital_human` — 注册表增删改查（`list|show|create|update|remove`）。
-
-## 记忆
-
-每个数字人一份 `memory.md`，分 `# now`（工作记忆）和 `# History`（时间线，新的在上）。
-
-- `# now` 在**每次组装**时预载进提示，所以模型一上来就知道自己的状态，不用先读文件。
-- 模型用普通的 Edit/Write 改记忆，只有结构性元数据是工具（`memory_status`）。
-- 超过 100KB 时归档到 `memory/<时间戳>.md` 并重建。
-
-## 测试
-
-```bash
-node test/smoke.mjs    # 注册表校验 + preset 投影          34 项
-node test/memory.mjs   # 记忆：# now 解析、快照、归档压缩   30 项
-node test/apply.mjs    # 用 stub context 跑真实的 apply()，端到端   65 项
-node test/wiring.mjs   # 管理 RPC 路由 + 客户端槽位注册      41 项
-```
-
-四套都不需要运行 Harness。
-
-## 配置界面
-
-设置面板里有一页「数字人」（排在 IM 设置之后），侧栏也有一条同名入口（排在「定时」之后，
-点开是主列的全高配置页）。两边是同一份数据、同一组操作：列表、新建、编辑、删除、刷新。
-
-字段：id、显示名称、说明、人设、工作目录、技能目录、可联系的数字人、绑定的 IM bot、
-默认推送目标、启用、持久记忆。bot 和目标是从 `dshIm` 实时读出来的下拉框。
-
-数据通路是宿主 `ctx.connection.fetch.register` 注册一条 `/api/digital-human` 精确路由，
-客户端用 `connection.rpc.call('/api', 'digital-human', {method, payload})` 调它。
-这条路走 DSH 自己的浏览器鉴权与 Host/Origin 校验，所以不需要额外做认证。
-
-设置页和会话里的 `digital_human` 工具调的是同一个 service，所以界面和对话不会各说各话。
+Halo 的业务人设（开发助手 / 研发PM助手）曾作为种子随插件发布，现已**默认关闭**：
+插件只提供机制，业务规则由记录承载。
 
 ## 安装
 
-用 `plugin_manager` 的 `install_bundle`，目标是本目录的绝对路径。
-本包**不导入任何外部依赖**（只用 node 内置模块），因为 profile 的依赖树不归它所有。
+```bash
+# 1. 把本目录链进 profile
+ln -sfn /path/to/dsh-plugins/digital-human \
+  ~/.dsh/profiles/web/node_modules/@harrywan/dsh-digital-human
 
-装完需要**重启 `dsh web`**：bundle 列表在启动时组装。
+# 2. 在 profile 的 cordis.patch.yml 里启用
+#    - id: digital-human
+#      disabled: false
+
+# 3. 重启 dsh web
+```
+
+改完 `src/client.tsx` 只需 `npm run build` + 刷新页面；改宿主侧要重启。

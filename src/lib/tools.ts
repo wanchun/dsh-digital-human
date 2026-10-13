@@ -35,6 +35,45 @@ async function resolvePeer(service, self, reference) {
   return peer
 }
 
+/**
+ * The Session the current tool call runs in.
+ *
+ * The Host stamps every execution with the Agent on whose behalf it runs, so a
+ * digital human can report its own Session to its peer without being able to see
+ * its own id — which no part of the prompt carries.
+ */
+function callerSession(exec) {
+  const id = exec?.agent?.session?.header?.id
+  return typeof id === 'string' && id ? id : undefined
+}
+
+/** What to do when a bot reports no addressable target. */
+const WAIT_FOR_TARGET =
+  'A target appears once the channel has seen a message from it, and the IM settings can name one; '
+  + 'send to a target this bot reports, never to a chat id.'
+
+/**
+ * Name the targets a bot will accept.
+ *
+ * Read from the IM service, so it is what the channel actually answers to rather
+ * than a guess at its id shape.
+ */
+async function targetHelp(dshIm, botId) {
+  let list
+  try {
+    list = await dshIm.listTargets(botId)
+  } catch {
+    list = undefined
+  }
+  if (!Array.isArray(list) || list.length === 0) {
+    return `Bot ${botId} reports no targets yet. ${WAIT_FOR_TARGET}`
+  }
+  const named = list
+    .map((entry) => `${entry.targetId}${entry.name ? ` (${entry.name})` : ''}`)
+    .join(', ')
+  return `Targets of bot ${botId}: ${named}.`
+}
+
 /** Build the text-block renderer shared by every tool in this module. */
 function renderText(value) {
   return [{ type: 'text', text: typeof value?.detail === 'string' ? value.detail : JSON.stringify(value) }]
@@ -92,7 +131,14 @@ function normalizeTool(definition) {
  * @param options.service - the `digitalHumans` Host service.
  * @param options.humanId - the owning digital human.
  */
-export function buildHumanTools({ ctx, service, humanId }) {
+/**
+ * Build one digital human's tool surface.
+ *
+ * @param options.memory - whether this record keeps a durable memory file. When
+ *   it does not, the memory tools are left out: they would report an absent file
+ *   and offer to archive nothing.
+ */
+export function buildHumanTools({ ctx, service, humanId, memory = true }) {
   const self = () => service.require(humanId)
   const botOf = async () => (await self()).im
 
@@ -105,7 +151,15 @@ export function buildHumanTools({ ctx, service, humanId }) {
     parameters: {
       to: { type: 'string', required: true, description: 'Target digital human id or display name.' },
       message: { type: 'string', required: true, description: 'Message body. State the task, the acceptance criteria, and how to report back.' },
-      conversation_id: CONVERSATION_PARAM,
+      // Required here, unlike on the reading tools: a send with no address would put
+      // every subject into one shared thread.
+      conversation_id: {
+        type: 'string',
+        description: 'Conversation id that isolates one thread, for example a requirement or version name. '
+          + 'Required unless session_id is given.',
+      },
+      // The other form of the same address, for answering the Session that asked.
+      session_id: { type: 'string', description: 'The target Session id to deliver into, as reported by a <dsh_peer_source> block. Use this to answer the Session that asked for the work. One of session_id and conversation_id is required.' },
       wait_seconds: {
         type: 'number',
         description: `Wait up to this many seconds for the target to finish its turn, at most ${WAIT_MAX_SECONDS}. Defaults to 0 (return as soon as the message is accepted).`,
@@ -126,10 +180,30 @@ export function buildHumanTools({ ctx, service, humanId }) {
       },
       render: (_args, value) => renderText(value),
     },
-    async execute(args) {
+    async execute(args, exec) {
       const peer = await resolvePeer(service, await self(), args.to)
       const conversationId = args.conversation_id
-      const delivered = await service.send(peer.id, { conversationId, message: args.message, from: humanId })
+      const sessionId = typeof args.session_id === 'string' ? args.session_id : undefined
+      // Omitting both would pour every subject into one shared `main` thread, which is
+      // silent and permanent. An explicit `conversation_id: "main"` still works; a
+      // missing address does not.
+      if (typeof conversationId !== 'string' && !sessionId) {
+        throw new Error(
+          'conversation_id or session_id is required. A digital human is reached in a named '
+          + 'conversation, and sending without one would put every requirement into the same '
+          + 'shared thread. Use this requirement\'s conversation_id, or the session_id reported '
+          + 'by the <dsh_peer_source> block of the message being answered.',
+        )
+      }
+      const delivered = await service.send(peer.id, {
+        conversationId,
+        sessionId,
+        message: args.message,
+        from: humanId,
+        // Its own Session travels with the message, so the reply can come back to the
+        // Session that asked for the work rather than to a shared thread name.
+        fromSession: callerSession(exec),
+      })
       const wait = Math.min(Math.max(Number(args.wait_seconds) || 0, 0), WAIT_MAX_SECONDS)
       let finished = false
       if (wait > 0) {
@@ -145,9 +219,10 @@ export function buildHumanTools({ ctx, service, humanId }) {
         }
       }
       return {
-        detail: finished
+        detail: (finished
           ? `Delivered to ${peer.name} (${peer.id}) and its turn finished. Read the reply with digital_human_messages.`
-          : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`,
+          : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`)
+          + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`,
         to: peer.id,
         conversationId: delivered.conversationId,
         sessionId: delivered.sessionId,
@@ -266,6 +341,39 @@ export function buildHumanTools({ ctx, service, humanId }) {
     },
   }
 
+  /**
+   * List the conversations already established with one peer.
+   *
+   * Inventing an id splits one subject across two Sessions — two contexts, two
+   * histories, the same work done twice — and a caller that cannot see what exists
+   * has no way to reuse it. This is the lookup that makes reuse possible.
+   */
+  const conversations = {
+    name: 'digital_human_conversations',
+    description:
+      'List the conversation ids already established with another digital human. '
+      + 'Check this before sending: reusing an existing conversation keeps one subject in one context, '
+      + 'while a new id starts a second Session that knows nothing of the first.',
+    parameters: {
+      to: { type: 'string', required: true, description: 'Target digital human id or display name.' },
+    },
+    output: TEXT_OUTPUT,
+    async execute(args) {
+      const peer = await resolvePeer(service, await self(), args.to)
+      const found = await service.chat.addresses(peer.id)
+      if (found.length === 0) {
+        return { detail: `No conversation with ${peer.name} (${peer.id}) yet.` }
+      }
+      return {
+        detail: `${found.length} address(es) for ${peer.name} (${peer.id}). `
+          + 'Send to one of these instead of inventing a new one:\n'
+          + found.map((entry) => (entry.conversationId
+            ? `- ${entry.conversationId} → ${entry.sessionId}`
+            : `- (addressed by Session) ${entry.sessionId}`)).join('\n'),
+      }
+    },
+  }
+
   const roster = {
     name: 'digital_human_list',
     description: 'List every digital human you can reach, with its bound IM bot and default IM target.',
@@ -320,7 +428,14 @@ export function buildHumanTools({ ctx, service, humanId }) {
       if (!targetId) throw new Error('no IM target is configured on you and no to was given')
       const text = String(args.message ?? '').trim()
       if (!text) throw new Error('message must not be empty')
-      await dshIm.send(botId, targetId, text, { format: args.format === 'markdown' ? 'markdown' : 'plain' })
+      try {
+        await dshIm.send(botId, targetId, text, { format: args.format === 'markdown' ? 'markdown' : 'plain' })
+      } catch (error) {
+        // Fail with the options. A bare "Unknown target" leaves the model no way to
+        // learn the right one, and a chat id is not a target: the IM plugin
+        // addresses targets by the names it reports, not by the chat's own id.
+        throw new Error(`${error.message} ${await targetHelp(dshIm, botId)}`)
+      }
       return { detail: `Sent to ${targetId} through bot ${botId}.`, botId, targetId }
     },
   }
@@ -340,7 +455,7 @@ export function buildHumanTools({ ctx, service, humanId }) {
       if (!botId) throw new Error('no IM bot is bound to you and no bot_id was given')
       const list = await dshIm.listTargets(botId)
       if (!Array.isArray(list) || list.length === 0) {
-        return { detail: `Bot ${botId} has no known targets yet. It learns a target after the first inbound message from it.` }
+        return { detail: `Bot ${botId} reports no targets yet. ${WAIT_FOR_TARGET}` }
       }
       const lines = list.map((entry) => `- ${entry.targetId} — ${entry.name ?? entry.targetId} (${entry.kind ?? 'unknown'})`)
       return { detail: `Targets of bot ${botId}:\n${lines.join('\n')}` }
@@ -379,7 +494,9 @@ export function buildHumanTools({ ctx, service, humanId }) {
     },
   }
 
-  return [send, status, stop, messages, roster, notify, targets, memoryStatus, memoryCompact].map(normalizeTool)
+  const tools = [send, status, stop, messages, conversations, roster, notify, targets]
+  if (memory) tools.push(memoryStatus, memoryCompact)
+  return tools.map(normalizeTool)
 }
 
 /**
