@@ -8,7 +8,7 @@
  */
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type { Human, HumanPatch } from './types.js'
@@ -94,6 +94,8 @@ export class HumanStore {
   #home
   #file
   #cache
+  /** Modification time of the file behind {@link #cache}. */
+  #cachedAt
 
   constructor(home: string) {
     this.#home = home
@@ -132,13 +134,31 @@ export class HumanStore {
     await mkdir(path, { recursive: true })
   }
 
-  /** Read the registry, creating it from `seed` on first use. */
+  /** The file's modification time, or undefined when it is absent. */
+  #mtime(): number | undefined {
+    try {
+      return statSync(this.#file).mtimeMs
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Read the registry, creating it from `seed` on first use.
+   *
+   * The cache is keyed to the file's modification time rather than held
+   * forever. `humans.json` is a plain JSON file that people edit by hand, and a
+   * permanent cache both hides those edits and lets the next save overwrite
+   * them from the stale copy.
+   */
   async load(seed: Human[] = []): Promise<Human[]> {
-    if (this.#cache) return this.#cache
-    if (!existsSync(this.#file)) {
+    const stamp = this.#mtime()
+    if (this.#cache && stamp !== undefined && stamp === this.#cachedAt) return this.#cache
+    if (stamp === undefined) {
       const records = seed.map((entry) => normalizeHuman(entry))
       await this.write(records)
       this.#cache = records
+      this.#cachedAt = this.#mtime()
       return records
     }
     const raw = await readFile(this.#file, 'utf8')
@@ -146,6 +166,8 @@ export class HumanStore {
     if (!Array.isArray(parsed)) throw new Error(`${this.#file} must hold a JSON array`)
     const records = parsed.map((entry) => normalizeHuman(entry, entry?.createdAt))
     this.#cache = records
+    this.#cachedAt = this.#mtime()
+    this.#cachedAt = stamp
     return records
   }
 
@@ -156,6 +178,7 @@ export class HumanStore {
     await writeFile(temp, `${JSON.stringify(records, null, 2)}\n`, 'utf8')
     await rename(temp, this.#file)
     this.#cache = records
+    this.#cachedAt = this.#mtime()
     return records
   }
 

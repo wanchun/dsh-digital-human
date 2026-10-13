@@ -5,7 +5,7 @@
  *   node test/smoke.mjs
  */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HumanStore, normalizeHuman } from '../build/host/lib/store.js'
@@ -32,6 +32,27 @@ check('two humans seeded', seeded.length === 2, JSON.stringify(seeded.map((h) =>
 check('file written', (await readFile(store.file, 'utf8')).includes('dev-assistant'))
 
 console.log('2) normalization')
+// humans.json is a plain file people edit by hand. A cache that never expires
+// hides those edits and lets the next save overwrite them from the stale copy.
+{
+  const edited = JSON.parse(await readFile(store.file, 'utf8'))
+  edited[0].name = 'Hand Edited'
+  // The mtime has one-second resolution on some filesystems, so move it forward.
+  const later = new Date(Date.now() + 2000)
+  await writeFile(store.file, `${JSON.stringify(edited, null, 2)}\n`, 'utf8')
+  await utimes(store.file, later, later)
+  const reread = await store.list(SEED_HUMANS)
+  check('an edit on disk is picked up, not served from cache',
+    reread[0].name === 'Hand Edited', reread[0].name)
+
+  // Put the file back, so the checks below still see the seeded record.
+  edited[0].name = reread[0].name === 'Hand Edited' ? SEED_HUMANS[0].name : edited[0].name
+  await writeFile(store.file, `${JSON.stringify(edited, null, 2)}\n`, 'utf8')
+  const restored = new Date(Date.now() + 4000)
+  await utimes(store.file, restored, restored)
+  check('the edit is reversible', (await store.list(SEED_HUMANS))[0].name === SEED_HUMANS[0].name)
+}
+
 const dev = await store.get('dev-assistant', SEED_HUMANS)
 check('id and name', dev.id === 'dev-assistant' && dev.name === '开发助手')
 check('peers parsed', JSON.stringify(dev.peers) === '["pm-assistant"]')
