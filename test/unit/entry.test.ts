@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply as applyPlatform } from '../../src/index'
 import { apply as applyToolsEntry } from '../../src/tools'
 import { presetIdOf } from '../../src/lib/presets'
+import { SEED_HUMANS } from '../fixtures/seed.mjs'
 
 let home = ''
 /** The directory the stub Workspace resolves to. */
@@ -143,7 +144,7 @@ const post = (body: unknown) => new Request('http://127.0.0.1:3080/api/digital-h
 describe('apply (platform row)', () => {
   it('registers one preset per seeded human and the registry tool', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     expect(platform.presets.size).toBe(2)
     expect(platform.presets.has(presetIdOf('dev-assistant'))).toBe(true)
     expect(platform.tools.has('digital_human')).toBe(true)
@@ -152,7 +153,7 @@ describe('apply (platform row)', () => {
 
   it('registers no preset for a disabled record', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({ id: 'off', name: 'Off', enabled: false })
     expect(platform.presets.has(presetIdOf('off'))).toBe(false)
@@ -160,7 +161,7 @@ describe('apply (platform row)', () => {
 
   it('subscribes to the session feed globally', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     expect(platform.listeners.some((entry) => entry.event === 'session/event' && entry.options?.global === true)).toBe(true)
     expect(platform.listeners.some((entry) => entry.event === 'session/created' && entry.options?.global === true)).toBe(true)
     expect(platform.listeners.some((entry) => entry.event === 'session/disposed')).toBe(true)
@@ -168,7 +169,7 @@ describe('apply (platform row)', () => {
 
   it('seeds nothing when seeding is switched off', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: false })
+    await applyPlatform(platform.ctx, { home })
     expect(platform.presets.size).toBe(0)
   })
 })
@@ -176,7 +177,7 @@ describe('apply (platform row)', () => {
 describe('the chat service', () => {
   it('creates a session for a conversation and starts a turn', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     const delivered = await service.send('dev-assistant', { message: 'please review 12345', from: 'pm-assistant' })
     expect(delivered.sessionId).toMatch(/^session-/)
@@ -188,7 +189,7 @@ describe('the chat service', () => {
 
   it('reuses the session for the same conversation and separates another', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     const first = await service.send('dev-assistant', { message: 'a' })
     const again = await service.send('dev-assistant', { message: 'b' })
@@ -201,7 +202,7 @@ describe('the chat service', () => {
     // A record that gained its preset later leaves a foreign session behind, and
     // reusing it would run without the persona or the tools.
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     const first = await service.send('dev-assistant', { message: 'a', conversationId: 'X' })
     platform.sessions.find((entry) => entry.sessionId === first.sessionId).agentPreset = 'standard'
@@ -217,7 +218,7 @@ describe('the chat service', () => {
         rename: async () => ({}),
       },
     })
-    await applyPlatform(platform.ctx, { home, seed: false })
+    await applyPlatform(platform.ctx, { home })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({ id: 'w1', name: 'W', workspace: '/w', memory: false })
     const sent = await service.send('w1', { message: 'hi' })
@@ -228,7 +229,7 @@ describe('the chat service', () => {
 
   it('reports status, messages and stop', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     const delivered = await service.send('dev-assistant', { message: 'hi' })
     expect((await service.status('dev-assistant', 'main')).isGenerating).toBe(true)
@@ -243,7 +244,7 @@ describe('the chat service', () => {
 
   it('refuses an unknown digital human and a self-send', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     await expect(service.send('nobody', { message: 'x' })).rejects.toThrow(/unknown digital human/)
     await expect(service.require('nobody')).rejects.toThrow(/unknown digital human/)
@@ -257,13 +258,13 @@ describe('the management route', () => {
     const platform = makeCtx()
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     return { platform, connection, route: connection.routes[0] }
   }
 
   it('mounts only when the connection service exists', async () => {
     const bare = makeCtx()
-    await applyPlatform(bare.ctx, { home, seed: true })
+    await applyPlatform(bare.ctx, { home, humans: SEED_HUMANS })
     const withConnection = await platformWithRoute()
     expect(withConnection.route.path).toBe('/api/digital-human')
     expect(withConnection.route.methods).toEqual(['POST'])
@@ -324,7 +325,7 @@ describe('the management route', () => {
     })
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const route = connection.routes[0]
     const answer = await (await route.fetch(post(call('im.bots')))).json()
     expect(answer.result.value.bots[0]).toMatchObject({ botId: 'wecom_1', channel: 'wecom' })
@@ -353,7 +354,7 @@ describe('the skill-space route', () => {
     const platform = makeCtx()
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     return { platform, connection, route: connection.routes[0] }
   }
 
@@ -400,7 +401,7 @@ describe('the bundle route', () => {
     const platform = makeCtx()
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const route = connection.routes.find((entry) => entry.path.endsWith('/bundle'))
     return { platform, connection, route }
   }
@@ -495,7 +496,7 @@ describe('the owner claim and the IM alignment', () => {
     const connection = connectionStub()
     const platform = makeCtx()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home: claimHome, seed: false })
+    await applyPlatform(platform.ctx, { home: claimHome })
     await platform.provided.get('digitalHumans').upsert({ id: 'c1', name: 'C', im: { botId: 'wecom_1' }, memory: false })
     const stored = await platform.provided.get('digitalHumans').resolve('c1')
     expect(stored.im.owner).toBe('wohR_owner')
@@ -520,7 +521,7 @@ describe('the owner claim and the IM alignment', () => {
     const log = vi.fn()
     const platform = makeCtx()
     platform.ctx.logger = { warn: log, info: () => {} }
-    await applyPlatform(platform.ctx, { home: mismatchHome, seed: false })
+    await applyPlatform(platform.ctx, { home: mismatchHome })
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('cannot match'))).toBe(true)
     expect((await platform.provided.get('digitalHumans').resolve('m1')).im.owner).toBe('a-typed-name')
     await rm(root, { recursive: true, force: true })
@@ -554,7 +555,7 @@ describe('the owner claim and the IM alignment', () => {
     }
     const platform = makeCtx()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home: retryHome, seed: false })
+    await applyPlatform(platform.ctx, { home: retryHome })
     const first = (await platform.provided.get('digitalHumans').resolve('r1'))
     expect(first).toBeDefined()
     // The first pass failed; a later refresh — which is what a save performs — aligns.
@@ -572,7 +573,7 @@ describe('the owner claim and the IM alignment', () => {
 describe('the session hooks', () => {
   it('gives a digital-human session full access, once', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const calls: Array<{ session: unknown; name: string }> = []
     platform.ctx.provide('permissionPresets', { set: (session: unknown, name: string) => calls.push({ session, name }) })
     const created = platform.listeners.find((entry) => entry.event === 'session/created')!.handler
@@ -588,7 +589,7 @@ describe('the session hooks', () => {
 
   it('honours a preset the record named itself', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({ id: 'ro', name: 'RO', permissionPreset: 'read-only', memory: false })
     const calls: any[] = []
@@ -599,7 +600,7 @@ describe('the session hooks', () => {
 
   it('catches a preset chosen after creation', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const calls: any[] = []
     platform.ctx.provide('permissionPresets', { set: (session: unknown, name: string) => calls.push({ session, name }) })
     const event = platform.listeners.find((entry) => entry.event === 'session/event')!.handler
@@ -609,7 +610,7 @@ describe('the session hooks', () => {
 
   it('survives an absent permissionPresets service and a refused set', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const created = platform.listeners.find((entry) => entry.event === 'session/created')!.handler
     expect(() => created({ id: 's-1', header: { agentPreset: presetIdOf('dev-assistant') } })).not.toThrow()
     platform.ctx.provide('permissionPresets', { set: () => { throw new Error('too early') } })
@@ -619,7 +620,7 @@ describe('the session hooks', () => {
 
   it('forgets a granted session when it is disposed', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const calls: any[] = []
     platform.ctx.provide('permissionPresets', { set: (session: unknown, name: string) => calls.push({ session, name }) })
     const created = platform.listeners.find((entry) => entry.event === 'session/created')!.handler
@@ -633,7 +634,7 @@ describe('the session hooks', () => {
 
   it('mirrors an assistant turn into the mailbox and ignores a foreign session', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     const delivered = await service.send('dev-assistant', { message: 'hi' })
     const event = platform.listeners.find((entry) => entry.event === 'session/event')!.handler
@@ -647,7 +648,7 @@ describe('the session hooks', () => {
 
   it('ignores an event with no session id', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const event = platform.listeners.find((entry) => entry.event === 'session/event')!.handler
     expect(() => event({}, { type: 'assistant/message' })).not.toThrow()
   })
@@ -656,7 +657,7 @@ describe('the session hooks', () => {
 describe('the registry tool', () => {
   it('creates, reads, updates and removes a record', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const tool = platform.tools.get('digital_human')
     expect((await tool.execute({ action: 'list' })).detail).toContain('dev-assistant')
     expect((await tool.execute({ action: 'show', id: 'dev-assistant' })).detail).toContain('dev-assistant')
@@ -677,7 +678,7 @@ describe('the preset-scoped tools row', () => {
 
   it('registers the chat tools and the memory context', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     // Cordis injects a service as a context property, which is what the tools row reads.
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
     applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: true })
@@ -697,7 +698,7 @@ describe('the preset-scoped tools row', () => {
       'SKILL.md': '---\nname: qs\ndescription: query the platform\nwhenToUse: when asked\n---\n\n# Body\n',
     })
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
     await platform.provided.get('digitalHumans').upsert({ id: 'sk', name: 'Sk', skills: ['qs'], memory: false })
     applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
@@ -708,7 +709,7 @@ describe('the preset-scoped tools row', () => {
 
   it('mounts nothing when the record names none, and reports one that is gone', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
     applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false })
     expect(platform.mounted).toEqual([])
@@ -722,7 +723,7 @@ describe('the preset-scoped tools row', () => {
 
   it('ignores a skills config that is not a list, and a registry with no home', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
     applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: 'qs' })
     expect(platform.mounted).toEqual([])
@@ -735,7 +736,7 @@ describe('the preset-scoped tools row', () => {
 
   it('survives an absent skill registry', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
     const warn = vi.fn()
     platform.ctx.logger = { warn, info: () => {} }
@@ -748,7 +749,7 @@ describe('the preset-scoped tools row', () => {
     // The switch travels on the preset row, because this `apply` is synchronous and
     // the registry is not.
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: true })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
     applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false })
     expect(platform.contexts).toEqual([])

@@ -12,6 +12,7 @@ import { apply as applyToolsEntry } from '../../src/tools'
 import { buildHumanTools } from '../../src/lib/tools'
 import { ensureDefaultWorkspace, readBotMeta } from '../../src/lib/workspaces'
 import { presetIdOf } from '../../src/lib/presets'
+import { SEED_HUMANS } from '../fixtures/seed.mjs'
 
 const { apply } = await import('../../src/client')
 
@@ -93,7 +94,7 @@ const post = (value: unknown) => new Request('http://127.0.0.1:3080/api/digital-
 describe('platform options', () => {
   it('extends the renderer allow-list from the plugin config', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-opt', seed: true, platformVariables: ['tenant', 7, ''] })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-opt', humans: SEED_HUMANS, platformVariables: ['tenant', 7, ''] })
     const definition = [...platform.presets.values()][0]
     const prefix = definition.plugins[0].config.prefix
     // The configured name is registered; a non-string is dropped.
@@ -102,13 +103,13 @@ describe('platform options', () => {
 
   it('reads a home from the config and falls back otherwise', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { seed: true })
+    await applyPlatform(platform.ctx, { humans: SEED_HUMANS })
     expect(platform.provided.get('digitalHumans').home).toContain('digital-human')
   })
 
   it('accepts a custom preset and tools plugin name', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-opt2', seed: true, basePreset: 'minimal', toolsPlugin: '@x/tools', permissionPreset: 'read-only' })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-opt2', humans: SEED_HUMANS, basePreset: 'minimal', toolsPlugin: '@x/tools', permissionPreset: 'read-only' })
     const definition = [...platform.presets.values()][0]
     expect(definition.plugins.at(-1).name).toBe('@x/tools')
   })
@@ -140,7 +141,7 @@ describe('the alignment retry', () => {
       }),
     })
     await platform.ctx.get('digitalHumans')
-    await applyPlatform(platform.ctx, { home: retryHome, seed: false, alignRetryMs: 5, alignRetryMax: 3 })
+    await applyPlatform(platform.ctx, { home: retryHome, alignRetryMs: 5, alignRetryMax: 3 })
     const service = platform.provided.get('digitalHumans')
     await service.upsert(boundRecord('g1'))
     await new Promise((resolve) => setTimeout(resolve, 200))
@@ -160,7 +161,7 @@ describe('the alignment retry', () => {
         },
       }),
     })
-    await applyPlatform(platform.ctx, { home: `${retryHome}-2`, seed: false, alignRetryMs: 5, alignRetryMax: 2 })
+    await applyPlatform(platform.ctx, { home: `${retryHome}-2`, alignRetryMs: 5, alignRetryMax: 2 })
     await platform.provided.get('digitalHumans').upsert(boundRecord('g2'))
     await new Promise((resolve) => setTimeout(resolve, 150))
     const settled = attempts
@@ -172,7 +173,7 @@ describe('the alignment retry', () => {
 describe('partial saves', () => {
   it('merges a patch over the stored record, keeping what the page cannot show', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-merge', seed: false })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-merge' })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({ id: 'm', name: 'M', im: { botId: 'wecom_1', targetId: 'leader' }, memory: false })
     const saved = await service.upsert({ id: 'm', name: 'M2', im: { botId: 'wecom_1' } }, { partial: true })
@@ -183,13 +184,13 @@ describe('partial saves', () => {
 
   it('refuses a save with no id', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-merge2', seed: false })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-merge2' })
     await expect(platform.provided.get('digitalHumans').upsert({ name: 'x' })).rejects.toThrow(/id is required/)
   })
 
   it('replaces the record outright when the save is not partial', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-merge3', seed: false })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-merge3' })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({ id: 'm', name: 'M', im: { botId: 'wecom_1', targetId: 'leader' }, memory: false })
     const saved = await service.upsert({ id: 'm', name: 'M3', im: { botId: 'wecom_1' } })
@@ -202,7 +203,7 @@ describe('the skills route', () => {
     const platform = makeCtx({ skills: { list: async () => [{ name: 'qs', description: 'd', whenToUse: 'w', source: 's' }] } })
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-skills', seed: true })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-skills', humans: SEED_HUMANS })
     const answer = await (await connection.routes[0].fetch(post(call('skills.list')))).json()
     expect(answer.result.value.skills[0]).toEqual({ name: 'qs', description: 'd', whenToUse: 'w', source: 's' })
   })
@@ -211,7 +212,7 @@ describe('the skills route', () => {
     const platform = makeCtx({ skills: { list: async () => 'nope' } })
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-skills2', seed: true })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-skills2', humans: SEED_HUMANS })
     const answer = await (await connection.routes[0].fetch(post(call('skills.list')))).json()
     expect(answer.result.value.skills).toEqual([])
   })
@@ -226,7 +227,7 @@ describe('the skills route', () => {
     })
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-ws', seed: true })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-ws', humans: SEED_HUMANS })
     const answer = await (await connection.routes[0].fetch(post(call('workspaces.list')))).json()
     expect(answer.result.value.workspaces).toEqual([{ workspaceId: 'w', title: 'T', path: '/p' }])
     expect(answer.result.value.defaultPath).toBe('/p')
@@ -248,7 +249,7 @@ describe('a session that appears before its preset was aligned', () => {
         },
       }),
     })
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-relign', seed: false, alignRetryMs: 5, alignRetryMax: 1 })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-relign', alignRetryMs: 5, alignRetryMax: 1 })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({
       id: 'a1', name: 'A', im: { botId: 'wecom_1', targetId: '' }, memory: false,
@@ -265,7 +266,7 @@ describe('a session that appears before its preset was aligned', () => {
 describe('teardown', () => {
   it('disposes every preset it registered', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-dispose', seed: true })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-dispose', humans: SEED_HUMANS })
     // The last effect is the preset disposer; running it must not throw.
     for (const effect of platform.effects) {
       const result = effect()
@@ -294,14 +295,14 @@ describe('every tool renders its own result', () => {
 
   it('reports an empty roster', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-empty', seed: false })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-empty' })
     const detail = (await platform.tools.get('digital_human').execute({ action: 'list' })).detail
     expect(detail).toContain('No digital humans are configured')
   })
 
   it('marks a record that carries a workspace and a target', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-roster', seed: false })
+    await applyPlatform(platform.ctx, { home: '/tmp/dh-roster' })
     const service2 = platform.provided.get('digitalHumans')
     await service2.upsert({ id: 'a', name: 'A', workspace: '/w', im: { botId: 'wecom_1', targetId: 't' }, memory: false })
     const detail = (await platform.tools.get('digital_human').execute({ action: 'list' })).detail

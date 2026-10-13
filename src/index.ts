@@ -28,7 +28,6 @@ import { registerRpc } from './lib/rpc.js'
 import { directSenders, syncBotToHuman } from './lib/im.js'
 import type { ImSyncResult } from './lib/im.js'
 import { DEFAULT_WORKSPACE_TITLE, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
-import { SEED_HUMANS } from './lib/seed.js'
 import type { Config, Ctx, Human, HumanPatch, WorkspaceView } from './lib/types.js'
 
 /** Cordis plugin name. */
@@ -132,10 +131,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // The retry window is configurable so a deployment — or a test — can shorten it.
   const alignRetryMs = positiveSetting(config, 'alignRetryMs', ALIGN_RETRY_MS_DEFAULT)
   const alignRetryMax = positiveSetting(config, 'alignRetryMax', ALIGN_RETRY_MAX_DEFAULT)
-  // Opt-in, and off unless asked for. A fresh install grows no digital humans: they
-  // are configured in the page or imported as a bundle, which is the plugin's job.
-  // The examples exist for the tests, which ask for them explicitly.
-  const seed: Human[] = config.seed === true ? (SEED_HUMANS as Human[]) : []
+  // Empty unless the caller supplies examples. A fresh install grows no digital
+  // humans: they are configured in the page or imported as a bundle.
+  const seed: Human[] = Array.isArray(config.humans) ? config.humans : []
   const store = new HumanStore(home)
   const log = (message: string): void => { ctx.logger?.warn?.(`digital-human: ${message}`) }
   /**

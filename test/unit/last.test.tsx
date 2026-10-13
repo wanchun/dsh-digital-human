@@ -56,7 +56,7 @@ describe('the host methods the page leans on', () => {
 
   it('reports an empty permission roster when the service is absent', async () => {
     const { ctx, routes } = makeCtx()
-    await applyPlatform(ctx, { home, seed: false })
+    await applyPlatform(ctx, { home })
     const answer = await (await routes[0].fetch(post('permissions.list'))).json()
     expect(answer.result.value).toEqual({ default: '', presets: [] })
   })
@@ -73,7 +73,7 @@ describe('the host methods the page leans on', () => {
         }),
       },
     })
-    await applyPlatform(ctx, { home, seed: false })
+    await applyPlatform(ctx, { home })
     const answer = await (await routes[0].fetch(post('permissions.list'))).json()
     expect(answer.result.value.default).toBe('danger-full-access')
     expect(answer.result.value.presets).toEqual([
@@ -85,7 +85,7 @@ describe('the host methods the page leans on', () => {
 
   it('tolerates a catalog that answers with something else', async () => {
     const { ctx, routes } = makeCtx({ permissionPresets: { catalog: () => ({ options: 'nope' }) } })
-    await applyPlatform(ctx, { home, seed: false })
+    await applyPlatform(ctx, { home })
     const answer = await (await routes[0].fetch(post('permissions.list'))).json()
     expect(answer.result.value).toEqual({ default: '', presets: [] })
   })
@@ -103,7 +103,7 @@ describe('the host methods the page leans on', () => {
         return Response.json({ type: 'server-response', rpcId: body.rpcId, result: { ok: false, error: { message: 'not yet' } } })
       } }),
     })
-    await applyPlatform(ctx, { home, seed: false, alignRetryMs: 5, alignRetryMax: 2 })
+    await applyPlatform(ctx, { home, alignRetryMs: 5, alignRetryMax: 2 })
     await ctx.get('digitalHumans').upsert({ id: 'r', name: 'R', im: { botId: 'wecom_1' }, memory: false })
     await new Promise((resolve) => setTimeout(resolve, 120))
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('attempt 2/2'))).toBe(true)
@@ -123,7 +123,7 @@ describe('the host methods the page leans on', () => {
       readDocument: async () => undefined,
       list: async () => [],
     }
-    await applyPlatform(ctx, { home, seed: false })
+    await applyPlatform(ctx, { home })
     fail = true
     await ctx.get('digitalHumans').upsert({ id: 'p', name: 'P', memory: false })
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('failed to register'))).toBe(true)
@@ -138,7 +138,7 @@ describe('the host methods the page leans on', () => {
       readDocument: async () => undefined,
       list: async () => [],
     }
-    await applyPlatform(ctx, { home, seed: false })
+    await applyPlatform(ctx, { home })
     await ctx.get('digitalHumans').upsert({ id: 'p', name: 'P', memory: false })
     await ctx.get('digitalHumans').remove('p')
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('preset disposal failed'))).toBe(true)
@@ -157,14 +157,14 @@ describe('the host methods the page leans on', () => {
       },
     })
     ctx.logger = { warn: log, info: () => {} }
-    await applyPlatform(ctx, { home, seed: false })
+    await applyPlatform(ctx, { home })
     await ctx.get('digitalHumans').upsert({ id: 'b', name: 'B', workspace: '/blocked', memory: false })
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('is unavailable'))).toBe(true)
   })
 
   it('forgets a removed record so its sessions stop resolving', async () => {
     const { ctx } = makeCtx()
-    await applyPlatform(ctx, { home, seed: false })
+    await applyPlatform(ctx, { home })
     const service = ctx.get('digitalHumans')
     await service.upsert({ id: 'gone', name: 'Gone', memory: false })
     const sent = await service.send('gone', { message: 'hi' })
@@ -184,7 +184,7 @@ describe('the host methods the page leans on', () => {
       id: 'o', name: 'O', enabled: true, systemPrompt: 'p', workspace: '', skills: [], peers: [],
       im: { botId: 'wecom_1', targetId: '' }, subscriptions: [], memory: false,
     }]))
-    await expect(applyPlatform(ctx, { home, seed: false })).resolves.toBeUndefined()
+    await expect(applyPlatform(ctx, { home })).resolves.toBeUndefined()
     expect(ctx.get('digitalHumans')).toBeDefined()
   })
 })

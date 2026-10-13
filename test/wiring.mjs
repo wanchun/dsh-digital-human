@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply as applyPlatform } from '../build/host/index.js'
 import { RPC_ENDPOINT, RPC_PATH } from '../build/host/lib/rpc.js'
+import { SEED_HUMANS } from './fixtures/seed.mjs'
 
 let pass = 0
 let fail = 0
@@ -103,7 +104,7 @@ await writeFile(join(home, 'integrations', 'dsh-feishu', 'workspaces.json'), JSO
 
 console.log('1) the route mounts only when Connection exists')
 const bare = makeCtx()
-await applyPlatform(bare, { home: join(home, 'bare'), seed: true })
+await applyPlatform(bare, { home: join(home, 'bare'), humans: SEED_HUMANS })
 check('mounts without a Connection service', bare._provided.has('digitalHumans'))
 check('still registers the registry tool', bare._tools.has('digital_human'))
 
@@ -140,7 +141,7 @@ const workspaceController = {
   rename: async ({ workspaceId, title }) => ({ workspace: { workspaceId, title, path: '/x' } }),
 }
 const wired = makeCtx({ connection, dshIm, skills, workspaceController })
-await applyPlatform(wired, { home: join(home, 'wired'), seed: true })
+await applyPlatform(wired, { home: join(home, 'wired'), humans: SEED_HUMANS })
 // `route` is overwritten every time another ctx mounts on the same connection,
 // so keep this one under its own name for the checks that follow.
 const wiredRoute = route
@@ -211,7 +212,7 @@ const targets = await (await route.fetch(request(call('im.targets', { botId: 'bo
 check('im.targets lists one bot targets', targets.result.value.targets[0].targetId === 'group-1')
 check('im.targets without a bot id is empty', (await (await route.fetch(request(call('im.targets', {})))).json()).result.value.targets.length === 0)
 const noIm = makeCtx({ connection })
-await applyPlatform(noIm, { home: join(home, 'no-im'), seed: true })
+await applyPlatform(noIm, { home: join(home, 'no-im'), humans: SEED_HUMANS })
 const noImBots = await (await route.fetch(request(call('im.bots', {})))).json()
 check('im.bots degrades to empty without the IM plugin', noImBots.result.value.bots.length === 0)
 
@@ -231,7 +232,7 @@ check('skills.list projects name, description, source', skillList.result.value.s
   && skillList.result.value.skills[0].description === '千手平台助手'
   && skillList.result.value.skills[0].source === 'filesystem')
 const noSkills = makeCtx({ connection })
-await applyPlatform(noSkills, { home: join(home, 'no-skills'), seed: true })
+await applyPlatform(noSkills, { home: join(home, 'no-skills'), humans: SEED_HUMANS })
 check('skills.list degrades to empty without the skill plugin',
   (await (await route.fetch(request(call('skills.list', {})))).json()).result.value.skills.length === 0)
 

@@ -1,13 +1,11 @@
 /**
- * Seed records for the two digital humans.
+ * Records the tests start from.
  *
- * Hand-maintained examples, and off by default: a fresh install starts empty and
- * gets its digital humans from the page, or from an imported bundle. The plugin
- * does not decide anyone's business personas.
- * Do not edit by hand.
+ * They used to ship with the plugin, which made every install grow two digital
+ * humans nobody asked for. A digital human is configured in the page or imported
+ * as a bundle, so the examples live here, where only the tests can see them.
  */
 
-/** Records created when the registry file does not exist yet. */
 export const SEED_HUMANS = [
   {
     "id": "dev-assistant",

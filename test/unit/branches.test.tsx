@@ -209,7 +209,7 @@ describe('a session that announced itself before the presets existed', () => {
       escalation: { enabled: false, timeoutHours: 24 },
     }]))
 
-    const applying = applyPlatform(platform, { home, seed: false })
+    const applying = applyPlatform(platform, { home })
     // Wait until the hooks are subscribed, then announce a session while the first
     // refresh is still blocked on the roster.
     await waitFor(() => expect(listeners.some((entry) => entry.event === 'session/created')).toBe(true))

@@ -20,6 +20,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { buildHumanTools, buildRegistryTool } from '../build/host/lib/tools.js'
 import { apply as applyPlatform } from '../build/host/index.js'
+import { SEED_HUMANS } from './fixtures/seed.mjs'
 
 /** Roots that may hold `@deepseek-ai/dsh-tools`, most specific first. */
 const ROOTS = [
@@ -111,7 +112,7 @@ const ctx = {
     cancel: async () => {},
   },
 }
-await applyPlatform(ctx, { home, seed: true })
+await applyPlatform(ctx, { home, humans: SEED_HUMANS })
 const service = provided.get('digitalHumans')
 
 console.log('1) preset-scoped tools')

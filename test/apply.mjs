@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { apply as applyPlatform } from '../build/host/index.js'
 import { apply as applyTools } from '../build/host/tools.js'
 import { presetIdOf } from '../build/host/lib/presets.js'
+import { SEED_HUMANS } from './fixtures/seed.mjs'
 
 let pass = 0
 let fail = 0
@@ -109,7 +110,7 @@ const home = await mkdtemp(join(tmpdir(), 'dh-apply-'))
 
 console.log('1) platform row mounts')
 const platform = makeCtx()
-await applyPlatform(platform.ctx, { home, seed: true })
+await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
 const service = platform.provided.get('digitalHumans')
 check('provides the digitalHumans service', typeof service === 'object' && service !== null)
 check('registers the global registry tool', platform.tools.has('digital_human'))
@@ -296,7 +297,7 @@ console.log('11) a digital-human session gets its permission preset')
 
   // An absent service is a report, never a throw: a headless profile has none.
   const bare = makeCtx()
-  await applyPlatform(bare.ctx, { home: join(home, 'noperm'), seed: true })
+  await applyPlatform(bare.ctx, { home: join(home, 'noperm'), humans: SEED_HUMANS })
   const bareCreated = bare.listeners.find((entry) => entry.event === 'session/created').handler
   bareCreated({ id: 'session-x', header: { agentPreset: presetIdOf('dev-assistant') } })
   check('an absent permissionPresets service is survivable', true)
@@ -332,7 +333,7 @@ console.log('12) an unclaimed owner is claimed at startup')
   }))
 
   const claimed = makeCtx()
-  await applyPlatform(claimed.ctx, { home: claimHome, seed: false })
+  await applyPlatform(claimed.ctx, { home: claimHome })
   const stored = await claimed.provided.get('digitalHumans').resolve('claimer')
   check('the first direct caller is stored as the owner', stored.im.owner === 'wohR_owner', String(stored.im.owner))
   const definition = claimed.presets.get(presetIdOf('claimer'))
@@ -384,7 +385,7 @@ console.log('13) bound bots are aligned at startup, without a save')
   }
   const aligned = makeCtx()
   aligned.ctx.provide('connection', connection)
-  await applyPlatform(aligned.ctx, { home: alignHome, seed: false })
+  await applyPlatform(aligned.ctx, { home: alignHome })
 
   check('the workspace is pushed at startup', seen.some((entry) => entry.method === 'bot.workspace.set'))
   check('the preset is pushed at startup', seen.some((entry) => entry.method === 'bot.preset.set'))
@@ -424,7 +425,7 @@ console.log('14) an alignment that found no connection recovers on a later refre
   const logs = []
   const late = makeCtx()
   late.ctx.logger = { warn: (message) => logs.push(message), info: () => {} }
-  await applyPlatform(late.ctx, { home: lateHome, seed: false })
+  await applyPlatform(late.ctx, { home: lateHome })
   check('the absent service is reported, not thrown',
     logs.some((line) => line.includes('connection service is absent')))
   check('the wait is reported', logs.some((line) => line.includes('waiting on a service')))
@@ -479,7 +480,7 @@ console.log('15) an owner no sender can match is reported, not obeyed silently')
   const logs = []
   const mismatch = makeCtx()
   mismatch.ctx.logger = { warn: (message) => logs.push(message), info: () => {} }
-  await applyPlatform(mismatch.ctx, { home: mismatchHome, seed: false })
+  await applyPlatform(mismatch.ctx, { home: mismatchHome })
   check('the mismatch is reported', logs.some((line) => line.includes('cannot match')), logs.join(' | ').slice(0, 200))
   check('the report names the id the bot has seen',
     logs.some((line) => line.includes('wohR_KCgAANNc-oBb9Z8h20IdfWja3lA')))
@@ -522,7 +523,7 @@ console.log('16) a delivered session is filed under its Workspace')
     create: async () => ({ workspace: items[0] }),
     rename: async () => ({ workspace: items[0] }),
   })
-  await applyPlatform(filed.ctx, { home: wsHome, seed: false })
+  await applyPlatform(filed.ctx, { home: wsHome })
   const sent = await filed.provided.get('digitalHumans').send('ws-one', { message: 'hi', conversationId: 'main' })
   const row = filed.sessions.find((entry) => entry.sessionId === sent.sessionId)
   check('the session carries the Workspace id', row.workspaceId === 'ws-digital-human', String(row.workspaceId))
@@ -534,7 +535,7 @@ console.log('16) a delivered session is filed under its Workspace')
   // record names must still be passed: an unfiled session is a display problem, a
   // session in the wrong directory is a working one.
   const bare = makeCtx()
-  await applyPlatform(bare.ctx, { home: join(root, 'bare'), seed: false })
+  await applyPlatform(bare.ctx, { home: join(root, 'bare') })
   await bare.provided.get('digitalHumans').upsert({ id: 'ws-two', name: 'W2', workspace: target, memory: false })
   const bareSent = await bare.provided.get('digitalHumans').send('ws-two', { message: 'hi' })
   const bareRow = bare.sessions.find((entry) => entry.sessionId === bareSent.sessionId)
@@ -548,7 +549,7 @@ console.log('17) disposal')
 const platformForDisposal = makeCtx()
 let disposeAll = null
 platformForDisposal.ctx.effect = (fn) => { disposeAll = fn(); return () => {} }
-await applyPlatform(platformForDisposal.ctx, { home: join(home, 'dispose'), seed: true })
+await applyPlatform(platformForDisposal.ctx, { home: join(home, 'dispose'), humans: SEED_HUMANS })
 check('two presets before disposal', platformForDisposal.presets.size === 2)
 await disposeAll()
 await new Promise((resolve) => setTimeout(resolve, 20))

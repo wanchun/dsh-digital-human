@@ -91,7 +91,7 @@ describe('a record whose directory is not a known Workspace', () => {
     // place.
     const controller = workspaceController([])
     const platform = makeCtx({ workspaceController: controller })
-    await applyPlatform(platform.ctx, { home, seed: false })
+    await applyPlatform(platform.ctx, { home })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({ id: 'own', name: 'Own', workspace: '/somewhere/else', memory: false })
     const created = controller.created.find((entry) => entry.path === '/somewhere/else')
@@ -108,7 +108,7 @@ describe('a record whose directory is not a known Workspace', () => {
   it('reuses a directory it already registered', async () => {
     const controller = workspaceController([{ workspaceId: 'ws-known', path: '/known', title: 'K' }])
     const platform = makeCtx({ workspaceController: controller })
-    await applyPlatform(platform.ctx, { home, seed: false })
+    await applyPlatform(platform.ctx, { home })
     await platform.provided.get('digitalHumans').upsert({ id: 'k', name: 'K', workspace: '/known', memory: false })
     // The default workspace is still created; the record's own directory is not.
     expect(controller.created.map((entry) => entry.path)).not.toContain('/known')
@@ -123,7 +123,7 @@ describe('a record whose directory is not a known Workspace', () => {
     const log = vi.fn()
     const platform = makeCtx({ workspaceController: controller })
     platform.ctx.logger = { warn: log, info: () => {} }
-    await applyPlatform(platform.ctx, { home, seed: false })
+    await applyPlatform(platform.ctx, { home })
     await platform.provided.get('digitalHumans').upsert({ id: 'r', name: 'R', workspace: '/nope', memory: false })
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('is unavailable'))).toBe(true)
   })
@@ -131,7 +131,7 @@ describe('a record whose directory is not a known Workspace', () => {
   it('skips a disabled record, which creates no session', async () => {
     const controller = workspaceController([])
     const platform = makeCtx({ workspaceController: controller })
-    await applyPlatform(platform.ctx, { home, seed: false })
+    await applyPlatform(platform.ctx, { home })
     await platform.provided.get('digitalHumans').upsert({ id: 'off', name: 'Off', workspace: '/x', enabled: false, memory: false })
     expect(controller.created.map((entry) => entry.path)).not.toContain('/x')
   })
@@ -159,7 +159,7 @@ describe('the working-directory suffix', () => {
 describe('a permission preset that changes', () => {
   it('is re-applied when the session switches to another digital human', async () => {
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, seed: false })
+    await applyPlatform(platform.ctx, { home })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({ id: 'full', name: 'F', memory: false })
     await service.upsert({ id: 'readonly', name: 'R', permissionPreset: 'read-only', memory: false })
@@ -187,7 +187,7 @@ describe('a registry that cannot be read', () => {
     const log = vi.fn()
     const platform = makeCtx()
     platform.ctx.logger = { warn: log, info: () => {} }
-    await expect(applyPlatform(platform.ctx, { home, seed: false })).resolves.toBeUndefined()
+    await expect(applyPlatform(platform.ctx, { home })).resolves.toBeUndefined()
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('could not be read'))).toBe(true)
     // The registry tool still exists, so the operator has a way back.
     expect(platform.tools.has('digital_human')).toBe(true)

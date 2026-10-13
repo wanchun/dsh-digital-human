@@ -190,7 +190,13 @@ export interface Ctx {
 /** Plugin configuration, as the loader passes it. */
 export interface Config {
   home?: string
-  seed?: boolean
+  /**
+   * Records to start from, for a caller that supplies its own examples.
+   *
+   * The plugin ships none: a fresh install grows no digital humans. They are
+   * configured in the page or imported as a bundle, and the tests pass a list here.
+   */
+  humans?: Human[]
   /** Permission preset for a digital human that names none. */
   permissionPreset?: string
   /**
