@@ -44,7 +44,7 @@ export const inject = ['agentPresets', 'sessionController', 'tools']
  */
 const DEFAULTS = {
   basePreset: 'standard',
-  toolsPlugin: '@local/dsh-digital-human/tools',
+  toolsPlugin: '@harrywan/dsh-digital-human/tools',
   /**
    * Permission preset for a digital human that names none.
    *
