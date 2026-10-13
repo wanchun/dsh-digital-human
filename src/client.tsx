@@ -623,17 +623,6 @@ export function apply(ctx) {
     }
   }
 
-  ctx.effect(() => ctx.slots.inject('settings.section', () => {
-    const dispose = ctx.slots.register({
-      name: 'settings.section',
-      id: PANEL_ID,
-      order: 25,
-      label: () => '数字人',
-      inject: () => ({ rpc }),
-    }, DigitalHumansPage)
-    return () => dispose()
-  }), 'digital-human: settings section')
-
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => {
     const dispose = ctx.slots.register({
       name: 'sidebar.panellist',

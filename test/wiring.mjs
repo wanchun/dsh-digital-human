@@ -248,17 +248,16 @@ const clientCtx = {
 }
 module_.apply(clientCtx)
 const byName = (name) => registrations.filter((entry) => entry.options.name === name)
-check('registers one settings section', byName('settings.section').length === 1)
-check('the section is the 数字人 page', byName('settings.section')[0].options.id === 'digital-humans')
-check('the section is labelled', byName('settings.section')[0].options.label() === '数字人')
-check('the section sits after the IM settings entry', byName('settings.section')[0].options.order === 25)
+// The settings page carries no entry: the sidebar panel beside 自动化任务 is
+// the only way in, so there is one place to reach the page rather than two.
+check('registers no settings section', byName('settings.section').length === 0)
 check('registers one sidebar panel entry', byName('sidebar.panellist').length === 1)
 check('the panel entry comes after 自动化任务', byName('sidebar.panellist')[0].options.order === 20)
 check('the panel key matches the sidebar id', byName('main')[0].options.key === byName('sidebar.panellist')[0].options.id)
 check('registers the main panel', byName('main').length === 1)
-check('every section receives the rpc caller', typeof byName('settings.section')[0].options.inject().rpc === 'function')
+check('the panel receives the rpc caller', typeof byName('main')[0].options.inject().rpc === 'function')
 
-const rpc = byName('settings.section')[0].options.inject().rpc
+const rpc = byName('main')[0].options.inject().rpc
 await rpc('registry.list', {}, undefined)
 check('the client calls the shared channel', calls[0][0] === '/api' && calls[0][1] === RPC_ENDPOINT)
 check('the client sends the method and payload', calls[0][2].method === 'registry.list' && typeof calls[0][2].payload === 'object')
