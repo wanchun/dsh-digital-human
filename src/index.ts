@@ -116,7 +116,11 @@ function setting(config: Config, key: string): string {
  * @param ctx - Host context carrying the preset registry, session controller, and tool registry.
  * @param config - registry location, seeding, and the capability baseline.
  */
-export async function apply(ctx: Ctx, config: Config = {}): Promise<void> {
+export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
+  // A row written with an empty `config:` reaches here as null. Reading a property of
+  // null would throw before anything mounts, and the host half would vanish while the
+  // browser half stayed — the failure looks like a broken page, not a bad config.
+  const config: Config = raw ?? {}
   const home = setting(config, 'home') || defaultHome()
   const basePreset = setting(config, 'basePreset')
   const toolsPlugin = setting(config, 'toolsPlugin')

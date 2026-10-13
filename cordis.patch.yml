@@ -3,6 +3,5 @@
 - insert:
     - id: digital-human
       name: '@harrywan/dsh-digital-human'
-      config:
         # Omit `home` to use ~/.dsh/digital-human. No `seed`: a fresh install grows
         # no digital humans — configure one in the page, or import a bundle.
