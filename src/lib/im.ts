@@ -26,6 +26,44 @@ const SET_WORKSPACE = 'bot.workspace.set'
 /** Endpoint that sets one bot's Agent Preset. Accepts null to clear it. */
 const SET_PRESET = 'bot.preset.set'
 
+/**
+ * Endpoint that controls the source block prefixed to every inbound message.
+ *
+ * The block is off by default, and without it a session never learns who is
+ * writing — so a persona that classifies callers against a member table cannot
+ * tell the maintainer from a stranger.
+ */
+const SET_CONTEXT = 'bot.context-enhancement.set'
+
+/**
+ * Fields the injected source block must carry.
+ *
+ * `senderName` and `senderId` identify the caller, `chatId` is what a persona
+ * needs to reach them, and `conversationType` separates a direct message from a
+ * group. The other two give the block its own context.
+ */
+const CONTEXT_FIELDS = Object.freeze([
+  'channel', 'conversationType', 'senderId', 'senderName', 'chatId', 'botId',
+])
+
+/** Instruction shipped with the source block. */
+const CONTEXT_GUIDANCE = [
+  '仅依据当前消息的 <dsh_im_source> 中实际提供的字段理解来源；没有提供的字段不要猜测或补全。',
+  'senderId / senderName 是来话人身份：先用它匹配成员登记表，再决定服务方式与权限；匹配不到时按新成员流程处理。',
+  'chatId 是回复与定向通知该来话人的地址。',
+].join('\n')
+
+/**
+ * The source-block setting this plugin installs.
+ *
+ * IM requires exactly the keys `group` and `direct`, and each scope exactly
+ * `enabled`, `fields`, and `guidance`.
+ */
+function contextConfig(): Record<string, unknown> {
+  const scope = { enabled: true, fields: [...CONTEXT_FIELDS], guidance: CONTEXT_GUIDANCE }
+  return { group: { ...scope }, direct: { ...scope } }
+}
+
 /** One RPC result, or the reason the call could not be made. */
 export interface ImSyncResult {
   endpoint: string
@@ -134,6 +172,9 @@ export async function syncBotToHuman(
   const results: ImSyncResult[] = []
   if (workspace) results.push(await call(handler, namespace, SET_WORKSPACE, { botId, workspace }))
   if (presetId) results.push(await call(handler, namespace, SET_PRESET, { botId, agentPreset: presetId }))
+  // Always on: a persona that classifies callers is useless without knowing who
+  // is writing, and the block is off by default.
+  results.push(await call(handler, namespace, SET_CONTEXT, { botId, config: contextConfig() }))
   for (const result of results) {
     log(result.ok
       ? `aligned ${botId}: ${result.endpoint}`

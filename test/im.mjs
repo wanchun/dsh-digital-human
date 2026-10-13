@@ -50,7 +50,7 @@ console.log('1) both endpoints are called, in order')
     presetId: 'dh-pm-assistant',
     log: (message) => logs.push(message),
   })
-  check('two endpoints were called', results.length === 2, String(results.length))
+  check('three endpoints were called', results.length === 3, String(results.length))
   check('both succeeded', results.every((entry) => entry.ok === true))
   check('the shared /api channel is used', connection.seen.every((entry) => entry.channel === '/api'))
   check('the namespace is derived from the bot id',
@@ -67,8 +67,37 @@ console.log('1) both endpoints are called, in order')
     JSON.stringify(connection.seen[1].body.payload)
       === JSON.stringify({ method: 'bot.preset.set', payload: { botId: 'wecom_571e4e3104d704d7e99bcf79', agentPreset: 'dh-pm-assistant' } }),
     JSON.stringify(connection.seen[1].body.payload))
-  check('each call gets its own rpcId', connection.seen[0].body.rpcId !== connection.seen[1].body.rpcId)
-  check('the outcome is logged', logs.length === 2, String(logs.length))
+  check('the source block is switched on, since it is off by default',
+    JSON.stringify(connection.seen[2].body.payload)
+      === JSON.stringify({
+        method: 'bot.context-enhancement.set',
+        payload: {
+          botId: 'wecom_571e4e3104d704d7e99bcf79',
+          config: {
+            group: connection.seen[2].body.payload.payload.config.group,
+            direct: connection.seen[2].body.payload.payload.config.direct,
+          },
+        },
+      }), JSON.stringify(connection.seen[2].body.payload))
+  const scope = connection.seen[2].body.payload.payload.config
+  check('both scopes are enabled', scope.group.enabled === true && scope.direct.enabled === true)
+  check('the config carries exactly group and direct',
+    JSON.stringify(Object.keys(scope).sort()) === JSON.stringify(['direct', 'group']), JSON.stringify(Object.keys(scope)))
+  check('each scope carries exactly enabled, fields, guidance',
+    JSON.stringify(Object.keys(scope.group).sort()) === JSON.stringify(['enabled', 'fields', 'guidance']),
+    JSON.stringify(Object.keys(scope.group)))
+  check('the caller name and id are injected',
+    ['senderId', 'senderName'].every((field) => scope.group.fields.includes(field)), JSON.stringify(scope.group.fields))
+  check('chatId is injected, so the persona can reply',
+    scope.group.fields.includes('chatId'), JSON.stringify(scope.group.fields))
+  check('the fields are all known to IM',
+    scope.group.fields.every((field) => ['channel', 'conversationType', 'senderId', 'senderName',
+      'conversationTitle', 'chatId', 'threadId', 'botId', 'sentAt'].includes(field)),
+    JSON.stringify(scope.group.fields))
+  check('the guidance is not empty', scope.group.guidance.length > 0)
+  check('each call gets its own rpcId',
+    new Set(connection.seen.map((entry) => entry.body.rpcId)).size === connection.seen.length)
+  check('the outcome is logged', logs.length === 3, String(logs.length))
 }
 
 console.log('2) an unbound bot is a no-op')
