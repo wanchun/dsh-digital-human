@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2023"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": [
+      "node"
+    ],
+    "rootDir": "src",
+    "outDir": "build/host",
+    "strict": true,
+    "noImplicitAny": false,
+    "useUnknownInCatchVariables": false,
+    "skipLibCheck": true,
+    "declaration": false,
+    "sourceMap": false,
+    "allowJs": false,
+    "baseUrl": ".",
+    "paths": {
+      "@deepseek-ai/cordis": [
+        "../../.n/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-agent-preset-registry": [
+        "../../.n/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent-preset-registry/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-api-session-controller": [
+        "../../.n/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-session-controller/lib/types/index.d.ts"
+      ]
+    }
+  },
+  "include": [
+    "src/index.ts",
+    "src/tools.ts",
+    "src/lib/**/*.ts"
+  ]
+}

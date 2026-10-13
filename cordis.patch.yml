@@ -1,0 +1,8 @@
+# Digital-human platform: the registry, runtime, tools, and scheduler.
+# The digital humans themselves are data (see <home>/humans.json), not rows here.
+- insert:
+    - id: digital-human
+      name: '@local/dsh-digital-human'
+      config:
+        # Omit `home` to use ~/.dsh/digital-human.
+        seed: true

@@ -1,0 +1,41 @@
+{
+  "name": "@local/dsh-digital-human",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Configurable digital humans for DSH: persona, memory, peers, IM binding, schedule.",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./build/host/index.js",
+    "./tools": "./build/host/tools.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^18.3.31",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21"
+  },
+  "scripts": {
+    "build": "npm run build:host && npm run build:client",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "vite build && node tools/wrap-client.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "node test/smoke.mjs && node test/memory.mjs && node test/apply.mjs && node test/wiring.mjs && node test/schema.mjs"
+  }
+}
