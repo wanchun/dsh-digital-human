@@ -22,6 +22,7 @@ import { HumanChat } from './lib/chat.js'
 import { buildPresetDefinition, presetIdOf } from './lib/presets.js'
 import { buildRegistryTool } from './lib/tools.js'
 import { registerRpc } from './lib/rpc.js'
+import { syncBotToHuman } from './lib/im.js'
 import { DEFAULT_WORKSPACE_TITLE, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
 import { SEED_HUMANS } from './lib/seed.js'
 import type { Config, Ctx, Human, HumanPatch, WorkspaceView } from './lib/types.js'
@@ -145,7 +146,16 @@ export async function apply(ctx: Ctx, config: Config = {}): Promise<void> {
       const merged = partial ? await merge(patch.id, patch) : patch
       const saved = await store.upsert(merged, seed)
       await refresh()
-      return { ...saved, presetId: presetIdOf(saved.id) }
+      // The digital human owns the mode and the directory. Push both onto the
+      // bound bot through IM's own endpoints, so the change lands in its memory
+      // and survives its next write. A failure here never fails the save.
+      const alignment = await syncBotToHuman(ctx, {
+        botId: saved.im?.botId,
+        workspace: saved.workspace,
+        presetId: presetIdOf(saved.id),
+        log,
+      })
+      return { ...saved, presetId: presetIdOf(saved.id), alignment }
     },
     /** Delete one digital human and drop its preset. */
     async remove(id) {

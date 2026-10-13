@@ -36,6 +36,6 @@
     "build:host": "tsc -p tsconfig.json",
     "build:client": "vite build && node tools/wrap-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "node test/smoke.mjs && node test/memory.mjs && node test/apply.mjs && node test/wiring.mjs && node test/schema.mjs"
+    "test": "node test/smoke.mjs && node test/memory.mjs && node test/apply.mjs && node test/wiring.mjs && node test/schema.mjs && node test/im.mjs"
   }
 }
