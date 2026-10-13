@@ -128,7 +128,10 @@ export async function apply(ctx: Ctx, config: Config = {}): Promise<void> {
   // The retry window is configurable so a deployment — or a test — can shorten it.
   const alignRetryMs = positiveSetting(config, 'alignRetryMs', ALIGN_RETRY_MS_DEFAULT)
   const alignRetryMax = positiveSetting(config, 'alignRetryMax', ALIGN_RETRY_MAX_DEFAULT)
-  const seed: Human[] = config.seed === false ? [] : (SEED_HUMANS as Human[])
+  // Opt-in, and off unless asked for. A fresh install grows no digital humans: they
+  // are configured in the page or imported as a bundle, which is the plugin's job.
+  // The examples exist for the tests, which ask for them explicitly.
+  const seed: Human[] = config.seed === true ? (SEED_HUMANS as Human[]) : []
   const store = new HumanStore(home)
   const log = (message: string): void => { ctx.logger?.warn?.(`digital-human: ${message}`) }
   /**

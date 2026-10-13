@@ -57,10 +57,13 @@ console.log('2) normalization')
 const dev = await store.get('dev-assistant', SEED_HUMANS)
 check('id and name', dev.id === 'dev-assistant' && dev.name === '开发助手')
 check('peers parsed', JSON.stringify(dev.peers) === '["pm-assistant"]')
-check('skills parsed', JSON.stringify(dev.skills) === JSON.stringify(['qs-end-to-end-fast','qs-assistant','dpms-cli-helper','pace-cli-helper']))
+check('skills parsed', JSON.stringify(dev.skills) === JSON.stringify(['task-end-to-end','task-assistant','req-cli-helper','pipe-cli-helper']))
 check('the retired skill is gone', !dev.skills.includes('halo-agent-collab'))
 check('no Halo transport term survives', !/halo_token|halo_port|collab_space_id|collab_peer_app_id/.test(dev.systemPrompt))
-check('persona is the Halo one', dev.systemPrompt.length > 5000 && !/\{[a-z_]+\}/.test(dev.systemPrompt))
+// The shipped examples are placeholders now: a short persona that keeps the
+// placeholders the renderer substitutes, not one team's business text.
+check('the example persona is short and placeholder-driven',
+  dev.systemPrompt.length > 200 && dev.systemPrompt.includes('{{peer_name}}'))
 check('im defaults', dev.im.botId === '' && dev.im.targetId === '')
 check('enabled defaults true', dev.enabled === true)
 const pm = await store.get('研发PM助手', SEED_HUMANS)

@@ -4,8 +4,5 @@
     - id: digital-human
       name: '@harrywan/dsh-digital-human'
       config:
-        # Omit `home` to use ~/.dsh/digital-human.
-        # A fresh install starts empty: configure a digital human in the page, or
-        # import one. Seeding shipped two business personas, which is not the
-        # plugin's business to decide.
-        seed: false
+        # Omit `home` to use ~/.dsh/digital-human. No `seed`: a fresh install grows
+        # no digital humans — configure one in the page, or import a bundle.
