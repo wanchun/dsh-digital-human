@@ -258,5 +258,5 @@ ln -sfn /path/to/dsh-plugins/digital-human \
 # 3. restart dsh web
 ```
 
-After changing `src/client.tsx`, run `npm run build` and refresh the page. Changing
+After changing `src/client.tsx`, run `pnpm run build` and refresh the page. Changing
 the host half needs a restart.

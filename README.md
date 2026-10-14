@@ -228,4 +228,4 @@ ln -sfn /path/to/dsh-plugins/digital-human \
 # 3. 重启 dsh web
 ```
 
-改完 `src/client.tsx` 只需 `npm run build` + 刷新页面；改宿主侧要重启。
+改完 `src/client.tsx` 只需 `pnpm run build` + 刷新页面；改宿主侧要重启。

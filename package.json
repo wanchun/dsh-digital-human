@@ -88,11 +88,11 @@
     "vitest": "^5.0.4"
   },
   "scripts": {
-    "build": "npm run build:host && npm run build:client",
+    "build": "pnpm run build:host && pnpm run build:client",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "vite build && node tools/wrap-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "npm run build && npm run test:unit && npm run test:integration",
+    "test": "pnpm run build && pnpm run test:unit && pnpm run test:integration",
     "test:unit": "vitest run --coverage",
     "test:unit:watch": "vitest",
     "test:integration": "node test/smoke.mjs && node test/memory.mjs && node test/apply.mjs && node test/wiring.mjs && node test/schema.mjs && node test/im.mjs"
