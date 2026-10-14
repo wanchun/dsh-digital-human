@@ -7,6 +7,7 @@ import { apply as applyPlatform } from '../../src/index'
 import { apply as applyToolsEntry } from '../../src/tools'
 import { presetIdOf } from '../../src/lib/presets'
 import { SEED_HUMANS } from '../fixtures/seed.mjs'
+import { readBundle } from '../../src/lib/bundle'
 
 let home = ''
 /** The directory the stub Workspace resolves to. */
@@ -446,7 +447,7 @@ describe('the bundle route', () => {
     const exported = await (await route.fetch(new Request('http://x/api/digital-human/bundle?id=pm-assistant'))).arrayBuffer()
     const answer = await route.fetch(post(Buffer.from(exported), '?preview=1'))
     const value = (await answer.json()).value
-    expect(value.preview.human.id).toBe('pm-assistant')
+    expect(value.preview.humans[0].id).toBe('pm-assistant')
     expect(value.preview.manifest.format).toBe('dsh-digital-human/1')
     // A preview is a read: the registry is untouched.
     expect(platform.presets.size).toBe(2)
@@ -458,7 +459,7 @@ describe('the bundle route', () => {
     const answer = await route.fetch(post(Buffer.from(exported), '?id=pm-copy'))
     expect(answer.status).toBe(200)
     const value = (await answer.json()).value
-    expect(value).toMatchObject({ id: 'pm-copy', renamed: true })
+    expect(value).toMatchObject({ ids: ['pm-copy'], renamed: true })
     expect(platform.presets.has('dh-pm-copy')).toBe(true)
   })
 
@@ -470,7 +471,28 @@ describe('the bundle route', () => {
     expect((await bad.json()).error.message).toContain('id must match')
     const kept = await route.fetch(post(exported, '?id=pm-copy&overwrite=false'))
     expect(kept.status).toBe(200)
-    expect((await kept.json()).value.id).toBe('pm-copy')
+    expect((await kept.json()).value.ids).toEqual(['pm-copy'])
+  })
+
+  it('exports the whole registry as one bundle', async () => {
+    const { route } = await withRoutes()
+    const res = await route.fetch(new Request('http://x/api/digital-human/bundle?all=1'))
+    expect(res.status).toBe(200)
+    // The filename names the whole set, not one record.
+    expect(res.headers.get('content-disposition')).toContain('digital-humans-')
+    const preview = readBundle(Buffer.from(await res.arrayBuffer()))
+    expect(preview.humans.map((human) => human.id).sort()).toEqual(['dev-assistant', 'pm-assistant'])
+  })
+
+  it('refuses an export when there is nothing to export', async () => {
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    // No records at all: the route says so rather than writing an empty archive.
+    await applyPlatform(platform.ctx, { home: join(home, 'empty'), humans: [] })
+    const route = connection.routes.find((entry) => entry.path.endsWith('/bundle'))!
+    const res = await route.fetch(new Request('http://x/api/digital-human/bundle?all=1'))
+    expect(res.status).toBe(404)
   })
 
   it('carries the memory only when asked', async () => {

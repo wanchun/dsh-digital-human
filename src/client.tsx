@@ -793,13 +793,15 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
    * through the JSON channel would base64 it and hold it twice, and a skill set can
    * be tens of megabytes.
    */
-  const exportHuman = () => {
-    const id = (draft?.id ?? '').trim()
-    if (!id) return
-    const memory = draft?.memory === false ? '' : '&memory=1'
-    // The id is a query parameter: the route table matches an exact pathname, so a
-    // path segment would miss the handler and land on the SPA's 404.
-    window.open(`/api/digital-human/bundle?id=${encodeURIComponent(id)}${memory}`, '_blank')
+  /**
+   * Download every enabled digital human as one bundle.
+   *
+   * The whole registry, not the selected record: a bundle carries one or many, so the
+   * page has a single export that is also the backup. The id travels as a query
+   * parameter because the route table matches an exact pathname.
+   */
+  const exportAll = () => {
+    window.open('/api/digital-human/bundle?all=1&memory=1', '_blank')
   }
 
   /** Read one bundle into the registry. */
@@ -815,7 +817,9 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
       const answer = await response.json().catch(() => undefined)
       if (answer?.ok !== true) throw new Error(answer?.error?.message ?? '导入失败：宿主没有返回可读的结果')
       const value = answer.value ?? {}
-      return `已导入 ${value.id}（技能 ${value.skills?.length ?? 0} 个${value.memory ? '，含记忆' : ''}）`
+      const ids = Array.isArray(value.ids) ? value.ids : []
+      return `已导入 ${ids.length} 个数字人（${ids.join('、')}）`
+        + `，技能 ${value.skills?.length ?? 0} 个${value.memory ? '，含记忆' : ''}`
     })
     if (importRef.current) importRef.current.value = ''
   }
@@ -868,18 +872,12 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
       <div className="dh-head">
         <h3 className="dh-title">数字人（{humans.length}）</h3>
         <Button
+          variant="outline"
           size="sm"
-          style={{ marginLeft: 'auto' }}
-          disabled={busy}
-          onClick={() => { setNotice(null); setError(null); setConfirmingDelete(false); setDraft({ ...BLANK, creating: true }) }}
+          disabled={busy || humans.length === 0}
+          onClick={exportAll}
         >
-          新建
-        </Button>
-        <Button size="sm" disabled={busy} onClick={() => act(async () => { await load(); return '已刷新' })}>
-          刷新
-        </Button>
-        <Button variant="outline" size="sm" disabled={busy || !(draft?.id ?? '').trim()} onClick={exportHuman}>
-          导出
+          导出全部
         </Button>
         <input
           ref={importRef}
@@ -890,6 +888,17 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
         />
         <Button variant="outline" size="sm" disabled={busy} onClick={() => importRef.current?.click()}>
           导入
+        </Button>
+        <Button
+          size="sm"
+          style={{ marginLeft: 'auto' }}
+          disabled={busy}
+          onClick={() => { setNotice(null); setError(null); setConfirmingDelete(false); setDraft({ ...BLANK, creating: true }) }}
+        >
+          新建
+        </Button>
+        <Button size="sm" disabled={busy} onClick={() => act(async () => { await load(); return '已刷新' })}>
+          刷新
         </Button>
       </div>
 

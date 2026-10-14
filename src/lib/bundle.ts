@@ -13,11 +13,14 @@
  *
  * Bundle layout:
  * ```
- * manifest.json      format, version, exported time, contents
- * human.json         the record, with local-only fields stripped
- * memory.md          optional
- * skills/<name>/…    one directory per mounted skill
+ * manifest.json        format, exported time, the ids it carries, contents
+ * humans/<id>.json     one record each, with local-only fields stripped
+ * memory/<id>.md       optional
+ * skills/<name>/…      one directory per mounted skill, shared by every record
  * ```
+ *
+ * A bundle carries one or many: an export of the whole registry is the same shape as
+ * an export of a single record, so an import never has to ask which kind it got.
  */
 
 import { gunzipSync, gzipSync } from 'node:zlib'
@@ -142,18 +145,19 @@ export function readTar(archive: Buffer): Record<string, Buffer> {
 export interface BundleManifest {
   format: string
   exportedAt: string
-  id: string
-  name: string
-  /** Whether the bundle carries the memory file. */
+  /** The records the bundle carries, in the order they were written. */
+  humans: Array<{ id: string; name: string }>
+  /** Whether the bundle carries any memory file. */
   memory: boolean
-  /** The skills it carries, by name. */
+  /** The skills it carries, by name, shared by every record. */
   skills: string[]
 }
 
 /** What a bundle holds, as the import page shows it before anything is written. */
 export interface BundlePreview {
   manifest: BundleManifest
-  human: Human
+  /** Every record the bundle carries. */
+  humans: Human[]
   /** Files per skill, for a size-and-shape summary. */
   skills: Array<{ name: string; files: number; bytes: number }>
   bytes: number
@@ -178,24 +182,27 @@ function filesUnder(root: string, at = root): string[] {
  * @param options.includeMemory - whether to carry the memory file.
  * @returns the gzipped archive, and the manifest it embeds.
  */
-export function packHuman(
+export function packHumans(
   home: string,
-  human: Human,
+  humans: Human[],
   { includeMemory = false }: { includeMemory?: boolean } = {},
 ): { archive: Buffer; manifest: BundleManifest } {
+  if (humans.length === 0) throw new Error('there is no digital human to export')
   const files: Record<string, Buffer> = {}
-  const record = { ...human } as Record<string, unknown>
-  if (record.im && typeof record.im === 'object') {
-    // A binding is the machine's, not the record's: the bot id, its default target
-    // and the claimed owner all name things that do not exist elsewhere.
-    const im = { ...(record.im as Record<string, unknown>) }
-    for (const field of LOCAL_ONLY) delete im[field]
-    record.im = im
+  for (const human of humans) {
+    const record = { ...human } as Record<string, unknown>
+    if (record.im && typeof record.im === 'object') {
+      // A binding is the machine's, not the record's: the bot id, its default target
+      // and the claimed owner all name things that do not exist elsewhere.
+      const im = { ...(record.im as Record<string, unknown>) }
+      for (const field of LOCAL_ONLY) delete im[field]
+      record.im = im
+    }
+    files[`humans/${human.id}.json`] = Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8')
   }
-  files['human.json'] = Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8')
 
   const carried: string[] = []
-  for (const name of human.skills ?? []) {
+  for (const name of [...new Set(humans.flatMap((human) => human.skills ?? []))]) {
     if (!validSkillName(name)) continue
     const dir = join(libraryDir(home), name)
     if (!existsSync(dir)) continue
@@ -209,15 +216,20 @@ export function packHuman(
     }
   }
 
-  const memoryPath = join(home, 'humans', human.id, 'memory.md')
-  const memory = includeMemory && existsSync(memoryPath)
-  if (memory) files['memory.md'] = readFileSync(memoryPath)
+  let memory = false
+  if (includeMemory) {
+    for (const human of humans) {
+      const memoryPath = join(home, 'humans', human.id, 'memory.md')
+      if (!existsSync(memoryPath)) continue
+      files[`memory/${human.id}.md`] = readFileSync(memoryPath)
+      memory = true
+    }
+  }
 
   const manifest: BundleManifest = {
     format: BUNDLE_FORMAT,
     exportedAt: new Date().toISOString(),
-    id: human.id,
-    name: human.name,
+    humans: humans.map((human) => ({ id: human.id, name: human.name })),
     memory,
     skills: carried,
   }
@@ -242,22 +254,31 @@ export function readBundle(archive: Buffer): BundlePreview {
   }
   if (Object.keys(files).length > MAX_BUNDLE_FILES) throw new Error(`a bundle may hold at most ${MAX_BUNDLE_FILES} files`)
   const manifestText = files['manifest.json']?.toString('utf8')
-  const humanText = files['human.json']?.toString('utf8')
-  if (!manifestText || !humanText) throw new Error('the bundle has no manifest.json or human.json')
+  if (!manifestText) throw new Error('the bundle has no manifest.json')
   let manifest: BundleManifest
-  let human: Human
   try {
     manifest = JSON.parse(manifestText)
-    human = JSON.parse(humanText)
   } catch (error) {
     throw new Error(`the bundle's JSON is unreadable: ${error.message}`)
   }
   if (manifest?.format !== BUNDLE_FORMAT) {
     throw new Error(`unsupported bundle format ${JSON.stringify(manifest?.format)}; expected ${BUNDLE_FORMAT}`)
   }
-  if (!human || typeof human !== 'object' || typeof human.id !== 'string') {
-    throw new Error('the bundle holds no usable digital human record')
+  const humans: Human[] = []
+  for (const [path, content] of Object.entries(files)) {
+    if (!path.startsWith('humans/') || !path.endsWith('.json')) continue
+    let record: Human
+    try {
+      record = JSON.parse(content.toString('utf8'))
+    } catch (error) {
+      throw new Error(`the record in ${path} is unreadable: ${error.message}`)
+    }
+    if (!record || typeof record !== 'object' || typeof record.id !== 'string') {
+      throw new Error(`the bundle holds no usable digital human record at ${path}`)
+    }
+    humans.push(record)
   }
+  if (humans.length === 0) throw new Error('the bundle holds no digital human record')
   const bySkill = new Map<string, { files: number; bytes: number }>()
   for (const [path, content] of Object.entries(files)) {
     if (!path.startsWith('skills/')) continue
@@ -270,7 +291,7 @@ export function readBundle(archive: Buffer): BundlePreview {
   }
   return {
     manifest,
-    human,
+    humans,
     skills: [...bySkill].map(([name, entry]) => ({ name, ...entry })),
     bytes: archive.length,
   }
@@ -278,32 +299,34 @@ export function readBundle(archive: Buffer): BundlePreview {
 
 /** What an import did, so the page can report it rather than guess. */
 export interface ImportResult {
-  id: string
-  /** The id the record was written under, which may differ when it was renamed. */
+  /** The ids the records were written under, in the bundle's order. */
+  ids: string[]
+  /** Whether any id differs from the one the bundle carried. */
   renamed: boolean
   skills: string[]
   memory: boolean
-  /** The record to store, with the ids the import actually used. */
-  record: Human
+  /** The records to store, with the ids the import actually used. */
+  records: Human[]
 }
 
 /**
  * Write one bundle's contents into the registry.
  *
  * @param home - the registry root.
- * @param archive - the uploaded bundle.
- * @param options.id - the id to write under, overriding the bundle's own.
+ * @param archive - the uploaded bundle, holding one record or many.
+ * @param options.id - an id to write a **single-record** bundle under.
  * @param options.overwrite - whether an existing skill of the same name is replaced.
  * @returns what was written.
  */
-export async function unpackHuman(
+export async function unpackHumans(
   home: string,
   archive: Buffer,
   { id, overwrite = true }: { id?: string; overwrite?: boolean } = {},
 ): Promise<ImportResult> {
   const preview = readBundle(archive)
-  const target = String(id ?? preview.human.id).trim()
-  if (!validSkillName(target)) throw new Error(`id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}: ${JSON.stringify(target)}`)
+  if (id !== undefined && preview.humans.length !== 1) {
+    throw new Error('an id can only be given when the bundle holds exactly one digital human')
+  }
   const files = readTar(gunzipSync(archive))
   const written: string[] = []
   for (const skill of preview.skills) {
@@ -327,20 +350,39 @@ export async function unpackHuman(
     const staging = `${dir}.${process.pid}.tmp`
     await rm(staging, { recursive: true, force: true })
     for (const [path, content] of Object.entries(entries)) {
-      const target2 = join(staging, path)
-      await mkdir(dirname(target2), { recursive: true })
-      await writeFile(target2, content, 'utf8')
+      const target = join(staging, path)
+      await mkdir(dirname(target), { recursive: true })
+      await writeFile(target, content, 'utf8')
     }
     await rm(dir, { recursive: true, force: true })
     await rename(staging, dir)
     written.push(skill.name)
   }
-  const record = { ...preview.human, id: target, skills: written }
-  const memory = files['memory.md']
-  if (memory) {
-    const dir = join(home, 'humans', target)
-    await mkdir(dir, { recursive: true })
-    await writeFile(join(dir, 'memory.md'), memory.toString('utf8'), 'utf8')
+
+  const records: Human[] = []
+  let memory = false
+  for (const carried of preview.humans) {
+    const target = id ?? carried.id
+    if (!validSkillName(target)) {
+      throw new Error(`id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}: ${JSON.stringify(target)}`)
+    }
+    // Only the skills this import actually wrote are mounted: naming one that was
+    // skipped would leave the record pointing at nothing.
+    const record: Human = { ...carried, id: target, skills: (carried.skills ?? []).filter((name) => written.includes(name)) }
+    records.push(record)
+    const memoryFile = files[`memory/${carried.id}.md`]
+    if (memoryFile) {
+      const dir = join(home, 'humans', target)
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'memory.md'), memoryFile.toString('utf8'), 'utf8')
+      memory = true
+    }
   }
-  return { id: target, renamed: target !== preview.human.id, skills: written, memory: Boolean(memory), record }
+  return {
+    ids: records.map((record) => record.id),
+    renamed: records.some((record, at) => record.id !== preview.humans[at].id),
+    skills: written,
+    memory,
+    records,
+  }
 }

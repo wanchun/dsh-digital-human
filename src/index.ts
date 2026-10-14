@@ -22,7 +22,7 @@ import { HumanChat } from './lib/chat.js'
 import { buildPresetDefinition, presetIdOf, resolveConfigValues } from './lib/presets.js'
 import { buildRegistryTool } from './lib/tools.js'
 import { listLibrary, removeSkill, writeSkill } from './lib/skills.js'
-import { packHuman, readBundle, unpackHuman } from './lib/bundle.js'
+import { packHumans, readBundle, unpackHumans } from './lib/bundle.js'
 import { RPC_PATH } from './lib/rpc.js'
 import { registerRpc } from './lib/rpc.js'
 import { directSenders, syncBotToHuman } from './lib/im.js'
@@ -597,17 +597,29 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           // The id is a query parameter, not a path segment: the route table matches
           // an exact pathname, so `/bundle/<id>` would never reach this handler and
           // the request would fall through to the SPA's 404.
-          const id = url.searchParams.get('id') ?? ''
-          const human = await store.get(id, seed)
-          if (!human) return new Response(`unknown digital human: ${JSON.stringify(id)}`, { status: 404 })
           const includeMemory = url.searchParams.get('memory') === '1'
-          const { archive } = packHuman(home, human, { includeMemory })
+          // `all=1` exports the whole registry; `id=` exports one. Both produce the
+          // same shape, so an import never has to ask which kind it received.
+          let humans: Human[]
+          let label: string
+          if (url.searchParams.get('all') === '1') {
+            humans = (await store.list(seed)).filter((human) => human.enabled !== false)
+            label = 'digital-humans'
+          } else {
+            const id = url.searchParams.get('id') ?? ''
+            const human = await store.get(id, seed)
+            if (!human) return new Response(`unknown digital human: ${JSON.stringify(id)}`, { status: 404 })
+            humans = [human]
+            label = human.id
+          }
+          if (humans.length === 0) return new Response('there is no digital human to export', { status: 404 })
+          const { archive } = packHumans(home, humans, { includeMemory })
           const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '')
           return new Response(archive, {
             status: 200,
             headers: {
               'content-type': 'application/gzip',
-              'content-disposition': `attachment; filename="${human.id}-${stamp}.dh.tar.gz"`,
+              'content-disposition': `attachment; filename="${label}-${stamp}.dh.tar.gz"`,
             },
           })
         }
@@ -623,13 +635,13 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           if (url.searchParams.get('preview') === '1') {
             return Response.json({ ok: true, value: { preview: readBundle(archive) } })
           }
-          const result = await unpackHuman(home, archive, {
+          const result = await unpackHumans(home, archive, {
             id: url.searchParams.get('id') ?? undefined,
             overwrite: url.searchParams.get('overwrite') !== 'false',
           })
-          await store.upsert(result.record as HumanPatch, seed)
+          for (const record of result.records) await store.upsert(record as HumanPatch, seed)
           await refresh()
-          const { record: _stored, ...report } = result
+          const { records: _stored, ...report } = result
           return Response.json({ ok: true, value: report })
         } catch (error) {
           return Response.json({ ok: false, error: { code: 'bad-request', message: error.message } }, { status: 400 })

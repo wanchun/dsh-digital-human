@@ -297,10 +297,10 @@ describe('export and import', () => {
     vi.spyOn(window, 'open').mockImplementation(((url: string) => { opened.push(String(url)); return null }) as never)
     mount({ 'registry.list': () => listOf([bare]) })
     await openBare()
-    fireEvent.click(screen.getByText('导出'))
+    fireEvent.click(screen.getByText('导出全部'))
     // A plain navigation, so the browser saves the file itself rather than the page
     // routing megabytes through the JSON channel.
-    expect(opened).toEqual(['/api/digital-human/bundle?id=bare&memory=1'])
+    expect(opened).toEqual(['/api/digital-human/bundle?all=1&memory=1'])
   })
 
   it('leaves the memory out of the bundle when the record has none', async () => {
@@ -308,8 +308,8 @@ describe('export and import', () => {
     vi.spyOn(window, 'open').mockImplementation(((url: string) => { opened.push(String(url)); return null }) as never)
     mount({ 'registry.list': () => listOf([{ ...bare, memory: false }]) })
     await openBare()
-    fireEvent.click(screen.getByText('导出'))
-    expect(opened).toEqual(['/api/digital-human/bundle?id=bare'])
+    fireEvent.click(screen.getByText('导出全部'))
+    expect(opened).toEqual(['/api/digital-human/bundle?all=1&memory=1'])
   })
 
   it('uploads a bundle and reports what it wrote', async () => {
@@ -318,14 +318,14 @@ describe('export and import', () => {
     globalThis.fetch = (async (url: string, init: any) => {
       posted.push(String(url))
       void init
-      return { json: async () => ({ ok: true, value: { id: 'imported', skills: ['qs'], memory: true } }) }
+      return { json: async () => ({ ok: true, value: { ids: ['imported'], skills: ['qs'], memory: true } }) }
     }) as never
     try {
       mount({ 'registry.list': () => listOf([bare]) })
       await settle()
       const input = document.querySelector('input[accept*=".gz"]') as HTMLInputElement
       fireEvent.change(input, { target: { files: [new File(['x'], 'a.dh.tar.gz')] } })
-      await waitFor(() => expect(screen.getByText(/已导入 imported/)).toBeTruthy())
+      await waitFor(() => expect(screen.getByText(/已导入 1 个数字人（imported）/)).toBeTruthy())
       expect(posted).toEqual(['/api/digital-human/bundle'])
       expect(screen.getByText(/技能 1 个，含记忆/)).toBeTruthy()
     } finally {
