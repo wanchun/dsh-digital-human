@@ -15,7 +15,7 @@
     "noImplicitAny": false,
     "useUnknownInCatchVariables": false,
     "skipLibCheck": true,
-    "declaration": false,
+    "declaration": true,
     "sourceMap": false,
     "allowJs": false,
     "baseUrl": ".",

@@ -23,6 +23,7 @@
   },
   "type": "module",
   "main": "./build/host/index.js",
+  "types": "./build/host/index.d.ts",
   "exports": {
     ".": "./build/host/index.js",
     "./tools": "./build/host/tools.js",
@@ -41,7 +42,8 @@
     "client.js",
     "icon.svg",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "README_EN.md"
   ],
   "publishConfig": {
     "access": "public"
