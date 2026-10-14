@@ -586,7 +586,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   }, log)
 
   const bundleRoute = ctx.get?.('connection')
-  if (typeof bundleRoute?.fetch?.register === 'function') {
+  if (typeof bundleRoute?.fetch?.register === 'function') try {
     bundleRoute.fetch.register({
       path: `${RPC_PATH}/bundle`,
       methods: ['GET', 'POST'],
@@ -594,7 +594,10 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       async fetch(request) {
         const url = new URL(request.url)
         if (request.method === 'GET') {
-          const id = decodeURIComponent(url.pathname.slice(`${RPC_PATH}/bundle/`.length))
+          // The id is a query parameter, not a path segment: the route table matches
+          // an exact pathname, so `/bundle/<id>` would never reach this handler and
+          // the request would fall through to the SPA's 404.
+          const id = url.searchParams.get('id') ?? ''
           const human = await store.get(id, seed)
           if (!human) return new Response(`unknown digital human: ${JSON.stringify(id)}`, { status: 404 })
           const includeMemory = url.searchParams.get('memory') === '1'
@@ -633,6 +636,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         }
       },
     })
+  }
+ catch (error) {
+    // A refused route must not take the rest of `apply` with it: the presets and the
+    // management route are already up, and the failure is worth seeing.
+    log(`the bundle route was refused: ${error.message}`)
   }
 
   // A digital human works autonomously: it takes a task from a peer and runs

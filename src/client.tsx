@@ -796,8 +796,10 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   const exportHuman = () => {
     const id = (draft?.id ?? '').trim()
     if (!id) return
-    const memory = draft?.memory === false ? '' : '?memory=1'
-    window.open(`/api/digital-human/bundle/${encodeURIComponent(id)}${memory}`, '_blank')
+    const memory = draft?.memory === false ? '' : '&memory=1'
+    // The id is a query parameter: the route table matches an exact pathname, so a
+    // path segment would miss the handler and land on the SPA's 404.
+    window.open(`/api/digital-human/bundle?id=${encodeURIComponent(id)}${memory}`, '_blank')
   }
 
   /** Read one bundle into the registry. */

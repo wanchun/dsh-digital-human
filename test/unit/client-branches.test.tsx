@@ -300,7 +300,7 @@ describe('export and import', () => {
     fireEvent.click(screen.getByText('导出'))
     // A plain navigation, so the browser saves the file itself rather than the page
     // routing megabytes through the JSON channel.
-    expect(opened).toEqual(['/api/digital-human/bundle/bare?memory=1'])
+    expect(opened).toEqual(['/api/digital-human/bundle?id=bare&memory=1'])
   })
 
   it('leaves the memory out of the bundle when the record has none', async () => {
@@ -309,7 +309,7 @@ describe('export and import', () => {
     mount({ 'registry.list': () => listOf([{ ...bare, memory: false }]) })
     await openBare()
     fireEvent.click(screen.getByText('导出'))
-    expect(opened).toEqual(['/api/digital-human/bundle/bare'])
+    expect(opened).toEqual(['/api/digital-human/bundle?id=bare'])
   })
 
   it('uploads a bundle and reports what it wrote', async () => {

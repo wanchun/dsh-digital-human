@@ -16,7 +16,7 @@
   "homepage": "https://github.com/wanchun/dsh-digital-human#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/wanchun/dsh-digital-human"
+    "url": "git+https://github.com/wanchun/dsh-digital-human.git"
   },
   "bugs": {
     "url": "https://github.com/wanchun/dsh-digital-human/issues"

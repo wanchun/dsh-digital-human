@@ -419,7 +419,7 @@ describe('the bundle route', () => {
 
   it('downloads one digital human as a named gzip file', async () => {
     const { route } = await withRoutes()
-    const answer = await route.fetch(new Request('http://x/api/digital-human/bundle/pm-assistant'))
+    const answer = await route.fetch(new Request('http://x/api/digital-human/bundle?id=pm-assistant'))
     expect(answer.status).toBe(200)
     expect(answer.headers.get('content-type')).toBe('application/gzip')
     expect(answer.headers.get('content-disposition')).toContain('pm-assistant-')
@@ -430,8 +430,8 @@ describe('the bundle route', () => {
 
   it('refuses an unknown record, and a path with no id', async () => {
     const { route } = await withRoutes()
-    expect((await route.fetch(new Request('http://x/api/digital-human/bundle/nobody'))).status).toBe(404)
-    expect((await route.fetch(new Request('http://x/api/digital-human/bundle/'))).status).toBe(404)
+    expect((await route.fetch(new Request('http://x/api/digital-human/bundle?id=nobody'))).status).toBe(404)
+    expect((await route.fetch(new Request('http://x/api/digital-human/bundle?id='))).status).toBe(404)
   })
 
   it('refuses a body that is not a bundle', async () => {
@@ -443,7 +443,7 @@ describe('the bundle route', () => {
 
   it('previews a bundle without writing anything', async () => {
     const { route, platform } = await withRoutes()
-    const exported = await (await route.fetch(new Request('http://x/api/digital-human/bundle/pm-assistant'))).arrayBuffer()
+    const exported = await (await route.fetch(new Request('http://x/api/digital-human/bundle?id=pm-assistant'))).arrayBuffer()
     const answer = await route.fetch(post(Buffer.from(exported), '?preview=1'))
     const value = (await answer.json()).value
     expect(value.preview.human.id).toBe('pm-assistant')
@@ -454,7 +454,7 @@ describe('the bundle route', () => {
 
   it('imports a bundle under another id and registers its preset', async () => {
     const { route, platform } = await withRoutes()
-    const exported = await (await route.fetch(new Request('http://x/api/digital-human/bundle/pm-assistant'))).arrayBuffer()
+    const exported = await (await route.fetch(new Request('http://x/api/digital-human/bundle?id=pm-assistant'))).arrayBuffer()
     const answer = await route.fetch(post(Buffer.from(exported), '?id=pm-copy'))
     expect(answer.status).toBe(200)
     const value = (await answer.json()).value
@@ -464,7 +464,7 @@ describe('the bundle route', () => {
 
   it('refuses an id it will not use, and keeps an existing skill when told to', async () => {
     const { route } = await withRoutes()
-    const exported = Buffer.from(await (await route.fetch(new Request('http://x/api/digital-human/bundle/pm-assistant'))).arrayBuffer())
+    const exported = Buffer.from(await (await route.fetch(new Request('http://x/api/digital-human/bundle?id=pm-assistant'))).arrayBuffer())
     const bad = await route.fetch(post(exported, '?id=../evil'))
     expect(bad.status).toBe(400)
     expect((await bad.json()).error.message).toContain('id must match')
@@ -478,9 +478,9 @@ describe('the bundle route', () => {
     // The seed writes no memory, so one is put there for the export to find.
     await mkdir(join(home, 'humans', 'pm-assistant'), { recursive: true })
     await writeFile(join(home, 'humans', 'pm-assistant', 'memory.md'), '# now\n## State | x\n')
-    const plain = Buffer.from(await (await route.fetch(new Request('http://x/api/digital-human/bundle/pm-assistant'))).arrayBuffer())
+    const plain = Buffer.from(await (await route.fetch(new Request('http://x/api/digital-human/bundle?id=pm-assistant'))).arrayBuffer())
     const withMemory = Buffer.from(await (await route.fetch(
-      new Request('http://x/api/digital-human/bundle/pm-assistant?memory=1'),
+      new Request('http://x/api/digital-human/bundle?id=pm-assistant&memory=1'),
     )).arrayBuffer())
     expect(withMemory.length).toBeGreaterThan(plain.length)
   })
