@@ -319,6 +319,32 @@ describe('notify_bot', () => {
     expect(result).toMatchObject({ botId: 'wecom_1', targetId: 'wohR_chat' })
   })
 
+  it('sends to a raw chat id as a group when kind says so', async () => {
+    // A group chat id is addressed the same way as a person's, and only `kind`
+    // tells the channel which of the two it is.
+    const send = vi.fn(async () => ({ ok: true }))
+    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [] }), 'notify_bot')
+    await notify.execute({ message: 'hi', to: 'wrGROUP', kind: 'group' })
+    expect(send).toHaveBeenCalledWith(
+      'wecom_1',
+      { kind: 'group', route: { chatId: 'wrGROUP' } },
+      'hi',
+      { format: 'plain' },
+    )
+  })
+
+  it('falls back to target-id delivery when the target list cannot be read', async () => {
+    // The documented trade: an unreadable roster keeps the original behaviour
+    // instead of treating every target as a raw chat id.
+    const send = vi.fn(async () => ({ ok: true }))
+    const notify = toolOf(build(serviceStub(), {
+      send,
+      listTargets: async () => { throw new Error('im is down') },
+    }), 'notify_bot')
+    await notify.execute({ message: 'hi', to: 'leader' })
+    expect(send).toHaveBeenCalledWith('wecom_1', 'leader', 'hi', { format: 'plain' })
+  })
+
   it('refuses when IM is absent, when nothing is bound and when the text is empty', async () => {
     const absent = toolOf(build(serviceStub(), undefined), 'notify_bot')
     await expect(absent.execute({ message: 'x' })).rejects.toThrow(/IM plugin is not active/)
