@@ -137,22 +137,23 @@ describe('a record whose directory is not a known Workspace', () => {
   })
 })
 
-describe('the working-directory suffix', () => {
+describe('the working directory in the prompt', () => {
   const store = { file: '/h/humans.json', memoryPath: (id: string) => `/h/${id}/memory.md` }
   const human = normalizeHuman({ id: 'a', name: 'A', systemPrompt: 'p' })
 
-  it('is omitted when the session will have no directory', () => {
-    // The renderer throws when a registered variable has no value, so a suffix that
-    // names `{{cwd}}` would kill every turn of a profile with no workspace.
-    const config = buildPresetDefinition(human, {
-      store, toolsPluginName: '@x/tools', order: 1, hasWorkingDirectory: false,
-    }).plugins[0].config
+  it('is not announced by a suffix, because the loop registers no cwd', () => {
+    // The loop registers `provider` and `model` only. The working-directory service
+    // states the directory as literal context, so a suffix naming `{{cwd}}` would
+    // fail prompt assembly for every turn before any model request.
+    const config = buildPresetDefinition(human, { store, toolsPluginName: '@x/tools', order: 1 }).plugins[0].config
     expect(config.suffix).toBeUndefined()
   })
 
-  it('is present when a directory is available', () => {
-    const config = buildPresetDefinition(human, { store, toolsPluginName: '@x/tools', order: 1 }).plugins[0].config
-    expect(config.suffix).toContain('{{cwd}}')
+  it('neutralises a cwd the persona writes itself', () => {
+    const config = buildPresetDefinition(normalizeHuman({ id: 'a', name: 'A', systemPrompt: 'dir {{cwd}}' }), {
+      store, toolsPluginName: '@x/tools', order: 1,
+    }).plugins[0].config
+    expect(config.prefix).toContain('〔未配置：cwd〕')
   })
 })
 

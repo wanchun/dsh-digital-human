@@ -318,9 +318,6 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         order: order++,
         peerNames,
         ...(platformVariables ? { platformVariables } : {}),
-        // The renderer throws when a registered variable has no value, so a session
-        // that will have no working directory must not be told about one.
-        hasWorkingDirectory: Boolean(record.workspace || defaultWorkspace),
       })
       permissionByPreset.set(definition.id, permissionPresetOf(record, fallbackPermission))
       try {

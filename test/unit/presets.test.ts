@@ -153,11 +153,11 @@ describe('resolveConfig', () => {
 
 describe('neutralizePlaceholders', () => {
   it('keeps a registered variable', () => {
-    expect(neutralizePlaceholders('dir {{cwd}}')).toBe('dir {{cwd}}')
+    expect(neutralizePlaceholders('dir {{provider}}')).toBe('dir {{provider}}')
   })
 
   it('keeps every registered name', () => {
-    const text = '{{provider}} {{model}} {{cwd}}'
+    const text = '{{provider}} {{model}}'
     expect(neutralizePlaceholders(text)).toBe(text)
   })
 
@@ -171,10 +171,10 @@ describe('neutralizePlaceholders', () => {
 
   it('rejects padding the renderer would refuse', () => {
     // The renderer throws on inner whitespace, so passing this through would kill
-    // the very turn this function exists to protect.
-    expect(neutralizePlaceholders('{{ cwd }}')).toBe('〔未配置：cwd〕')
-    expect(neutralizePlaceholders('{{cwd }}')).toBe('〔未配置：cwd〕')
-    expect(neutralizePlaceholders('{{ cwd}}')).toBe('〔未配置：cwd〕')
+    // the very turn this function exists to protect — even for a registered name.
+    expect(neutralizePlaceholders('{{ provider }}')).toBe('〔未配置：provider〕')
+    expect(neutralizePlaceholders('{{provider }}')).toBe('〔未配置：provider〕')
+    expect(neutralizePlaceholders('{{ provider}}')).toBe('〔未配置：provider〕')
   })
 
   it('breaks a group glued to another brace', () => {
@@ -183,19 +183,26 @@ describe('neutralizePlaceholders', () => {
     expect(out).toContain('cwd')
   })
 
+  it('marks a variable the loop does not register', () => {
+    // `cwd` is the case that matters: the working-directory service states the
+    // directory as literal context, so the loop registers no such variable and a
+    // template asking for it would otherwise fail the whole turn.
+    expect(neutralizePlaceholders('{{cwd}}')).toBe('〔未配置：cwd〕')
+  })
+
   it('breaks a lone opener that could pair with a later closer', () => {
     // The valid group is kept — that is the point of the function — while the bare
     // opener is spaced apart so the renderer cannot trip over it.
-    const out = neutralizePlaceholders('a {{ b {{cwd}}')
-    expect(out).toBe('a { { b {{cwd}}')
+    const out = neutralizePlaceholders('a {{ b {{provider}}')
+    expect(out).toBe('a { { b {{provider}}')
   })
 
   it('leaves a trailing closer alone, because the renderer advances past a group', () => {
-    expect(neutralizePlaceholders('{{cwd}}}')).toBe('{{cwd}}}')
+    expect(neutralizePlaceholders('{{provider}}}')).toBe('{{provider}}}')
   })
 
   it('honours an extended allow-list', () => {
-    expect(neutralizePlaceholders('{{tenant}}', ['cwd', 'tenant'])).toBe('{{tenant}}')
+    expect(neutralizePlaceholders('{{tenant}}', ['model', 'tenant'])).toBe('{{tenant}}')
   })
 
   it('is safe on empty input', () => {
@@ -215,7 +222,7 @@ describe('neutralizePlaceholders', () => {
         }
         const name = group[0].slice(2, -2)
         if (!/^[a-z][a-z0-9_]*$/.test(name)) return false
-        if (!['provider', 'model', 'cwd'].includes(name)) return false
+        if (!['provider', 'model'].includes(name)) return false
         last = open + group[0].length
       }
       return true
@@ -295,6 +302,13 @@ describe('renderOperatingContext', () => {
     expect(lines).not.toContain('0 3 * * *')
   })
 
+  it('describes a wake-up that names only a cron', () => {
+    // A cron alone is a valid declaration. The parenthesised detail is added only
+    // when there is a prompt or a conversation to state, so the line stays readable.
+    const lines = renderOperatingContext(record({ subscriptions: [{ cron: '0 3 * * *' }] }), store)
+    expect(lines).toContain('- Your declared wake-ups are: `0 3 * * *`.')
+  })
+
   it('omits the wake-up line when every one is disabled', () => {
     const human = record({ subscriptions: [{ cron: '0 3 * * *', prompt: 'b', enabled: false }] })
     expect(renderOperatingContext(human, store)).not.toContain('wake-ups')
@@ -315,11 +329,11 @@ describe('buildPresetDefinition', () => {
     expect(off.plugins.at(-1)?.config).toMatchObject({ human: 'pm', memory: false })
   })
 
-  it('resolves the prose and keeps the platform suffix variable', () => {
+  it('resolves the prose against the config', () => {
     const human = record({ systemPrompt: '你是「{{bot}}」。', config: { bot: '研发PM助手' } })
     const config = buildPresetDefinition(human, { store, toolsPluginName: '@local/tools', order: 1 }).plugins[0].config
     expect(config.prefix).toContain('你是「研发PM助手」。')
-    expect(config.suffix).toContain('{{cwd}}')
+    expect(config.suffix).toBeUndefined()
   })
 
   it('leaves no placeholder the renderer would refuse', () => {
@@ -329,11 +343,11 @@ describe('buildPresetDefinition', () => {
   })
 
   it('extends the platform variable set instead of replacing it', () => {
-    const human = record({ systemPrompt: '{{cwd}} {{tenant}}' })
+    const human = record({ systemPrompt: '{{provider}} {{tenant}}' })
     const config = buildPresetDefinition(human, {
       store, toolsPluginName: '@local/tools', order: 1, platformVariables: ['tenant'],
     }).plugins[0].config
-    expect(config.prefix).toContain('{{cwd}}')
+    expect(config.prefix).toContain('{{provider}}')
     expect(config.prefix).toContain('{{tenant}}')
   })
 

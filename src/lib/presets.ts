@@ -186,10 +186,13 @@ export function effectiveConfig(human, peerNames = {}) {
  *
  * The renderer treats every `{{name}}` in a section as a variable and fails the
  * whole turn on one it does not know — it reports the set in that failure, and
- * this list is that set. A plugin config may extend it, because a deployment that
- * mounts another prompt plugin gains its variables too.
+ * this list is that set. The loop registers exactly these two. A working
+ * directory is deliberately not among them: the working-directory service states
+ * the directory as literal context, so a template that asks for `{{cwd}}` kills
+ * the turn instead of reaching the model. A plugin config may extend the list,
+ * because a deployment that mounts another prompt plugin gains its variables too.
  */
-const PLATFORM_VARIABLES = Object.freeze(['provider', 'model', 'cwd'])
+const PLATFORM_VARIABLES = Object.freeze(['provider', 'model'])
 
 /**
  * The only inner text the renderer accepts inside a placeholder.
@@ -212,7 +215,7 @@ const RENDERER_VARIABLE = /^[a-z][a-z0-9_]*$/
  *
  * Only the exact form the renderer accepts passes through, and only for a name it
  * knows. An earlier version trimmed the inner text before the check, which let
- * `{{ cwd }}` through — a shape the renderer rejects outright, so the very text
+ * `{{ name }}` through — a shape the renderer rejects outright, so the very text
  * this function exists to defuse still killed the turn.
  *
  * @param text - the assembled prompt.
@@ -253,8 +256,8 @@ export function neutralizePlaceholders(text, allowed = PLATFORM_VARIABLES) {
  * Resolve a persona's `{{name}}` placeholders against the record's config.
  *
  * Only keys the config actually defines are replaced. A template variable the
- * platform owns — the suffix's `{{cwd}}`, for one — therefore survives untouched,
- * which is the whole reason this is not a blanket `{{...}}` rewrite.
+ * platform owns — `{{provider}}`, for one — therefore survives untouched, which
+ * is the whole reason this is not a blanket `{{...}}` rewrite.
  *
  * @param text - the persona prose, as stored.
  * @param config - the record's config bag, if it has one.
@@ -361,9 +364,9 @@ export function renderOperatingContext(human, store) {
  * The digital human's own row is appended last so the preset scope owns the
  * platform tool's visibility.
  */
-export function buildPresetDefinition(human, { store, toolsPluginName, order, peerNames = {}, platformVariables = [] as string[], hasWorkingDirectory = true }) {
+export function buildPresetDefinition(human, { store, toolsPluginName, order, peerNames = {}, platformVariables = [] as string[] }) {
   // Extend, never replace: a deployment that adds a variable must not thereby
-  // un-register `cwd`, which the suffix depends on.
+  // un-register the two the loop owns.
   const allowedVariables = [...new Set([...PLATFORM_VARIABLES, ...platformVariables])]
   const rows = withoutPersona(BASELINE_ROWS).map((row) => {
     if (row?.id === 'tool-bash' && process.platform === 'win32') return { ...row, disabled: true }
@@ -387,9 +390,6 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
         `${resolveConfig(human.systemPrompt, effectiveConfig(human, peerNames))}${renderOperatingContext(human, store)}${renderConfigBlock(human, peerNames).join('\n')}`,
         allowedVariables,
       ),
-      // The renderer throws when a registered variable has no value, so a session
-      // that will have no working directory must not be told about one.
-      ...(hasWorkingDirectory ? { suffix: 'Your working directory is {{cwd}}.' } : {}),
     },
   }
   return {

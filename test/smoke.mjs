@@ -187,13 +187,13 @@ console.log('7) the config bag and its placeholders')
   check('spacing inside the braces is tolerated',
     resolveConfig('{{ leader_name }}', { leader_name: '万纯' }) === '万纯')
   check('an unconfigured placeholder is left alone',
-    resolveConfig('{{cwd}} 与 {{leader_name}}', { leader_name: '万纯' }) === '{{cwd}} 与 万纯')
-  check('a platform variable survives untouched', resolveConfig('{{cwd}}', { leader_name: '万纯' }) === '{{cwd}}')
+    resolveConfig('{{provider}} 与 {{leader_name}}', { leader_name: '万纯' }) === '{{provider}} 与 万纯')
+  check('a platform variable survives untouched', resolveConfig('{{provider}}', { leader_name: '万纯' }) === '{{provider}}')
   check('no config means no rewriting', resolveConfig('{{a}}', undefined) === '{{a}}')
 
   // The declaration is authoritative, so a key the record declares but leaves
   // empty is reported — while a placeholder the prose merely mentions is not,
-  // which is what keeps a platform variable like {{cwd}} out of the report.
+  // which is what keeps a platform variable like {{provider}} out of the report.
   const block = renderConfigBlock({
     systemPrompt: '称呼 {{leader_name}}，通知 {{leader_chatid}}。',
     config: { leader_name: '万纯' },
@@ -210,7 +210,7 @@ console.log('7) the config bag and its placeholders')
   const prefix = built.plugins[0].config.prefix
   check('the persona prefix carries the resolved value', prefix.includes('组长 万纯。'))
   check('the placeholder itself is gone', !prefix.includes('{{leader_name}}'))
-  check('the platform suffix variable is untouched', built.plugins[0].config.suffix.includes('{{cwd}}'))
+  check('no suffix names the working directory', built.plugins[0].config.suffix === undefined)
   check('the prefix carries the config block', prefix.includes('## 配置（实际值）'))
 }
 
@@ -289,7 +289,7 @@ console.log('9) a declared schema decides what a persona sees')
   check('the prose carries the resolved values',
     prefix.includes('你是「研发PM助手」，TCTP开发一室 的一员。'), prefix.slice(0, 90))
   check('no declared placeholder survives', !/\{\{(team_name|bot_name|peer_name|leader_chatid)\}\}/.test(prefix))
-  check('the platform suffix variable is untouched', built.plugins[0].config.suffix.includes('{{cwd}}'))
+  check('no suffix names the working directory', built.plugins[0].config.suffix === undefined)
 }
 
 console.log('10) an invalid declaration is refused, not ignored')
@@ -320,16 +320,19 @@ console.log('11) no placeholder survives that the renderer would reject')
 {
   // The renderer fails the WHOLE turn on a variable it does not know, so one stray
   // placeholder in a persona costs a session. A visible marker is the right trade.
-  check('a registered variable survives', neutralizePlaceholders('dir {{cwd}}') === 'dir {{cwd}}')
+  check('a registered variable survives', neutralizePlaceholders('dir {{provider}}') === 'dir {{provider}}')
   check('every registered name survives',
-    neutralizePlaceholders('{{provider}} {{model}} {{cwd}}') === '{{provider}} {{model}} {{cwd}}')
+    neutralizePlaceholders('{{provider}} {{model}}') === '{{provider}} {{model}}')
+  // The loop registers no `cwd`: the working-directory service states the directory
+  // as literal context. A template asking for it must be defused, not passed through.
+  check('cwd is not a platform variable', neutralizePlaceholders('{{cwd}}') === '〔未配置：cwd〕')
   check('an unknown name becomes a marker', neutralizePlaceholders('{{nope}}') === '〔未配置：nope〕')
   // A Chinese name is what a hand-written example looks like, and it is exactly
   // what a persona author writes without meaning it as a variable.
   check('a non-ASCII name is neutralised too', neutralizePlaceholders('{{名称}}') === '〔未配置：名称〕')
   check('surrounding text is kept', neutralizePlaceholders('用 {{x}} 表示') === '用 〔未配置：x〕 表示')
   check('a deployment can extend the set',
-    neutralizePlaceholders('{{tenant}}', ['cwd', 'tenant']) === '{{tenant}}')
+    neutralizePlaceholders('{{tenant}}', ['model', 'tenant']) === '{{tenant}}')
   check('an empty or missing text is safe',
     neutralizePlaceholders(undefined) === '' && neutralizePlaceholders('') === '')
 
@@ -340,9 +343,9 @@ console.log('11) no placeholder survives that the renderer would reject')
     const config = buildPresetDefinition(normalizeHuman(human), {
       store, toolsPluginName: '@local/dsh-digital-human/tools', order: 902, peerNames,
     }).plugins[0].config
-    const left = (config.prefix + config.suffix).match(/\{\{[^}]*\}\}/g) ?? []
+    const left = config.prefix.match(/\{\{[^}]*\}\}/g) ?? []
     check(`${human.id} leaves only platform variables`,
-      left.every((token) => ['{{provider}}', '{{model}}', '{{cwd}}'].includes(token)), left.join(' '))
+      left.every((token) => ['{{provider}}', '{{model}}'].includes(token)), left.join(' '))
     check(`${human.id} resolves every declared field`,
       !left.some((token) => token.includes('team_name') || token.includes('peer_name') || token.includes('bot_name')))
   }
