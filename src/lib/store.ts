@@ -11,6 +11,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { DEFAULT_PERMISSION_PRESET } from './types.js'
 import type { Human, HumanPatch } from './types.js'
 
 /** Identifier shape shared by ids, conversation ids, and IM bot ids. */
@@ -178,11 +179,13 @@ export function normalizeHuman(input, now = new Date().toISOString()) {
     },
     subscriptions: subscriptionList(input.subscriptions),
     memory: input.memory !== false,
-    // Absent means "the platform default", which the platform resolves. Storing
-    // an empty string would make a record claim a preset that does not exist.
-    ...(typeof input.permissionPreset === 'string' && input.permissionPreset.trim()
-      ? { permissionPreset: input.permissionPreset.trim() }
-      : {}),
+    // Every record carries the preset it runs under, so nothing invisible decides it.
+    // An empty string is not a preset name, so it falls back to the creation default
+    // rather than making the record claim a preset that does not exist.
+    permissionPreset:
+      typeof input.permissionPreset === 'string' && input.permissionPreset.trim()
+        ? input.permissionPreset.trim()
+        : DEFAULT_PERMISSION_PRESET,
     ...(configMap(input.config) === undefined ? {} : { config: configMap(input.config) }),
     ...(configSchemaList(input.configSchema).length === 0 ? {} : { configSchema: configSchemaList(input.configSchema) }),
     createdAt: typeof input.createdAt === 'string' ? input.createdAt : now,

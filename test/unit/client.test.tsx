@@ -223,21 +223,21 @@ describe('the detail form', () => {
   it('offers the permission roster the host reports, not a list copied into the page', () => {
     const field = screen.getByText('权限预设').parentElement!
     fireEvent.click(within(field).getByRole('button'))
-    expect(within(field).getByRole('menuitem', { name: '平台默认' })).toBeTruthy()
     expect(within(field).getByRole('menuitem', { name: /完全权限 —— 不限制沙箱/ })).toBeTruthy()
     fireEvent.click(within(field).getByRole('menuitem', { name: /^只读 ——/ }))
     expect(within(field).getByText(/只读 ——/)).toBeTruthy()
   })
 
-  it('falls back to the platform default when the roster cannot be read', async () => {
+  it('shows the stored preset when the roster cannot be read', async () => {
     view.unmount()
     view = mount({ ...defaultAnswers(), 'permissions.list': () => new Error('no catalog') })
     await settle()
     fireEvent.click(screen.getByText('研发PM助手'))
     await waitFor(() => expect(screen.getByDisplayValue('研发PM助手')).toBeTruthy())
     const field = screen.getByText('权限预设').parentElement!
-    fireEvent.click(within(field).getByRole('button'))
-    expect(within(field).getByRole('menuitem', { name: '平台默认' })).toBeTruthy()
+    // A record without a stored preset reads as the creation default, and an empty
+    // roster must still show it rather than an empty picker.
+    expect(within(field).getByText(/danger-full-access（不在选项中）/)).toBeTruthy()
   })
 
   it('picks a bound bot and warns about a workspace mismatch', () => {

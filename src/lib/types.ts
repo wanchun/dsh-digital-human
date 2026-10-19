@@ -6,6 +6,16 @@
  */
 
 /** One declared wake-up. Delivered by the shipped schedule tools. */
+/**
+ * Permission preset a digital human is created with.
+ *
+ * Every record carries this value explicitly, so nothing invisible decides what a
+ * record runs under: the stored field is the whole answer. An IM turn composes no
+ * approval answerer, so full access — which neither confines the sandbox nor asks —
+ * is the only preset that cannot stall the work. A record may name another preset.
+ */
+export const DEFAULT_PERMISSION_PRESET = 'danger-full-access'
+
 export interface HumanSubscription {
   cron: string
   prompt: string

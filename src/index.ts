@@ -29,6 +29,7 @@ import { directSenders, syncBotToHuman } from './lib/im.js'
 import type { ImSyncResult } from './lib/im.js'
 import { DEFAULT_WORKSPACE_TITLE, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
 import type { Config, Ctx, Human, HumanPatch, WorkspaceView } from './lib/types.js'
+import { DEFAULT_PERMISSION_PRESET } from './lib/types.js'
 
 /** Cordis plugin name. */
 export const name = 'digital-human'
@@ -44,19 +45,6 @@ export const inject = ['agentPresets', 'sessionController', 'tools']
 const DEFAULTS = {
   basePreset: 'standard',
   toolsPlugin: '@harrywan/dsh-digital-human/tools',
-  /**
-   * Permission preset for a digital human that names none.
-   *
-   * A digital human works without a person watching the approval prompt, and an
-   * IM turn composes no approval answerer — so the deployment default
-   * (`workspace-write` plus `ask`) would fail closed and stall the work. Full
-   * access is the preset that neither confines the sandbox nor asks.
-   *
-   * It is a setting rather than a constant because the right answer is a
-   * deployment's policy, not this plugin's: a profile that trusts its digital
-   * humans differently says so in its own composition.
-   */
-  permissionPreset: 'danger-full-access',
 }
 
 /** First preset order handed to a generated digital-human preset. */
@@ -93,15 +81,16 @@ function positiveSetting(config: Config, key: string, fallback: number): number 
 }
 
 /**
- * The permission preset one record runs under: its own choice, else the
- * deployment's.
+ * The permission preset one record runs under.
+ *
+ * A record created before this field existed falls back to the creation default,
+ * which is what the registry now writes into every new record.
  *
  * @param human - the record to read.
- * @param fallback - the deployment default.
  */
-function permissionPresetOf(human: Human, fallback: string): string {
+function permissionPresetOf(human: Human): string {
   const named = typeof human.permissionPreset === 'string' ? human.permissionPreset.trim() : ''
-  return named || fallback
+  return named || DEFAULT_PERMISSION_PRESET
 }
 
 /** Read one optional string setting. */
@@ -123,7 +112,6 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   const home = setting(config, 'home') || defaultHome()
   const basePreset = setting(config, 'basePreset')
   const toolsPlugin = setting(config, 'toolsPlugin')
-  const fallbackPermission = setting(config, 'permissionPreset')
   // An absent or empty list means "use the built-in platform set".
   const platformVariables = Array.isArray(config.platformVariables) && config.platformVariables.length > 0
     ? config.platformVariables.filter((name) => typeof name === 'string' && name)
@@ -319,7 +307,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         peerNames,
         ...(platformVariables ? { platformVariables } : {}),
       })
-      permissionByPreset.set(definition.id, permissionPresetOf(record, fallbackPermission))
+      permissionByPreset.set(definition.id, permissionPresetOf(record))
       try {
         disposers.push(await ctx.agentPresets.register(definition))
         activePresets.set(record.id, definition.id)

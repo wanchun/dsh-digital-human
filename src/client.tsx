@@ -11,6 +11,7 @@
  */
 
 import React from 'react'
+import { DEFAULT_PERMISSION_PRESET } from './lib/types.js'
 import type { ConfigField, Human, HumanPatch, ImBot, SkillSummary, WorkspaceView } from './lib/types.js'
 import {
   Button,
@@ -417,7 +418,7 @@ const BLANK: Draft = {
   peers: [],
   botId: '',
   owner: '',
-  permissionPreset: '',
+  permissionPreset: DEFAULT_PERMISSION_PRESET,
   enabled: true,
   memory: true,
   creating: false,
@@ -438,7 +439,7 @@ function toDraft(human: Human): Draft {
     peers: [...(human.peers ?? [])],
     botId: human.im?.botId ?? '',
     owner: human.im?.owner ?? '',
-    permissionPreset: human.permissionPreset ?? '',
+    permissionPreset: human.permissionPreset ?? DEFAULT_PERMISSION_PRESET,
     enabled: human.enabled !== false,
     memory: human.memory !== false,
     creating: false,
@@ -1131,14 +1132,13 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
             label="权限预设"
             value={draft?.permissionPreset ?? ''}
             options={[
-              { id: '', label: '平台默认' },
               ...permissionChoices.map((choice) => ({
                 id: choice.value,
                 label: choice.description ? `${choice.label} —— ${choice.description}` : choice.label,
               })),
             ]}
             onChange={(value) => patch({ permissionPreset: value })}
-            hint="只作用于这个数字人自己的会话。IM 里没有人工应答批准，所以后两项会让它卡住。"
+            hint="只作用于这个数字人自己的会话。IM 里没有人工应答批准，选一个需要批准的预设会让它卡住。"
           />
 
           <Checkbox

@@ -420,7 +420,7 @@ describe('the permission roster the page offers', () => {
     await waitFor(() => expect(screen.getByDisplayValue('PM')).toBeTruthy())
     const field = screen.getByText('权限预设').parentElement!
     fireEvent.click(within(field).getByRole('button'))
-    expect(within(field).getByRole('menuitem', { name: '平台默认' })).toBeTruthy()
+    expect(within(field).getByText(/danger-full-access（不在选项中）/)).toBeTruthy()
   })
 })
 
