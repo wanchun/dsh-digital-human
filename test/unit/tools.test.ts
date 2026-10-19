@@ -268,7 +268,10 @@ describe('notify_bot', () => {
 
   it('honours an explicit bot, target and format', async () => {
     const send = vi.fn(async () => ({ ok: true }))
-    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [] }), 'notify_bot')
+    const notify = toolOf(
+      build(serviceStub(), { send, listTargets: async () => [{ targetId: 'group-1' }] }),
+      'notify_bot',
+    )
     await notify.execute({ message: 'hi', bot_id: 'wecom_9', to: 'group-1', format: 'markdown' })
     expect(send).toHaveBeenCalledWith('wecom_9', 'group-1', 'hi', { format: 'markdown' })
   })
@@ -301,6 +304,19 @@ describe('notify_bot', () => {
     }
     const notify = toolOf(build(serviceStub(), im), 'notify_bot')
     await expect(notify.execute({ message: 'x', to: 'x' })).rejects.toThrow(/reports no targets yet/)
+  })
+
+  it('sends to a raw chat id the bot has never saved as a target', async () => {
+    const send = vi.fn(async () => ({ ok: true }))
+    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [] }), 'notify_bot')
+    const result = await notify.execute({ message: 'hi', to: 'wohR_chat', kind: 'user' })
+    expect(send).toHaveBeenCalledWith(
+      'wecom_1',
+      { kind: 'user', route: { chatId: 'wohR_chat' } },
+      'hi',
+      { format: 'plain' },
+    )
+    expect(result).toMatchObject({ botId: 'wecom_1', targetId: 'wohR_chat' })
   })
 
   it('refuses when IM is absent, when nothing is bound and when the text is empty', async () => {
@@ -372,6 +388,8 @@ describe('the memory tools', () => {
 
 describe('the registry tool', () => {
   const build = (service: any) => buildRegistryTool({ service })
+
+
 
   it('lists, shows, creates, updates and removes', async () => {
     const service = serviceStub({

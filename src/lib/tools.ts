@@ -402,8 +402,13 @@ export function buildHumanTools({ ctx, service, humanId, memory = true }) {
       + 'Defaults to your configured target. Text only; use the tctp-send skill when you must attach a file, an image, or an @-mention.',
     parameters: {
       message: { type: 'string', required: true, description: 'Message text to send.' },
-      to: { type: 'string', description: 'IM target id. Defaults to the target configured on you.' },
+      to: {
+        type: 'string',
+        description: 'IM target id reported by list_bot_targets, or a raw platform chat id. '
+          + 'A chat id the bot has not saved as a target is sent to directly, without saving one first.',
+      },
       bot_id: { type: 'string', description: 'IM bot id. Defaults to the bot bound to you.' },
+      kind: { type: 'string', enum: ['user', 'group'], description: 'Target kind used when to is a raw chat id. Defaults to user.' },
       format: { type: 'string', enum: ['plain', 'markdown'], description: 'Message format. Defaults to plain.' },
     },
     output: {
@@ -423,20 +428,45 @@ export function buildHumanTools({ ctx, service, humanId, memory = true }) {
       if (!dshIm) throw new Error('the IM plugin is not active, so no bot can send')
       const im = await botOf()
       const botId = String(args.bot_id ?? im.botId ?? '').trim()
-      const targetId = String(args.to ?? im.targetId ?? '').trim()
+      const explicit = String(args.to ?? '').trim()
+      const to = explicit || String(im.targetId ?? '').trim()
       if (!botId) throw new Error('no IM bot is bound to you and no bot_id was given')
-      if (!targetId) throw new Error('no IM target is configured on you and no to was given')
+      if (!to) throw new Error('no IM target is configured on you and no to was given')
       const text = String(args.message ?? '').trim()
       if (!text) throw new Error('message must not be empty')
+      const options = { format: args.format === 'markdown' ? 'markdown' : 'plain' }
+      // A target configured on you is already saved, so it is addressed as a target id.
+      // An explicit `to` is checked against the saved targets first, and anything the bot
+      // does not already report is taken as a raw platform chat id and sent to directly:
+      // the IM delivery service accepts an unregistered draft target, so nobody has to
+      // save a target before a message can reach that chat. An unreadable target list
+      // keeps the original target-id behaviour instead of failing the send.
+      let saved: string[] | null = null
+      if (explicit) {
+        try {
+          const known = await dshIm.listTargets(botId)
+          if (Array.isArray(known)) saved = known.map((entry) => String(entry?.targetId ?? ''))
+        } catch {
+          saved = null
+        }
+      }
+      if (!explicit || saved === null || saved.includes(to)) {
+        try {
+          await dshIm.send(botId, to, text, options)
+        } catch (error) {
+          // Fail with the options. A bare "Unknown target" leaves the model no way to
+          // learn the right one.
+          throw new Error(`${error.message} ${await targetHelp(dshIm, botId)}`)
+        }
+        return { detail: `Sent to ${to} through bot ${botId}.`, botId, targetId: to }
+      }
+      const kind = args.kind === 'group' ? 'group' : 'user'
       try {
-        await dshIm.send(botId, targetId, text, { format: args.format === 'markdown' ? 'markdown' : 'plain' })
+        await dshIm.send(botId, { kind, route: { chatId: to } }, text, options)
       } catch (error) {
-        // Fail with the options. A bare "Unknown target" leaves the model no way to
-        // learn the right one, and a chat id is not a target: the IM plugin
-        // addresses targets by the names it reports, not by the chat's own id.
         throw new Error(`${error.message} ${await targetHelp(dshIm, botId)}`)
       }
-      return { detail: `Sent to ${targetId} through bot ${botId}.`, botId, targetId }
+      return { detail: `Sent to raw chat id ${to} as ${kind} through bot ${botId}.`, botId, targetId: to }
     },
   }
 
