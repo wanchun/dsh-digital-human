@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { claimOwner, directSenders, syncBotToHuman } from '../../src/lib/im'
+import { claimOwner, directSenderOf, directSenders, syncBotToHuman } from '../../src/lib/im'
 
 let root = ''
 let home = ''
@@ -92,6 +92,67 @@ describe('claimOwner', () => {
   it('claims nothing without a sender', () => {
     expect(claimOwner(home, 'wecom_none')).toBeUndefined()
     expect(claimOwner(home, undefined)).toBeUndefined()
+  })
+})
+
+describe('directSenderOf', () => {
+  it('attributes a session to the direct sender who opened it', () => {
+    stateFor('wecom_1', { 'group:wrGROUP': 'session-group', 'direct:wohR_a': 'session-a' })
+    expect(directSenderOf(home, 'wecom_1', 'session-a')).toBe('wohR_a')
+  })
+
+  it('accepts a session id with or without its prefix', () => {
+    // The channel state holds whatever id the session advertised, and a caller may
+    // hold either spelling, so neither side may assume one.
+    stateFor('wecom_1', { 'direct:wohR_a': 'a' })
+    expect(directSenderOf(home, 'wecom_1', 'a')).toBe('wohR_a')
+    expect(directSenderOf(home, 'wecom_1', 'session-a')).toBe('wohR_a')
+  })
+
+  it('is null for a group, which has no single sender', () => {
+    // A group session must not be attributed to whoever happens to be listed.
+    stateFor('wecom_1', { 'group:wrGROUP': 'session-group' })
+    expect(directSenderOf(home, 'wecom_1', 'session-group')).toBeNull()
+  })
+
+  it('is null when the direct key carries no sender id', () => {
+    stateFor('wecom_1', { 'direct:   ': 'session-a' })
+    expect(directSenderOf(home, 'wecom_1', 'session-a')).toBeNull()
+  })
+
+  it('is null for a session no conversation maps', () => {
+    stateFor('wecom_1', { 'direct:wohR_a': 'session-a' })
+    expect(directSenderOf(home, 'wecom_1', 'session-other')).toBeNull()
+  })
+
+  it('skips a conversation whose session value is not a string', () => {
+    // The file belongs to the IM plugin and is not schema-checked here, so one odd
+    // entry must not hide the entry that does match.
+    stateFor('wecom_1', { 'direct:wohR_bad': 42 as unknown as string, 'direct:wohR_a': 'session-a' })
+    expect(directSenderOf(home, 'wecom_1', 'session-a')).toBe('wohR_a')
+  })
+
+  it('is null without a bot id, without a session id, or for a bot id that names no channel', () => {
+    expect(directSenderOf(home, undefined, 'session-a')).toBeNull()
+    expect(directSenderOf(home, 'wecom_1', '')).toBeNull()
+    expect(directSenderOf(home, '1234', 'session-a')).toBeNull()
+  })
+
+  it('is null for a missing file and for a malformed one', () => {
+    expect(directSenderOf(home, 'wecom_missing', 'session-a')).toBeNull()
+    const dir = join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_bad')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'state.json'), '{ not json')
+    expect(directSenderOf(home, 'wecom_bad', 'session-a')).toBeNull()
+  })
+
+  it('is null when the state is not an object and when it holds no sessions', () => {
+    const dir = join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_odd')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'state.json'), 'null')
+    expect(directSenderOf(home, 'wecom_odd', 'session-a')).toBeNull()
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({ version: 1 }))
+    expect(directSenderOf(home, 'wecom_odd', 'session-a')).toBeNull()
   })
 })
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -12,15 +12,20 @@ import { HumanStore, normalizeHuman } from '../../src/lib/store'
 
 const { apply: applyClient } = await import('../../src/client')
 
+let root = ''
 let home = ''
 
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), 'dh-harden-'))
+  // The registry root is a subdirectory of the profile, so the IM integration data
+  // sits one level up exactly as it does in a real install.
+  root = mkdtempSync(join(tmpdir(), 'dh-harden-'))
+  home = join(root, 'digital-human')
+  mkdirSync(home, { recursive: true })
 })
 
 afterEach(() => {
   cleanup()
-  rmSync(home, { recursive: true, force: true })
+  rmSync(root, { recursive: true, force: true })
   vi.restoreAllMocks()
 })
 
@@ -177,6 +182,100 @@ describe('a permission preset that changes', () => {
     // Selecting the same preset again appends nothing.
     event(session, { type: 'agent-preset/selected', data: { agentPreset: 'dh-readonly' } })
     expect(calls).toHaveLength(2)
+  })
+})
+
+describe('a session whose caller is not the owner', () => {
+  /** Write one bot's session state, the file the IM plugin owns. */
+  const stateFor = (botId: string, sessions: Record<string, unknown>) => {
+    const dir = join(dirname(home), 'integrations', `dsh-${botId.split('_', 1)[0]}`, 'bots', botId)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({ version: 1, sessions }))
+  }
+
+  /**
+   * One bound, owned record, the channel state the test names, and the services the
+   * grant path reads.
+   */
+  async function ownedBot(sessions: Record<string, unknown>) {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home })
+    await platform.provided.get('digitalHumans').upsert({
+      id: 'host', name: 'H', memory: false, im: { botId: 'wecom_1', owner: 'wohR_owner' },
+    })
+    stateFor('wecom_1', sessions)
+    const calls: Array<{ session: unknown; name: string }> = []
+    platform.ctx.provide('permissionPresets', { set: (session: unknown, name: string) => calls.push({ session, name }) })
+    const log = vi.fn()
+    platform.ctx.logger = { warn: log, info: () => {} }
+    return {
+      calls,
+      log,
+      created: platform.listeners.find((entry) => entry.event === 'session/created')!.handler,
+    }
+  }
+
+  const lines = (log: any) => log.mock.calls.map(([line]: [unknown]) => String(line))
+
+  it('is confined, and no preset is named for it', async () => {
+    // The record's preset is for the owner. A stranger who reached the bot gets the
+    // sandbox and the approval policy directly, because naming a preset would make
+    // every deployment define the one that means "confined".
+    const { created, calls, log } = await ownedBot({ 'direct:wohR_stranger': 'session-s1' })
+    const append = vi.fn()
+    created({ id: 'session-s1', header: { agentPreset: 'dh-host' }, append })
+    expect(append.mock.calls).toEqual([
+      ['sandbox/mode', { mode: 'workspace-write' }],
+      ['approval/policy', { policy: 'never' }],
+    ])
+    expect(calls).toEqual([])
+    expect(lines(log).some((line) => line.includes('wohR_stranger'))).toBe(true)
+  })
+
+  it('keeps the owner on the record preset', async () => {
+    const { created, calls } = await ownedBot({ 'direct:wohR_owner': 'session-s1' })
+    const append = vi.fn()
+    created({ id: 'session-s1', header: { agentPreset: 'dh-host' }, append })
+    expect(calls.map((entry) => entry.name)).toEqual(['danger-full-access'])
+    expect(append).not.toHaveBeenCalled()
+  })
+
+  it('leaves a group alone, because no single person is talking', async () => {
+    const { created, calls } = await ownedBot({ 'group:wrGROUP': 'session-s1' })
+    created({ id: 'session-s1', header: { agentPreset: 'dh-host' }, append: vi.fn() })
+    expect(calls.map((entry) => entry.name)).toEqual(['danger-full-access'])
+  })
+
+  it('confines a session once, however often it announces itself', async () => {
+    const { created, calls } = await ownedBot({ 'direct:wohR_stranger': 'session-s1' })
+    const append = vi.fn()
+    const session = { id: 'session-s1', header: { agentPreset: 'dh-host' }, append }
+    created(session)
+    created(session)
+    expect(append).toHaveBeenCalledTimes(2)
+    expect(calls).toEqual([])
+  })
+
+  it('reports a session that cannot record the confinement', async () => {
+    // A session without `append` is not the real contract, but the grant must say so
+    // rather than silently leaving the stranger unconfined.
+    const { created, log } = await ownedBot({ 'direct:wohR_stranger': 'session-s1' })
+    created({ id: 'session-s1', header: { agentPreset: 'dh-host' } })
+    expect(lines(log).some((line) => line.includes('cannot record it'))).toBe(true)
+  })
+
+  it('applies the record preset when the bot has no claimed owner', async () => {
+    // Nobody is the owner yet, so there is no stranger to confine.
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home })
+    await platform.provided.get('digitalHumans').upsert({
+      id: 'open', name: 'O', memory: false, im: { botId: 'wecom_2' },
+    })
+    const calls: Array<{ session: unknown; name: string }> = []
+    platform.ctx.provide('permissionPresets', { set: (session: unknown, name: string) => calls.push({ session, name }) })
+    const created = platform.listeners.find((entry) => entry.event === 'session/created')!.handler
+    created({ id: 'session-s9', header: { agentPreset: 'dh-open' }, append: vi.fn() })
+    expect(calls.map((entry) => entry.name)).toEqual(['danger-full-access'])
   })
 })
 
