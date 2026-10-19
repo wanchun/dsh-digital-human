@@ -196,13 +196,24 @@ describe('ensureSession', () => {
   })
 })
 
+describe('delivery while the target is busy', () => {
+  it('steers, so a busy peer reads the message at its next step', async () => {
+    // Not queued behind the running turn: a peer's message is news the recipient
+    // wants now, and waiting would deliver it after the work it may be about.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.deliver(human(), { message: 'hello', from: 'dev', presetId: 'dh-pm' })
+    expect(controller.prompted[0]).toMatchObject({ mode: 'steer' })
+  })
+})
+
 describe('deliver', () => {
   it('creates the session, starts a turn and records both sides', async () => {
     const controller = controllerStub()
     const { chat } = chatWith(controller)
     const delivered = await chat.deliver(human(), { message: 'hello', from: 'dev', presetId: 'dh-pm' })
     expect(delivered).toMatchObject({ conversationId: 'main', accepted: true })
-    expect(controller.prompted[0]).toMatchObject({ mode: 'queue' })
+    expect(controller.prompted[0]).toMatchObject({ mode: 'steer' })
     // The model is told which conversation the message arrived in, so it can reply
     // on the same one without remembering an id from somewhere else.
     const sent = controller.prompted[0].content[0].text

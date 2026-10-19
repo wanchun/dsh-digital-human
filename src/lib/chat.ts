@@ -422,7 +422,10 @@ export class HumanChat {
     const accepted = await this.#ctx.sessionController.prompt({
       requestId: randomUUID(),
       sessionId: target.sessionId,
-      mode: 'queue',
+      // `steer` puts the message into the running turn, so a busy peer reads it at its
+      // next step instead of after the current turn. A peer's message is news the
+      // recipient wants now, not a request to queue behind the work in progress.
+      mode: 'steer',
       // The mailbox keeps the message as written; the model also gets the two facts
       // only the transport knows: who sent it, and which Session to answer.
       content: [{ type: 'text', text: `${peerSource(from, fromSession, target.conversation)}\n${text}` }],
