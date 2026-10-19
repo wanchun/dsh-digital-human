@@ -25,7 +25,7 @@ import { listLibrary, removeSkill, writeSkill } from './lib/skills.js'
 import { packHumans, readBundle, unpackHumans } from './lib/bundle.js'
 import { RPC_PATH } from './lib/rpc.js'
 import { registerRpc } from './lib/rpc.js'
-import { directSenders, syncBotToHuman } from './lib/im.js'
+import { directSenderOf, directSenders, syncBotToHuman } from './lib/im.js'
 import type { ImSyncResult } from './lib/im.js'
 import { DEFAULT_WORKSPACE_TITLE, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
 import type { Config, Ctx, Human, HumanPatch, WorkspaceView } from './lib/types.js'
@@ -46,6 +46,29 @@ const DEFAULTS = {
   basePreset: 'standard',
   toolsPlugin: '@harrywan/dsh-digital-human/tools',
 }
+
+/**
+ * Access a session gets when the person talking is not the owner.
+ *
+ * The owner is whoever claimed the bot. Anyone else gets work confined to the
+ * workspace, plus an approval policy of `never`: an IM turn composes no approval
+ * answerer, so a policy that asks would stall the work instead of limiting it.
+ *
+ * These are the two knobs a permission preset bundles, applied directly. Naming a
+ * preset would make every deployment define one, and an install that did not would
+ * fall back to whatever the session was created with.
+ */
+const GUEST_SANDBOX_MODE = 'workspace-write'
+const GUEST_APPROVAL_POLICY = 'never'
+
+/**
+ * What a session runs as: a named preset, or the two knobs a preset bundles.
+ *
+ * The confined form carries the sender so the log line can name who it was.
+ */
+type TalkerAccess =
+  | { preset: string }
+  | { sandbox: string; approval: string; sender: string }
 
 /** First preset order handed to a generated digital-human preset. */
 const PRESET_ORDER_BASE = 100
@@ -676,18 +699,55 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
    * selection rather than a creation; the header is the creation-time value and
    * is stale by then.
    */
+  /**
+   * How one session should run, given who is talking.
+   *
+   * A record's own preset applies to its owner. A direct conversation with anyone else
+   * is confined to the workspace, so a stranger who reaches the bot cannot act on the
+   * machine. A group, an unclaimed bot, and a session with no IM conversation all keep
+   * the record's preset.
+   *
+   * @param record - the digital human the session runs.
+   * @param sessionId - the session asking for access.
+   * @param fallback - the preset the record itself names.
+   */
+  function accessForTalker(record: Human, sessionId: string, fallback: string): TalkerAccess {
+    const botId = record.im?.botId
+    const owner = record.im?.owner
+    if (!botId || !owner) return { preset: fallback }
+    const sender = directSenderOf(home, botId, sessionId)
+    if (!sender || sender === owner) return { preset: fallback }
+    return { sandbox: GUEST_SANDBOX_MODE, approval: GUEST_APPROVAL_POLICY, sender }
+  }
+
   function grantPermission(session, announced?: string) {
     const sessionId = session?.id ?? session?.header?.id
     if (typeof sessionId !== 'string') return
     const preset = typeof announced === 'string' ? announced : session?.header?.agentPreset
     if (typeof preset !== 'string') return
-    const wanted = permissionByPreset.get(preset)
-    if (!wanted) {
+    const named = permissionByPreset.get(preset)
+    if (!named) {
       pendingPermission.set(sessionId, { session, preset })
       return
     }
+    const record = boundByPreset.get(preset)
+    const access = record ? accessForTalker(record, sessionId, named) : { preset: named }
+    const wanted = 'preset' in access ? access.preset : `confine:${access.sandbox}:${access.approval}`
     if (granted.get(sessionId) === wanted) return
     granted.set(sessionId, wanted)
+    if (!('preset' in access)) {
+      // Confine the session without naming a preset. The two appends are exactly what
+      // the preset service does for its own bundles, so any deployment supports them
+      // and the session reports itself as `custom`.
+      if (typeof session?.append !== 'function') {
+        log(`session ${sessionId} needs ${access.sandbox}/${access.approval}, but the session cannot record it`)
+        return
+      }
+      session.append('sandbox/mode', { mode: access.sandbox })
+      session.append('approval/policy', { policy: access.approval })
+      log(`session ${sessionId} is a direct chat with ${access.sender}, not owner: ${access.sandbox} + ${access.approval}`)
+      return
+    }
     const permissionPresets = ctx.get?.('permissionPresets')
     if (typeof permissionPresets?.set !== 'function') {
       log(`session ${sessionId} runs ${preset}, but permissionPresets is absent, so ${wanted} was not applied`)

@@ -64,6 +64,39 @@ const CONTEXT_GUIDANCE = [
 ].join('\n')
 
 /**
+ * The direct sender a session belongs to.
+ *
+ * The channel state keys every conversation as `<type>:<id>`. A direct conversation
+ * names the person talking, so this is how a session is attributed to whoever reached
+ * the bot. A group has no single sender, and a session IM does not map answers null.
+ *
+ * @param home - the registry root; the integration data sits one level up.
+ * @param botId - the bound bot.
+ * @param sessionId - the session to attribute.
+ * @returns the sender id, or null when no direct conversation owns the session.
+ */
+export function directSenderOf(home: string, botId: string | undefined, sessionId: string): string | null {
+  if (!botId || !sessionId) return null
+  const store = channelStore(botId)
+  if (!store) return null
+  const file = join(dirname(home), 'integrations', store, 'bots', botId, 'state.json')
+  let state: unknown
+  try {
+    state = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+  if (!isRecord(state) || !isRecord(state.sessions)) return null
+  const wanted = sessionId.replace(/^session-/, '')
+  for (const [key, value] of Object.entries(state.sessions)) {
+    if (typeof value !== 'string' || value.replace(/^session-/, '') !== wanted) continue
+    const senderId = key.startsWith('direct:') ? key.slice('direct:'.length).trim() : ''
+    return senderId || null
+  }
+  return null
+}
+
+/**
  * The owner clause appended when this digital human has a claimed owner.
  *
  * The IM platform injects a fixed field set, so it can never hand the model a
