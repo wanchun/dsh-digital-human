@@ -24,62 +24,79 @@ const human = (patch: Record<string, unknown> = {}) => normalizeHuman({
 
 /**
  * A session controller whose answers the test can steer, and which records every
- * create and prompt so reuse is measurable.
+ * create, resume and prompt so reuse is measurable.
+ *
+ * `create` mirrors the Host contract this code was split by: naming a Workspace and
+ * a cwd together is refused, a named Session that has started a turn is not reusable,
+ * and the call then mints a *different* id. Adoption is `resolveAgent`'s job.
  */
 function controllerStub() {
   const created: any[] = []
   const prompted: any[] = []
   const cancelled: string[] = []
+  const resumed: string[] = []
   let next = 0
+  // The live listing a UI reads, and the durable record a resume answers from — an
+  // idle or archived Session leaves the first and stays in the second.
   const sessions: any[] = []
+  const stored = new Map<string, any>()
+  const mint = (options: any) => {
+    next += 1
+    const entry = { sessionId: `session-${next}`, agentPreset: options?.agentPreset, cwd: options?.cwd, running: false, started: false }
+    stored.set(entry.sessionId, entry)
+    sessions.push(entry)
+    return { sessionId: entry.sessionId, agentPreset: entry.agentPreset }
+  }
   const controller: any = {
     created,
     prompted,
     cancelled,
+    resumed,
     sessions,
-    /**
-     * Mirrors the Host's real `session.create` contract, because both of its rules
-     * have bitten this code: naming a Workspace and a cwd together is refused, and an
-     * explicit id adopts the Session — refusing when its preset or directory differs.
-     */
     create: async (options: any) => {
       created.push(options)
       if (options?.workspaceId !== undefined && options?.cwd !== undefined) {
         throw new Error('session.create accepts workspaceId or cwd, not both')
       }
-      if (options?.sessionId !== undefined) {
-        const known = sessions.find((entry) => entry.sessionId === options.sessionId)
-        if (!known) {
-          sessions.push({ sessionId: options.sessionId, agentPreset: options.agentPreset, cwd: options.cwd, running: false })
-          return { sessionId: options.sessionId, agentPreset: options.agentPreset }
-        }
-        if (options.agentPreset !== undefined && known.agentPreset !== options.agentPreset) {
-          throw new Error(`session "${options.sessionId}" would change preset`)
-        }
-        // The Host resolves the directory from the Workspace when one is named, and
-        // compares that — so a Workspace id is not a way around the check.
-        const wanted = options.cwd ?? (options.workspaceId === 'ws-1' ? '/w' : undefined)
-        if (wanted !== undefined && known.cwd !== undefined && known.cwd !== wanted) {
-          throw new Error(`session "${options.sessionId}" would change directory`)
-        }
-        return { sessionId: known.sessionId, agentPreset: known.agentPreset }
+      const named = options?.sessionId
+      if (named === undefined) return mint(options)
+      const known = stored.get(named)
+      // An id nothing holds is created under that id, which is what keeps an address
+      // a caller invented true.
+      if (known === undefined) {
+        const entry = { sessionId: named, agentPreset: options.agentPreset, cwd: options.cwd, running: false, started: false }
+        stored.set(named, entry)
+        sessions.push(entry)
+        return { sessionId: named, agentPreset: entry.agentPreset }
       }
-      next += 1
-      const sessionId = `session-${next}`
-      sessions.push({ sessionId, agentPreset: options?.agentPreset, cwd: options?.cwd, running: false })
-      return { sessionId }
+      // The Host resolves the directory from the Workspace when one is named, and
+      // compares that — so a Workspace id is not a way around the check.
+      const wanted = options.cwd ?? (options.workspaceId === 'ws-1' ? '/w' : undefined)
+      const samePlace = wanted === undefined || known.cwd === undefined || known.cwd === wanted
+      const samePreset = options.agentPreset === undefined || known.agentPreset === undefined || known.agentPreset === options.agentPreset
+      if (known.started || !samePlace || !samePreset) return mint(options)
+      return { sessionId: known.sessionId, agentPreset: known.agentPreset }
+    },
+    resolveAgent: async (sessionId: string) => {
+      resumed.push(sessionId)
+      const known = stored.get(sessionId)
+      if (known === undefined) return { error: { message: `session "${sessionId}" not found` } }
+      return { agent: { session: { header: { cwd: known.cwd, agentPreset: known.agentPreset } } } }
     },
     prompt: async (request: any, signal: AbortSignal) => {
       prompted.push(request)
       if (!(signal instanceof AbortSignal)) throw new TypeError('prompt requires an AbortSignal')
-      const found = sessions.find((entry) => entry.sessionId === request.sessionId)
-      if (found) found.running = true
+      const found = stored.get(request.sessionId)
+      if (found) {
+        found.running = true
+        found.started = true
+      }
       return { accepted: true }
     },
     list: async () => ({ items: sessions.map((entry) => ({ ...entry })) }),
     cancel: async ({ sessionId }: { sessionId: string }) => {
       cancelled.push(sessionId)
-      const found = sessions.find((entry) => entry.sessionId === sessionId)
+      const found = stored.get(sessionId)
       if (found) found.running = false
       return { accepted: true }
     },
@@ -123,12 +140,44 @@ describe('ensureSession', () => {
     const first = await chat.ensureSession(human(), 'main', 'dh-pm')
     const second = await chat.ensureSession(human(), 'main', 'dh-pm')
     expect(second).toBe(first)
-    expect(controller.created).toHaveLength(2)
-    // The second call names the Session, which is what makes the Host adopt it
-    // rather than mint another one.
-    expect(controller.created[0].sessionId).toBeUndefined()
-    expect(controller.created[1]).toMatchObject({ sessionId: first, agentPreset: 'dh-pm' })
+    // One create only. Adoption resumes the Session; asking `create` for it again
+    // returns a *different* id once the Session has started a turn, which is how the
+    // same requirement ended up spread over several Sessions.
+    expect(controller.created).toHaveLength(1)
+    expect(controller.resumed).toEqual([first])
     expect(controller.sessions).toHaveLength(1)
+  })
+
+  it('keeps one Session per conversation after its first turn', async () => {
+    // The split that started this: the second delivery found the recorded Session,
+    // asked `create` to adopt it, and the Host minted a new one because the first had
+    // already run a turn.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const first = await chat.ensureSession(human(), 'REQ-1', 'dh-pm')
+    await chat.deliver(human(), { conversationId: 'REQ-1', message: 'a', presetId: 'dh-pm' })
+    const second = await chat.ensureSession(human(), 'REQ-1', 'dh-pm')
+    expect(second).toBe(first)
+    await chat.deliver(human(), { conversationId: 'REQ-1', message: 'b', presetId: 'dh-pm' })
+    expect(controller.prompted.map((request: any) => request.sessionId)).toEqual([first, first])
+    expect(controller.sessions).toHaveLength(1)
+  })
+
+  it('records the thread a Session-addressed message names', async () => {
+    // A peer answers the Session that asked, and may name the thread with it. Filing
+    // that name is what lets the next delivery by conversation find this Session
+    // instead of opening another, and what keeps the reply header off a raw id.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const delivered = await chat.deliver(human(), {
+      sessionId: 'session-pm-1',
+      conversationId: 'REQ-9',
+      message: 'x',
+      presetId: 'dh-pm',
+    })
+    expect(delivered).toMatchObject({ sessionId: 'session-pm-1', conversationId: 'REQ-9' })
+    expect(await chat.ensureSession(human(), 'REQ-9', 'dh-pm')).toBe('session-pm-1')
+    expect(controller.prompted[0].content[0].text).toContain('conversation="REQ-9"')
   })
 
   it('never names a Workspace and a cwd together, which the Host refuses', async () => {
@@ -158,8 +207,9 @@ describe('ensureSession', () => {
     controller.sessions[0].agentPreset = 'standard'
     const second = await chat.ensureSession(human(), 'main', 'dh-pm')
     expect(second).not.toBe(first)
-    // Three calls: the first create, the refused adoption, and the replacement.
-    expect(controller.created).toHaveLength(3)
+    // Two calls: the first create, then the replacement — the adoption was refused
+    // before `create` was asked, so no third call mints the misplaced Session.
+    expect(controller.created).toHaveLength(2)
     expect(String(log.mock.calls[0][0])).toContain('could not reuse')
   })
 

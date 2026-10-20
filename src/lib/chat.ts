@@ -290,7 +290,9 @@ export class HumanChat {
         )
       }
     }
-    return this.#remember(human.id, conversationId, await this.#create(human, presetId))
+    // The id is passed through: an address that does not exist yet still gets created
+    // under it, so the caller's record of it stays true.
+    return this.#remember(human.id, conversationId, await this.#create(human, presetId, existing))
   }
 
   /**
@@ -301,27 +303,33 @@ export class HumanChat {
    * Session that asked for the work. A Session id is adopted as given; a name goes
    * through the index, and either way a Session that cannot be reused is replaced.
    *
+   * A sender may name the thread too. That name is recorded against the Session, so
+   * the next delivery by conversation finds it instead of opening a second one — and
+   * so the reply header carries a thread name rather than an id.
+   *
    * @returns the Session id and the conversation name it belongs to, if any.
    */
-  async #resolve(human, address, presetId) {
-    const text = String(address ?? '').trim()
+  async #resolve(human, { conversationId, sessionId }, presetId) {
+    const text = String(sessionId ?? conversationId ?? '').trim()
     if (isSessionAddress(text)) {
       // "Passed an id that exists → use it; passed one that does not → a new one."
-      const conversation = await this.#conversationOf(human.id, text)
-      let sessionId
+      const named = conversationId === undefined ? undefined : requireConversation(conversationId)
+      let resolved
       try {
-        sessionId = await this.#adopt(human, text, presetId)
+        resolved = await this.#adopt(human, text, presetId)
       } catch (error) {
         this.#log(
           `session ${text} could not receive for ${human.id} (${error.message}); opening a new one`,
         )
-        sessionId = await this.#create(human, presetId)
+        resolved = await this.#create(human, presetId, text)
       }
-      // Remembered even though no conversation was filed for it: without the reverse
-      // entry its own replies would not reach a mailbox, and it would be invisible to
-      // a caller asking which Sessions this digital human answers in.
-      this.#bySession.set(sessionId, { humanId: human.id, conversationId: conversation ?? sessionId })
-      return { sessionId, conversation: conversation ?? sessionId }
+      const conversation = named ?? (await this.#conversationOf(human.id, resolved)) ?? resolved
+      // Remembered either way: without the reverse entry this Session's own replies
+      // would not reach a mailbox, and it would be invisible to a caller asking which
+      // Sessions this digital human answers in.
+      if (named !== undefined) await this.#remember(human.id, named, resolved)
+      else this.#bySession.set(resolved, { humanId: human.id, conversationId: conversation })
+      return { sessionId: resolved, conversation }
     }
     const conversation = requireConversation(text)
     return { sessionId: await this.ensureSession(human, conversation, presetId), conversation }
@@ -336,19 +344,55 @@ export class HumanChat {
     return undefined
   }
 
-  /** Adopt one Session by id, or fail when it cannot carry this record. */
+  /**
+   * Adopt one Session by id, or fail when it cannot carry this record.
+   *
+   * `create` is not adoption. Since Host 0.2.1 a named Session that has already
+   * started a turn is left as it is, and a fresh one is minted instead — the call
+   * returns the *new* id, so adopting through it split every conversation that had
+   * work in it into a second Session with its own context. Resume is what `prompt`
+   * does anyway; this only has to fail early, before a message lands somewhere else.
+   */
   async #adopt(human, sessionId, presetId) {
-    const adopted = await this.#ctx.sessionController.create({
-      sessionId,
-      ...this.#location(human),
-      ...(presetId ? { agentPreset: presetId } : {}),
-    })
-    return adopted.sessionId
+    const resolved = await this.#resume(sessionId)
+    // No resolution entry point: the Host cannot say, and `prompt` still resumes the
+    // Session. A genuinely unknown id fails there rather than being silently replaced.
+    if (resolved === undefined) return sessionId
+    const header = resolved?.agent?.session?.header
+    const wanted = human.workspace || this.#defaultWorkspacePath?.()
+    if (wanted !== undefined && header?.cwd !== undefined && header.cwd !== wanted) {
+      throw new Error(`session "${sessionId}" runs in "${header.cwd}", not "${wanted}"`)
+    }
+    if (presetId !== undefined && header?.agentPreset !== undefined && header.agentPreset !== presetId) {
+      throw new Error(`session "${sessionId}" runs preset "${header.agentPreset}", not "${presetId}"`)
+    }
+    return sessionId
   }
 
-  /** Open a fresh Session for this record. */
-  async #create(human, presetId) {
+  /**
+   * Resume one Session, reporting an id this Host cannot resolve as an error.
+   * @returns the resolved Agent; `undefined` when the controller has no resolver.
+   */
+  async #resume(sessionId) {
+    const controller = this.#ctx.sessionController
+    if (typeof controller?.resolveAgent !== 'function') return undefined
+    const resolved = await controller.resolveAgent(sessionId)
+    if (resolved?.error !== undefined) {
+      throw new Error(resolved.error?.message ?? String(resolved.error))
+    }
+    return resolved
+  }
+
+  /**
+   * Open a Session for this record.
+   *
+   * A named id is passed through, so an address the caller invented still holds when
+   * the Session does not exist yet. When it does exist and cannot be reused, the Host
+   * mints a different id; the caller sees the returned one.
+   */
+  async #create(human, presetId, sessionId) {
     const created = await this.#ctx.sessionController.create({
+      ...(sessionId ? { sessionId } : {}),
       ...this.#location(human),
       ...(presetId ? { agentPreset: presetId } : {}),
     })
@@ -417,7 +461,7 @@ export class HumanChat {
     const text = String(message ?? '').trim()
     if (!text) throw new Error('message must not be empty')
     if (text.length > MESSAGE_MAX_CHARS) throw new Error(`message exceeds ${MESSAGE_MAX_CHARS} characters`)
-    const target = await this.#resolve(human, sessionId ?? conversationId, presetId)
+    const target = await this.#resolve(human, { conversationId, sessionId }, presetId)
     await this.#append(human.id, target.sessionId, target.conversation, record('inbound', { from, text }))
     const accepted = await this.#ctx.sessionController.prompt({
       requestId: randomUUID(),

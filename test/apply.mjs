@@ -59,30 +59,37 @@ function makeCtx({ dshIm } = {}) {
     },
     sessionController: {
       // Mirrors the Host's contract, because both of its rules shape this plugin:
-      // a Workspace and a cwd together are refused, and an explicit id ADOPTS the
-      // Session — refusing when its preset or directory would change.
+      // a Workspace and a cwd together are refused, an unknown id is created under
+      // that id, and a named Session that has started a turn — or can no longer carry
+      // the record — is left alone while a *new* one is minted and returned. Adoption
+      // is `resolveAgent`, which is why the plugin no longer adopts through create.
       create: async (options) => {
         if (options?.workspaceId !== undefined && options?.cwd !== undefined) {
           throw new Error('session.create accepts workspaceId or cwd, not both')
         }
+        const mint = () => {
+          counter += 1
+          const sessionId = `session-${counter}`
+          sessions.push({ sessionId, running: false, agentAvailable: true, started: false, agentPreset: options?.agentPreset, cwd: options?.cwd, workspaceId: options?.workspaceId })
+          return { sessionId, agentPreset: options?.agentPreset }
+        }
         if (options?.sessionId !== undefined) {
           const known = sessions.find((entry) => entry.sessionId === options.sessionId)
-          if (known) {
-            if (options.agentPreset !== undefined && known.agentPreset !== options.agentPreset) {
-              throw new Error(`session "${options.sessionId}" would change preset`)
-            }
-            if (options.cwd !== undefined && known.cwd !== undefined && known.cwd !== options.cwd) {
-              throw new Error(`session "${options.sessionId}" would change directory`)
-            }
-            return { sessionId: known.sessionId, agentPreset: known.agentPreset }
+          if (known === undefined) {
+            sessions.push({ sessionId: options.sessionId, running: false, agentAvailable: true, started: false, agentPreset: options.agentPreset, cwd: options.cwd, workspaceId: options.workspaceId })
+            return { sessionId: options.sessionId, agentPreset: options.agentPreset }
           }
-          sessions.push({ sessionId: options.sessionId, running: false, agentAvailable: true, agentPreset: options.agentPreset, cwd: options.cwd, workspaceId: options.workspaceId })
-          return { sessionId: options.sessionId, agentPreset: options.agentPreset }
+          const samePreset = options.agentPreset === undefined || known.agentPreset === undefined || known.agentPreset === options.agentPreset
+          const samePlace = options.cwd === undefined || known.cwd === undefined || known.cwd === options.cwd
+          if (known.started || !samePreset || !samePlace) return mint()
+          return { sessionId: known.sessionId, agentPreset: known.agentPreset }
         }
-        counter += 1
-        const sessionId = `session-${counter}`
-        sessions.push({ sessionId, running: false, agentAvailable: true, agentPreset: options?.agentPreset, cwd: options?.cwd, workspaceId: options?.workspaceId })
-        return { sessionId, agentPreset: options?.agentPreset }
+        return mint()
+      },
+      resolveAgent: async (sessionId) => {
+        const known = sessions.find((entry) => entry.sessionId === sessionId)
+        if (known === undefined) return { error: { message: `session "${sessionId}" not found` } }
+        return { agent: { session: { header: { cwd: known.cwd, agentPreset: known.agentPreset } } } }
       },
       prompt: async (request, signal) => {
         // The real controller is prompt(request, signal); a stub that ignores the
@@ -90,7 +97,10 @@ function makeCtx({ dshIm } = {}) {
         if (!(signal instanceof AbortSignal)) throw new TypeError('prompt requires an AbortSignal')
         prompts.push(request)
         const found = sessions.find((item) => item.sessionId === request.sessionId)
-        if (found) found.running = true
+        if (found) {
+          found.running = true
+          found.started = true
+        }
         return { accepted: true }
       },
       list: async () => ({ items: sessions.map((item) => ({ ...item })) }),
@@ -157,6 +167,25 @@ check('the replacement carries the digital-human preset',
   platform.sessions.find((entry) => entry.sessionId === reopened.sessionId).agentPreset === 'dh-dev-assistant')
 check('the replacement is stable on the next send',
   (await service.send('dev-assistant', { message: 'third', conversationId: 'REQ-FOREIGN' })).sessionId === reopened.sessionId)
+
+// The incident this guards: a requirement is dispatched by conversation, answered by
+// Session, and topped up twice more. Every delivery must stay in the two Sessions it
+// started in — the Host mints a new one for a named Session that already has a turn.
+console.log('3c) one requirement keeps one Session in each direction')
+const devSessionsBefore = platform.sessions.filter((entry) => entry.agentPreset === 'dh-dev-assistant').length
+const kickoff = await service.send('dev-assistant', { message: '【新需求】REQ-E2E', from: 'pm-assistant', conversationId: 'REQ-E2E' })
+const answer = await service.send('pm-assistant', { message: 'progress', from: 'dev-assistant', sessionId: 'session-pm-e2e', conversationId: 'REQ-E2E' })
+const topUp = await service.send('dev-assistant', { message: '【确认+派发】REQ-E2E', from: 'pm-assistant', conversationId: 'REQ-E2E' })
+const receipt = await service.send('dev-assistant', { message: '【PM 回执】REQ-E2E', from: 'pm-assistant', sessionId: kickoff.sessionId, conversationId: 'REQ-E2E' })
+check('the top-up lands in the Session the kickoff opened', topUp.sessionId === kickoff.sessionId, topUp.sessionId)
+check('the reply back to the sender keeps its Session', answer.sessionId === 'session-pm-e2e', answer.sessionId)
+check('a Session-addressed top-up lands in that Session', receipt.sessionId === kickoff.sessionId, receipt.sessionId)
+check('the dev side opened exactly one Session for the requirement',
+  platform.sessions.filter((entry) => entry.agentPreset === 'dh-dev-assistant').length === devSessionsBefore + 1,
+  String(platform.sessions.filter((entry) => entry.agentPreset === 'dh-dev-assistant').length))
+check('the mailbox keeps the whole requirement in one thread',
+  (await service.messages('dev-assistant', kickoff.sessionId, 10)).items.map((entry) => entry.text).join('|')
+    .includes('【PM 回执】REQ-E2E'))
 check('a disabled human refuses delivery', await service.upsert({ id: 'off-one', name: 'Off', enabled: false })
   .then(() => service.send('off-one', { message: 'x' }))
   .then(() => false, () => true))

@@ -55,37 +55,46 @@ function makeCtx(services: Record<string, unknown> = {}) {
     },
     sessionController: {
       // Mirrors the Host: naming a Workspace and a cwd together is refused, the
-      // directory comes from the Workspace when one is named, and an explicit id
-      // adopts the existing Session.
+      // directory comes from the Workspace when one is named, an unknown id is
+      // created under that id, and a named Session that has started a turn — or can
+      // no longer carry the record — is left alone while a *new* one is minted.
       create: async (options: any) => {
         if (options?.workspaceId !== undefined && options?.cwd !== undefined) {
           throw new Error('session.create accepts workspaceId or cwd, not both')
         }
         const cwd = options?.workspaceId !== undefined ? WORKSPACE_PATH : options?.cwd
+        const mint = () => {
+          counter += 1
+          const sessionId = `session-${counter}`
+          sessions.push({ sessionId, running: false, agentAvailable: true, started: false, agentPreset: options?.agentPreset, cwd, workspaceId: options?.workspaceId })
+          return { sessionId, agentPreset: options?.agentPreset }
+        }
         if (options?.sessionId !== undefined) {
           const known = sessions.find((entry) => entry.sessionId === options.sessionId)
-          if (known) {
-            if (options.agentPreset !== undefined && known.agentPreset !== options.agentPreset) {
-              throw new Error(`session "${options.sessionId}" would change preset`)
-            }
-            if (cwd !== undefined && known.cwd !== undefined && known.cwd !== cwd) {
-              throw new Error(`session "${options.sessionId}" would change directory`)
-            }
-            return { sessionId: known.sessionId, agentPreset: known.agentPreset }
+          if (known === undefined) {
+            sessions.push({ sessionId: options.sessionId, running: false, agentAvailable: true, started: false, agentPreset: options.agentPreset, cwd })
+            return { sessionId: options.sessionId, agentPreset: options.agentPreset }
           }
-          sessions.push({ sessionId: options.sessionId, running: false, agentAvailable: true, agentPreset: options.agentPreset, cwd })
-          return { sessionId: options.sessionId, agentPreset: options.agentPreset }
+          const samePreset = options.agentPreset === undefined || known.agentPreset === undefined || known.agentPreset === options.agentPreset
+          const samePlace = cwd === undefined || known.cwd === undefined || known.cwd === cwd
+          if (known.started || !samePreset || !samePlace) return mint()
+          return { sessionId: known.sessionId, agentPreset: known.agentPreset }
         }
-        counter += 1
-        const sessionId = `session-${counter}`
-        sessions.push({ sessionId, running: false, agentAvailable: true, agentPreset: options?.agentPreset, cwd, workspaceId: options?.workspaceId })
-        return { sessionId, agentPreset: options?.agentPreset }
+        return mint()
+      },
+      resolveAgent: async (sessionId: string) => {
+        const known = sessions.find((entry) => entry.sessionId === sessionId)
+        if (known === undefined) return { error: { message: `session "${sessionId}" not found` } }
+        return { agent: { session: { header: { cwd: known.cwd, agentPreset: known.agentPreset } } } }
       },
       prompt: async (request: any, signal: AbortSignal) => {
         if (!(signal instanceof AbortSignal)) throw new TypeError('prompt requires an AbortSignal')
         prompts.push(request)
         const found = sessions.find((item) => item.sessionId === request.sessionId)
-        if (found) found.running = true
+        if (found) {
+          found.running = true
+          found.started = true
+        }
         return { accepted: true }
       },
       list: async () => ({ items: sessions.map((item) => ({ ...item })) }),
