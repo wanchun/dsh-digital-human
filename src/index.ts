@@ -23,6 +23,7 @@ import { buildPresetDefinition, presetIdOf, resolveConfigValues } from './lib/pr
 import { buildRegistryTool } from './lib/tools.js'
 import { listLibrary, removeSkill, writeSkill } from './lib/skills.js'
 import { packHumans, readBundle, unpackHumans } from './lib/bundle.js'
+import { applyTitlePlan } from './lib/titles.js'
 import { RPC_PATH } from './lib/rpc.js'
 import { registerRpc } from './lib/rpc.js'
 import { directSenderOf, directSenders, syncBotToHuman } from './lib/im.js'
@@ -815,6 +816,14 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // settings page all mount from here, and that page is how the file gets fixed.
   try {
     await refresh()
+    // A pending title plan is applied once, through the Host, so the projection the
+    // list reads and the log agree on the title and its sequence.
+    applyTitlePlan(home, async (sessionId, title) => {
+      const controller = ctx.get?.('sessionController')
+      const rename = controller?.rename
+      if (typeof rename !== 'function') throw new Error('renaming is unavailable on this Host')
+      await rename.call(controller, { sessionId, title })
+    }, log).catch((error) => log(`title plan failed: ${error.message}`))
     // The roster is known now, so a session that announced itself during the first
     // refresh can finally be given the access its record asks for.
     for (const [sessionId, entry] of [...pendingPermission]) {
