@@ -89,7 +89,7 @@ describe('the chat tools', () => {
     expect(names).toEqual([
       'digital_human_send', 'digital_human_status', 'digital_human_stop', 'digital_human_messages',
       'digital_human_conversations', 'digital_human_list', 'notify_bot', 'list_bot_targets',
-      'memory_status', 'memory_compact',
+      'set_session_title', 'memory_status', 'memory_compact',
     ])
   })
 
@@ -100,6 +100,7 @@ describe('the chat tools', () => {
       .map((tool) => tool.name)
     expect(names).not.toContain('notify_bot')
     expect(names).not.toContain('list_bot_targets')
+    expect(names).not.toContain('set_session_title')
     expect(names).toContain('digital_human_send')
   })
 

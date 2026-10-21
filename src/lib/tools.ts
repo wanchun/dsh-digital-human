@@ -407,6 +407,34 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     },
   }
 
+  /**
+   * Let a front-of-house record name its own conversation.
+   *
+   * Only it knows both facts a title needs — which channel the person came from and
+   * who they are — so the rule lives in its persona and the write happens here.
+   */
+  const setTitle = {
+    name: 'set_session_title',
+    description:
+      'Rename this conversation once, right after it opens. Use it to give the session a '
+      + 'readable title such as 企业微信-纯哥. A title set this way is pinned: automatic '
+      + 'title generation stops for this conversation.',
+    parameters: {
+      title: { type: 'string', required: true, description: 'Title to show in the session list.' },
+    },
+    output: TEXT_OUTPUT,
+    async execute(args, exec) {
+      const sessionId = callerSession(exec)
+      if (!sessionId) throw new Error('this conversation has no Session to name')
+      const title = String(args.title ?? '').trim()
+      if (!title) throw new Error('title must not be empty')
+      const rename = ctx.sessionController?.rename
+      if (typeof rename !== 'function') throw new Error('renaming is unavailable on this Host')
+      await rename.call(ctx.sessionController, { sessionId, title })
+      return { detail: 'Session title set to ' + title + '.' }
+    },
+  }
+
   const notify = {
     name: 'notify_bot',
     description:
@@ -557,7 +585,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
   const tools: any[] = [send, status, stop, messages, conversations, roster]
   // A digital human with no bot speaks to its peers only: the chat tools land in a
   // Session, while these two can only reach an IM contact.
-  if (im) tools.push(notify, targets)
+  if (im) tools.push(notify, targets, setTitle)
   if (memory) tools.push(memoryStatus, memoryCompact)
   return tools.map(normalizeTool)
 }

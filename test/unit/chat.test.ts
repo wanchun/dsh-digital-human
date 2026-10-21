@@ -35,6 +35,7 @@ function controllerStub() {
   const prompted: any[] = []
   const cancelled: string[] = []
   const resumed: string[] = []
+  const renamed: any[] = []
   let next = 0
   // The live listing a UI reads, and the durable record a resume answers from — an
   // idle or archived Session leaves the first and stays in the second.
@@ -52,6 +53,7 @@ function controllerStub() {
     prompted,
     cancelled,
     resumed,
+    renamed,
     sessions,
     create: async (options: any) => {
       created.push(options)
@@ -82,6 +84,10 @@ function controllerStub() {
       const known = stored.get(sessionId)
       if (known === undefined) return { error: { message: `session "${sessionId}" not found` } }
       return { agent: { session: { header: { cwd: known.cwd, agentPreset: known.agentPreset } } } }
+    },
+    rename: async ({ sessionId, title }: any) => {
+      renamed.push({ sessionId, title })
+      return { title, seq: 0 }
     },
     prompt: async (request: any, signal: AbortSignal) => {
       prompted.push(request)
@@ -243,6 +249,50 @@ describe('ensureSession', () => {
     await chat.ensureSession(human({ workspace: '' }), 'main')
     expect(controller.created[0].cwd).toBeUndefined()
     expect(controller.created[0].agentPreset).toBeUndefined()
+  })
+})
+
+describe('naming a conversation', () => {
+  it('names a fresh peer conversation after the requirement it carries', async () => {
+    // The list is otherwise titled from whatever the first prompt happened to say,
+    // which for a peer delivery is the transport block itself.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.deliver(human(), {
+      conversationId: 'ttdpnf-security-micrometer-v180-20261020',
+      message: '【新需求】micrometer-core 安全升级\n- 项目：话务系统',
+      from: 'pm',
+    })
+    expect(controller.renamed).toEqual([
+      { sessionId: expect.any(String), title: 'micrometer-core 安全升级' },
+    ])
+  })
+
+  it('falls back to the thread name when the message names no subject', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.deliver(human(), { conversationId: 'REQ-42', message: '进度如何' })
+    expect(controller.renamed[0].title).toBe('REQ-42')
+  })
+
+  it('never renames an established conversation', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.deliver(human(), { conversationId: 'REQ-7', message: '【新需求】A' })
+    await chat.deliver(human(), { conversationId: 'REQ-7', message: '【参数更新】B' })
+    expect(controller.renamed).toHaveLength(1)
+  })
+
+  it('leaves a record with its own bot to name its own session', async () => {
+    // A front-of-house record gets its channel and contact from the IM source, so the
+    // requirement name from a peer message would be the wrong title for it.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.deliver(human({ im: { botId: 'wecom_1', targetId: '' } }), {
+      conversationId: 'REQ-9',
+      message: '【需求进度】x',
+    })
+    expect(controller.renamed).toEqual([])
   })
 })
 

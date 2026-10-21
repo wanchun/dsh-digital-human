@@ -38,6 +38,27 @@ export function isSessionAddress(value) {
   return /^session-/.test(String(value ?? '').trim())
 }
 
+/**
+ * The title a peer-delivered session should carry, derived from the message.
+ *
+ * A delivery that opens a conversation is the one moment the transport knows what
+ * the subject is: the PM's first line names the requirement. Left to the model, the
+ * title becomes whatever the first prompt happened to say — usually the transport's
+ * own peer block — so the list is unreadable.
+ *
+ * @param text - the delivered message, with its peer header already stripped.
+ * @param conversation - the thread name, used when the message names no subject.
+ * @returns a title, or undefined when nothing worth naming the thread is known.
+ */
+export function sessionTitleFor(text, conversation) {
+  const firstLine = String(text ?? '').split('\n').map((line) => line.trim()).find(Boolean) ?? ''
+  const named = /^【(?:新需求|参数更新|需求阻塞|需求完成|阻塞处理反馈|需求终止)】\s*(.+)$/.exec(firstLine)
+  const fromMessage = named?.[1]?.trim() ?? ''
+  const fromThread = fromMessage || (conversation && conversation !== DEFAULT_CONVERSATION && !isSessionAddress(conversation) ? conversation : '')
+  const title = fromThread.replace(/\s+/g, ' ').trim()
+  return title ? title.slice(0, 60) : undefined
+}
+
 /** Reject a conversation id that would escape its directory. */
 export function requireConversation(value) {
   const text = String(value ?? '').trim() || DEFAULT_CONVERSATION
@@ -93,6 +114,9 @@ export class HumanChat {
   #log
   #indexes = new Map()
   #bySession = new Map()
+  // Sessions this instance opened, so a first delivery can name them without
+  // guessing from the transcript whether they already had a title.
+  #fresh = new Set()
   // `sessionController.prompt(request, signal)` requires an AbortSignal. One
   // controller lives as long as the chat service and is never aborted, so every
   // prompt it carries stays cancellable through `stop`.
@@ -401,6 +425,7 @@ export class HumanChat {
     if (sessionId && created.sessionId !== sessionId) {
       this.#log(`session ${sessionId} could not carry ${human.id}; the Host opened ${created.sessionId}`)
     }
+    this.#fresh.add(created.sessionId)
     return created.sessionId
   }
 
@@ -467,6 +492,12 @@ export class HumanChat {
     if (!text) throw new Error('message must not be empty')
     if (text.length > MESSAGE_MAX_CHARS) throw new Error(`message exceeds ${MESSAGE_MAX_CHARS} characters`)
     const target = await this.#resolve(human, { conversationId, sessionId }, presetId)
+    // Name a conversation the moment it opens: only a peer-only record (no bot of
+    // its own) is named from the message, because a front-of-house record names its
+    // own session from the IM source and would lose that here.
+    if (this.#fresh.delete(target.sessionId) && !human.im?.botId) {
+      await this.#name(target.sessionId, target.conversation, text)
+    }
     await this.#append(human.id, target.sessionId, target.conversation, record('inbound', { from, text }))
     const accepted = await this.#ctx.sessionController.prompt({
       requestId: randomUUID(),
@@ -484,6 +515,25 @@ export class HumanChat {
       sessionId: target.sessionId,
       conversationId: target.conversation,
       accepted: accepted?.accepted === true,
+    }
+  }
+
+  /**
+   * Give one Session a readable title, once, when its conversation opens.
+   *
+   * A title set through `rename` is pinned by the Host: automatic generation stops,
+   * which is what a requirement thread wants — its subject does not change.
+   */
+  async #name(sessionId, conversation, text) {
+    const title = sessionTitleFor(text, conversation)
+    if (!title) return
+    const rename = this.#ctx.sessionController?.rename
+    if (typeof rename !== 'function') return
+    try {
+      await rename.call(this.#ctx.sessionController, { sessionId, title })
+    } catch (error) {
+      // A title is a convenience; failing to set one must not fail the delivery.
+      this.#log(`could not name session ${sessionId}: ${error.message}`)
     }
   }
 
