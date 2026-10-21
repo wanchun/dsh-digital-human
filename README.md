@@ -197,6 +197,8 @@ pm-assistant-202610131954.dh.tar.gz
 4. 归档的会话收到消息会被 DSH 拦下（`blocked`）—— 映射不能指向归档会话
 5. 会话改不了预设或目录 —— 记录改了这两样，那条会话只能重开（插件会写日志说明）
 6. 技能空间只收文本 —— 二进制资源要等 zip 方案
+7. 未绑定 IM bot 的数字人没有 `notify_bot` / `list_bot_targets` —— 它只能在自己的会话里回复同伴。
+   `notify_bot` 给未登记联系人发原始 chatId 一直可用；IM 插件暴露 `createTarget` 后，同一次发送会顺手登记为 `auto-<chatId 后 8 位>`
 
 ## 参考借鉴 Halo
 

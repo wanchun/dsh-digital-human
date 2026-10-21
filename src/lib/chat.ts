@@ -396,6 +396,11 @@ export class HumanChat {
       ...this.#location(human),
       ...(presetId ? { agentPreset: presetId } : {}),
     })
+    // A different id is legal here — a Session that cannot be reused is replaced —
+    // but it must not be silent: the caller's record of the address just changed.
+    if (sessionId && created.sessionId !== sessionId) {
+      this.#log(`session ${sessionId} could not carry ${human.id}; the Host opened ${created.sessionId}`)
+    }
     return created.sessionId
   }
 
