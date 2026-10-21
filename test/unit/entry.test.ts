@@ -734,7 +734,9 @@ describe('the preset-scoped tools row', () => {
     await platform.provided.get('digitalHumans').upsert({ id: 'sk', name: 'Sk', skills: ['qs'], memory: false })
     applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
     expect(platform.mounted).toHaveLength(1)
-    expect(platform.mounted[0]).toMatchObject({ name: 'qs', description: 'query the platform', whenToUse: 'when asked' })
+    // `source` is what the Host's load-time definition check requires: without it the
+    // registration succeeds and every later `skill` call fails to read the body.
+    expect(platform.mounted[0]).toMatchObject({ name: 'qs', description: 'query the platform', whenToUse: 'when asked', source: 'digital-human' })
     expect(platform.mounted[0].content).toContain('# Body')
   })
 

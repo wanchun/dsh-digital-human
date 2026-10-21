@@ -93,6 +93,16 @@ describe('the chat tools', () => {
     ])
   })
 
+  it('leaves the IM tools out when the record has no bot', () => {
+    // A record with no bot has no outbound channel: offering notify_bot would only
+    // ever fail, and its persona would keep trying to use it.
+    const names = buildHumanTools({ ctx: ctxWith(), service: serviceStub(), humanId: 'dev', im: false })
+      .map((tool) => tool.name)
+    expect(names).not.toContain('notify_bot')
+    expect(names).not.toContain('list_bot_targets')
+    expect(names).toContain('digital_human_send')
+  })
+
   it('leaves the memory tools out when the record keeps no memory', () => {
     const names = buildHumanTools({ ctx: ctxWith(), service: serviceStub(), humanId: 'pm', memory: false })
       .map((tool) => tool.name)
@@ -317,6 +327,35 @@ describe('notify_bot', () => {
       { format: 'plain' },
     )
     expect(result).toMatchObject({ botId: 'wecom_1', targetId: 'wohR_chat' })
+  })
+
+  it('registers a chat id it just delivered to, when the IM plugin can', async () => {
+    const send = vi.fn(async () => ({ ok: true }))
+    const createTarget = vi.fn(async () => ({}))
+    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [], createTarget }), 'notify_bot')
+    const result = await notify.execute({ message: 'hi', to: 'wohR_abcdef12', kind: 'user' })
+    expect(createTarget).toHaveBeenCalledWith('wecom_1', {
+      targetId: 'auto-abcdef12',
+      kind: 'user',
+      route: { chatId: 'wohR_abcdef12' },
+    })
+    expect(result.detail).toContain('registered as target "auto-abcdef12"')
+  })
+
+  it('still delivers when the IM plugin cannot register the chat id', async () => {
+    const send = vi.fn(async () => ({ ok: true }))
+    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [] }), 'notify_bot')
+    const result = await notify.execute({ message: 'hi', to: 'wohR_chat' })
+    expect(result.detail).toContain('Sent to raw chat id wohR_chat')
+    expect(result.detail).toContain('not registered as a target')
+  })
+
+  it('tells the model how to recover from an address it cannot deliver to', async () => {
+    const notify = toolOf(build(serviceStub(), {
+      send: async () => { throw new Error('Unknown target') },
+      listTargets: async () => [],
+    }), 'notify_bot')
+    await expect(notify.execute({ message: 'x', to: 'someone-direct' })).rejects.toThrow(/raw chat id/)
   })
 
   it('sends to a raw chat id as a group when kind says so', async () => {

@@ -47,6 +47,17 @@ function callerSession(exec) {
   return typeof id === 'string' && id ? id : undefined
 }
 
+/** What to say when an address is neither a saved target nor a deliverable chat id. */
+const ADDRESS_HINT =
+  'If that value is an alias, resend with the contact\'s raw chat id, or register the alias as a '
+  + 'delivery target in the IM settings.'
+
+/** A target id derived from a chat id, for registering an address seen for the first time. */
+function autoTargetId(chatId: string): string {
+  const tail = chatId.replace(/[^A-Za-z0-9._:@-]/g, '').slice(-8)
+  return tail ? `auto-${tail}` : ''
+}
+
 /** What to do when a bot reports no addressable target. */
 const WAIT_FOR_TARGET =
   'A target appears once the channel has seen a message from it, and the IM settings can name one; '
@@ -137,8 +148,10 @@ function normalizeTool(definition) {
  * @param options.memory - whether this record keeps a durable memory file. When
  *   it does not, the memory tools are left out: they would report an absent file
  *   and offer to archive nothing.
+ * @param options.im - whether this record has a bot to push through. Without one,
+ *   `notify_bot` can only fail, so the two IM tools are left out.
  */
-export function buildHumanTools({ ctx, service, humanId, memory = true }) {
+export function buildHumanTools({ ctx, service, humanId, memory = true, im = true }) {
   const self = () => service.require(humanId)
   const botOf = async () => (await self()).im
 
@@ -456,7 +469,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true }) {
         } catch (error) {
           // Fail with the options. A bare "Unknown target" leaves the model no way to
           // learn the right one.
-          throw new Error(`${error.message} ${await targetHelp(dshIm, botId)}`)
+          throw new Error(`${error.message} ${await targetHelp(dshIm, botId)} ${ADDRESS_HINT}`)
         }
         return { detail: `Sent to ${to} through bot ${botId}.`, botId, targetId: to }
       }
@@ -464,9 +477,26 @@ export function buildHumanTools({ ctx, service, humanId, memory = true }) {
       try {
         await dshIm.send(botId, { kind, route: { chatId: to } }, text, options)
       } catch (error) {
-        throw new Error(`${error.message} ${await targetHelp(dshIm, botId)}`)
+        throw new Error(`${error.message} ${await targetHelp(dshIm, botId)} ${ADDRESS_HINT}`)
       }
-      return { detail: `Sent to raw chat id ${to} as ${kind} through bot ${botId}.`, botId, targetId: to }
+      // Registering the address is a bonus, never a condition: an IM plugin without
+      // the method still delivers, and a rejected registration must not turn a
+      // delivered message into an error.
+      const targetId = autoTargetId(to)
+      let registered = ' It is not registered as a target yet; register it in the IM settings to reuse an alias.'
+      if (targetId && typeof dshIm.createTarget === 'function') {
+        try {
+          await dshIm.createTarget(botId, { targetId, kind, route: { chatId: to } })
+          registered = ` It is registered as target "${targetId}".`
+        } catch {
+          // Delivered is what matters; registration is a bonus.
+        }
+      }
+      return {
+        detail: `Sent to raw chat id ${to} as ${kind} through bot ${botId}.${registered}`,
+        botId,
+        targetId: to,
+      }
     },
   }
 
@@ -524,7 +554,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true }) {
     },
   }
 
-  const tools = [send, status, stop, messages, conversations, roster, notify, targets]
+  const tools: any[] = [send, status, stop, messages, conversations, roster]
+  // A digital human with no bot speaks to its peers only: the chat tools land in a
+  // Session, while these two can only reach an IM contact.
+  if (im) tools.push(notify, targets)
   if (memory) tools.push(memoryStatus, memoryCompact)
   return tools.map(normalizeTool)
 }

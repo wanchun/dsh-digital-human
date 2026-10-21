@@ -47,6 +47,9 @@ function mountSkills(ctx: Ctx, human: string, config: Config): void {
       description: skill.description || skill.name,
       ...(skill.whenToUse ? { whenToUse: skill.whenToUse } : {}),
       content: skill.content,
+      // Required by the Host's definition check when the skill is loaded. Without it
+      // the registration succeeds and every `skill` call fails to load the body.
+      source: 'digital-human',
       ...(skill.path ? { path: skill.path } : {}),
     })
   }
@@ -78,7 +81,10 @@ export function apply(ctx: Ctx, config: Config = {}): void {
   // the registry is not, so an awaited lookup here would never have been awaited —
   // which is exactly how the switch came to be ignored.
   const memory = config.memory !== false
-  for (const tool of buildHumanTools({ ctx, service: ctx.digitalHumans, humanId: human, memory })) {
+  // Carried on the row for the same reason: a record with no bot has no outbound
+  // channel, so the IM tools are not offered at all.
+  const im = config.im !== false
+  for (const tool of buildHumanTools({ ctx, service: ctx.digitalHumans, humanId: human, memory, im })) {
     ctx.tools.register(tool)
   }
   mountSkills(ctx, human, config)

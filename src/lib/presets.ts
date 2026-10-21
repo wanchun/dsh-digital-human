@@ -408,7 +408,14 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
         // the registry it would have to read is asynchronous.
         // The mounted skills travel with the row for the same reason the memory
         // switch does: `apply` is synchronous, and the registry is not.
-        config: { human: human.id, memory: human.memory !== false, skills: [...(human.skills ?? [])] },
+        config: {
+          human: human.id,
+          memory: human.memory !== false,
+          skills: [...(human.skills ?? [])],
+          // A record with no bot has no outbound channel. Carrying the flag keeps the
+          // tools row from offering `notify_bot`, which could only ever fail.
+          im: Boolean(human.im?.botId),
+        },
       },
     ],
   }
