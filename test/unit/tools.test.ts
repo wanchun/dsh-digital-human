@@ -269,10 +269,19 @@ describe('the chat tools', () => {
 describe('notify_bot', () => {
   const build = (service: any, dshIm?: unknown) => buildHumanTools({ ctx: ctxWith(dshIm), service, humanId: 'pm' })
 
-  it('sends through the bound bot to the configured target', async () => {
+  it('refuses a message with no explicit target', async () => {
+    // A record's own target belongs to one conversation; guessing it for another
+    // message would put that message in a group nobody asked for.
     const send = vi.fn(async () => ({ ok: true }))
-    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [] }), 'notify_bot')
-    const result = await notify.execute({ message: 'hello' })
+    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [{ targetId: 'leader' }] }), 'notify_bot')
+    await expect(notify.execute({ message: 'hello' })).rejects.toThrow(/needs an explicit to/)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('sends to the explicit target through the bound bot', async () => {
+    const send = vi.fn(async () => ({ ok: true }))
+    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [{ targetId: 'leader' }] }), 'notify_bot')
+    const result = await notify.execute({ message: 'hello', to: 'leader' })
     expect(result).toMatchObject({ botId: 'wecom_1', targetId: 'leader' })
     expect(send).toHaveBeenCalledWith('wecom_1', 'leader', 'hello', { format: 'plain' })
   })
@@ -394,9 +403,9 @@ describe('notify_bot', () => {
     // `dev` has neither a bot nor a target, so an explicit bot leaves no target.
     const noTarget = buildHumanTools({ ctx: ctxWith(im), service: serviceStub(), humanId: 'dev' })
     await expect(toolOf(noTarget, 'notify_bot').execute({ message: 'x', bot_id: 'b' }))
-      .rejects.toThrow(/no IM target is configured/)
+      .rejects.toThrow(/needs an explicit to/)
     const notify = toolOf(build(serviceStub(), im), 'notify_bot')
-    await expect(notify.execute({ message: '   ' })).rejects.toThrow(/must not be empty/)
+    await expect(notify.execute({ message: '   ', to: 'leader' })).rejects.toThrow(/must not be empty/)
   })
 })
 

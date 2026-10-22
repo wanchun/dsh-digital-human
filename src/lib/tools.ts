@@ -440,11 +440,13 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     description:
       'Push a message to an IM contact (a person or a group) through the IM bot bound to you. '
       + 'Use this to report progress or results to a human, or to reach a chat that is not a digital human. '
-      + 'Defaults to your configured target. Text only; use the tctp-send skill when you must attach a file, an image, or an @-mention.',
+      + '`to` is required and never defaulted: a target belongs to one conversation, so an omitted recipient is refused rather than guessed. '
+      + 'Text only; use the tctp-send skill when you must attach a file, an image, or an @-mention.',
     parameters: {
       message: { type: 'string', required: true, description: 'Message text to send.' },
       to: {
         type: 'string',
+        required: true,
         description: 'IM target id reported by list_bot_targets, or a raw platform chat id. '
           + 'A chat id the bot has not saved as a target is sent to directly, without saving one first.',
       },
@@ -469,29 +471,30 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       if (!dshIm) throw new Error('the IM plugin is not active, so no bot can send')
       const im = await botOf()
       const botId = String(args.bot_id ?? im.botId ?? '').trim()
-      const explicit = String(args.to ?? '').trim()
-      const to = explicit || String(im.targetId ?? '').trim()
+      const to = String(args.to ?? '').trim()
       if (!botId) throw new Error('no IM bot is bound to you and no bot_id was given')
-      if (!to) throw new Error('no IM target is configured on you and no to was given')
+      if (!to) {
+        // No default: a record's own target belongs to one conversation, and a
+        // message without an explicit recipient would be guessed into it. Fail with
+        // the list, so the caller can pick or register the right one.
+        throw new Error('notify_bot needs an explicit to. ' + await targetHelp(dshIm, botId))
+      }
       const text = String(args.message ?? '').trim()
       if (!text) throw new Error('message must not be empty')
       const options = { format: args.format === 'markdown' ? 'markdown' : 'plain' }
-      // A target configured on you is already saved, so it is addressed as a target id.
-      // An explicit `to` is checked against the saved targets first, and anything the bot
+      // `to` is checked against the saved targets first, and anything the bot
       // does not already report is taken as a raw platform chat id and sent to directly:
       // the IM delivery service accepts an unregistered draft target, so nobody has to
       // save a target before a message can reach that chat. An unreadable target list
       // keeps the original target-id behaviour instead of failing the send.
       let saved: string[] | null = null
-      if (explicit) {
-        try {
-          const known = await dshIm.listTargets(botId)
-          if (Array.isArray(known)) saved = known.map((entry) => String(entry?.targetId ?? ''))
-        } catch {
-          saved = null
-        }
+      try {
+        const known = await dshIm.listTargets(botId)
+        if (Array.isArray(known)) saved = known.map((entry) => String(entry?.targetId ?? ''))
+      } catch {
+        saved = null
       }
-      if (!explicit || saved === null || saved.includes(to)) {
+      if (saved === null || saved.includes(to)) {
         try {
           await dshIm.send(botId, to, text, options)
         } catch (error) {
