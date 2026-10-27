@@ -42,6 +42,15 @@ Agent preset（`dh-<id>`），所以新增、修改、停用、删除数字人�
 
 **六个通用事实**：`self_name` `self_id` `owner_id` `owner_chat` `peer_name` `peer_id`。
 
+### 记录落盘：人设与配置分开
+
+每条记录是一个目录，人设和机器配置分开存：
+
+- `persona.md`：名称、描述（frontmatter）+ 人设正文。可直接编辑、可 diff、可回滚。
+- `config.json`：启用、工作目录、技能、同伴、IM 绑定、权限预设、会话模式、自由配置、时间戳。
+
+目录是唯一权威，不再有合并的 `humans.json`；旧格式用迁移命令转过来（见「落盘布局」）。
+
 ### 与 IM 的绑定与对齐
 
 把记录推给绑定的 bot（`bot.workspace.set`、`bot.preset.set`、`bot.context-enhancement.set`），
@@ -61,6 +70,13 @@ Agent preset（`dh-<id>`），所以新增、修改、停用、删除数字人�
 
   接收方按 `session` 回，**活是谁派的就回给谁**
 - **信箱**：每个数字人一份 append-only JSONL，按**会话 id** 记账（旧文件自动迁移）
+
+### 会话模式
+
+- `thread`（默认）：一个 `conversation_id` 一条会话，消息**插话**进入正在跑的回合。研发助手按需求分线程。
+- `single`：固定一条常驻会话，`conversation_id` 只作标签；消息**排队**到当前回合之后；会话建立时用记录名命名。适合自测类助手。
+- 两种模式都是长期会话；区别只在"每个线程一条"还是"共用一条"。
+- 回执按 `<dsh_peer_source session>` 的来路回到派活会话，不按线程名猜。
 
 ### 记忆
 
@@ -94,11 +110,14 @@ bundled 内置技能        ─┘
 
 ```
 pm-assistant-202610131954.dh.tar.gz
-├── manifest.json      格式版本、导出时间、id、带了哪些技能
-├── human.json         记录（剥掉本机字段）
-├── memory.md          可选
-└── skills/<名字>/…    勾选的那些技能，原样目录树
+├── manifest.json              格式版本（dsh-digital-human/2）、导出时间、id、带了哪些技能
+├── humans/<id>/persona.md     人设（剥掉本机字段）
+├── humans/<id>/config.json    机器配置
+├── memory/<id>.md             可选
+└── skills/<名字>/…            勾选的那些技能，原样目录树
 ```
+
+旧格式（`humans/<id>.json` 合并记录）仍可导入，按文件布局自动识别。
 
 - **tar 容器手写 + 内置 `zlib.gzipSync`** —— 插件零运行时依赖
 - 二进制安全；`tar tzf` 能直接看内容 —— **导入等于接受别人的提示词，先看得见很重要**
@@ -122,8 +141,9 @@ pm-assistant-202610131954.dh.tar.gz
 | `digital_human_messages` | 读同伴回复 | 预设内 |
 | `digital_human_conversations` | 列出与同伴的两种地址 | 预设内 |
 | `digital_human_list` | 列出所有数字人 | 预设内 |
-| `notify_bot` | 给人发 IM（只认目标名，不认 chatId） | 预设内 |
+| `notify_bot` | 给人发 IM（`to` 必填：已登记目标或原始 chatId） | 预设内 |
 | `list_bot_targets` | 列出可投递目标 | 预设内 |
+| `set_session_title` | 给自己的会话改名（不依赖 IM bot） | 预设内 |
 | `memory_status` / `memory_compact` | 记忆结构 / 压缩 | 预设内 |
 | `digital_human` | 注册表增删改查 | 全局 |
 
@@ -152,14 +172,29 @@ pm-assistant-202610131954.dh.tar.gz
 
 ```
 ~/.dsh/digital-human/
-├── humans.json                    注册表（记录 + 配置声明）
-├── skills/                        插件技能空间
 ├── humans/<id>/
+│   ├── persona.md                 人设（frontmatter + 正文）
+│   ├── config.json                机器配置
 │   ├── memory.md                  记忆（# now + # History）
 │   ├── sessions.json              地址 → 会话 id
-│   └── conversations/<地址>.jsonl  信箱
+│   ├── edges.jsonl                往来边（谁问谁的记录）
+│   └── conversations/<会话>.jsonl  信箱
+├── humans.json.legacy-<时间>      迁移备份（迁移后才有）
+├── skills/                        插件技能空间
 └── workspace/                     数字人共享的工作区
 ```
+
+### 旧注册表迁移
+
+旧版本把记录放在 `humans.json`。停宿主后执行：
+
+```bash
+node tools/migrate.mjs --dry-run
+node tools/migrate.mjs
+```
+
+宿主运行时命令会拒绝；迁移先备份，再逐条写入并从目录读回、逐字段比对，全部通过才删除旧文件。
+`tools/cutover.sh` 把"停宿主 → 迁移 → 重启"串成一次操作。
 
 ### 插件配置项
 
@@ -184,8 +219,8 @@ pm-assistant-202610131954.dh.tar.gz
 ### 测试
 
 ```
-单测 519 项（vitest，17 个文件）      行 98.8%  分支 90.1%
-集成 410 项（6 个 .mjs，跑编译产物）  语句 97.4%  函数 96.3%
+单测 609 项（vitest，17 个文件）      分支覆盖率 ≥ 90%
+集成 423 项（6 个 .mjs，跑编译产物）  零运行时依赖
 零运行时依赖（只用 node 内置）
 ```
 
