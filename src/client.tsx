@@ -55,6 +55,11 @@ const STYLE = `
 .dh-item[data-active="true"] { background: var(--dsw-alias-interactive-bg-hover); }
 .dh-item:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
 .dh-item-name { font-size: 14px; line-height: 20px; display: flex; align-items: center; gap: 6px; }
+.dh-item-icon { width: 16px; height: 16px; border-radius: 4px; object-fit: cover; flex: 0 0 auto; }
+.dh-icon-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dh-icon-preview { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); }
+.dh-icon-empty { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
+.dh-icon-input { font-size: 12px; max-width: 220px; }
 .dh-item-id { font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary); font-family: ui-monospace, monospace; }
 .dh-item-off .dh-item-name, .dh-item-name[data-off="true"] { color: var(--dsw-alias-label-tertiary); }
 .dh-section {
@@ -161,6 +166,7 @@ interface Draft {
   owner: string
   permissionPreset: string
   sessionMode: 'thread' | 'single'
+  icon: string
   enabled: boolean
   memory: boolean
   creating: boolean
@@ -421,6 +427,7 @@ const BLANK: Draft = {
   owner: '',
   permissionPreset: DEFAULT_PERMISSION_PRESET,
   sessionMode: 'thread',
+  icon: '',
   enabled: true,
   memory: true,
   creating: false,
@@ -443,6 +450,7 @@ function toDraft(human: Human): Draft {
     owner: human.im?.owner ?? '',
     permissionPreset: human.permissionPreset ?? DEFAULT_PERMISSION_PRESET,
     sessionMode: human.sessionMode === 'single' ? 'single' : 'thread',
+    icon: human.icon ?? '',
     enabled: human.enabled !== false,
     memory: human.memory !== false,
     creating: false,
@@ -466,6 +474,7 @@ function toPatch(draft: Draft): HumanPatch {
     im: { botId: draft.botId.trim(), owner: draft.owner.trim() },
     permissionPreset: draft.permissionPreset,
     sessionMode: draft.sessionMode,
+    icon: draft.icon,
     enabled: draft.enabled,
     memory: draft.memory,
   }
@@ -623,6 +632,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   // differently named field during render once blanked the whole panel.
   const [workspaces, setWorkspaces] = React.useState<{ items: WorkspaceView[]; defaultTitle: string; defaultPath: string | null }>({ items: [], defaultTitle: '数字人', defaultPath: null })
   const [error, setError] = React.useState<string | null>(null)
+  const [iconError, setIconError] = React.useState<string | null>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
   const [busy, setBusy] = React.useState<boolean>(false)
   const mounted = React.useRef<boolean>(true)
@@ -872,6 +882,34 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   const failedAlignment = (selected?.alignment ?? []).filter((entry) => entry.ok !== true)
   const boundBot = bots.find((entry) => entry.botId === draft?.botId)
 
+  /** Read one icon file into a data URI the registry will accept. */
+  const chooseIcon = (file: File | undefined) => {
+    if (!file) return
+    const allowed = ['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml']
+    if (!allowed.includes(file.type)) {
+      setIconError('只支持 png、jpeg、webp、svg')
+      return
+    }
+    // The record stores the data URI, and the registry caps it at 64KB; base64 adds
+    // about a third, so the file itself has to stay under 48KB.
+    if (file.size > 48 * 1024) {
+      setIconError('图片不能超过 48KB（编码后约 64KB）')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      const uri = typeof reader.result === 'string' ? reader.result : ''
+      if (!uri.startsWith('data:image/') || uri.length > 64 * 1024) {
+        setIconError('图片读取失败或编码后超过 64KB')
+        return
+      }
+      setIconError(null)
+      patch({ icon: uri })
+    }
+    reader.onerror = () => setIconError('图片读取失败')
+    reader.readAsDataURL(file)
+  }
+
   return (
     <div className="dh-root">
       <div className="dh-head">
@@ -923,6 +961,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
                 onClick={() => { setNotice(null); setError(null); setConfirmingDelete(false); setDraft(toDraft(entry)) }}
               >
                 <span className="dh-item-name" data-off={entry.enabled ? 'false' : 'true'}>
+                  {entry.icon ? <img className="dh-item-icon" src={entry.icon} alt="" /> : null}
                   <StateDot state={entry.enabled ? 'done' : 'idle'} />
                   {entry.name}{entry.enabled ? '' : '（已停用）'}
                 </span>
@@ -949,6 +988,32 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
           />
           <Field label="显示名称" value={draft?.name} onChange={(value) => patch({ name: value })} />
           <Field label="一句话说明" value={draft?.description} onChange={(value) => patch({ description: value })} />
+
+          <div className="dh-field">
+            <span className="dh-label">图标</span>
+            <div className="dh-icon-row">
+              {draft?.icon
+                ? <img className="dh-icon-preview" src={draft.icon} alt="图标预览" />
+                : <span className="dh-icon-empty">未配置</span>}
+              <input
+                className="dh-icon-input"
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                onChange={(event) => { chooseIcon(event.target.files?.[0]); event.target.value = '' }}
+              />
+              {draft?.icon
+                ? (
+                  <Button size="sm" onClick={() => { setIconError(null); patch({ icon: '' }) }}>
+                    清除
+                  </Button>
+                )
+                : null}
+            </div>
+            <span className="dh-hint">
+              支持 png / jpeg / webp / svg，最大 48KB；只随记录保存在本机，不请求外部地址。没有图标就不显示。
+            </span>
+            {iconError ? <p className="dh-error" role="alert">{iconError}</p> : null}
+          </div>
 
           <label className="dh-field">
             <span className="dh-label">人设</span>

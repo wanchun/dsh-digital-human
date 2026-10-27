@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { apply } = await import('../../src/client')
 
+const PNG_ICON = 'data:image/png;base64,iVBORw0KGgo='
+
 /** A record shaped like the Host returns it. */
 const human = (patch: Record<string, any> = {}) => ({
   id: 'pm-assistant',
@@ -261,6 +263,44 @@ describe('the detail form', () => {
     // The page cannot show a target, so it must not erase one.
     expect(save.payload.patch.im.targetId).toBeUndefined()
     await waitFor(() => expect(screen.getByText(/已保存/)).toBeTruthy())
+  })
+
+  it('shows a configured icon in the record list', async () => {
+    view.unmount()
+    view = mount({ ...defaultAnswers(), 'registry.list': () => listValue([human({ icon: PNG_ICON })]) })
+    await settle()
+    const img = view.container.querySelector('img.dh-item-icon') as HTMLImageElement | null
+    expect(img?.getAttribute('src')).toBe(PNG_ICON)
+    const preview = view.container.querySelector('img.dh-icon-preview') as HTMLImageElement | null
+    expect(preview?.getAttribute('src')).toBe(PNG_ICON)
+  })
+
+  it('uploads an icon, previews it and saves it', async () => {
+    const input = view.container.querySelector('input.dh-icon-input') as HTMLInputElement
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'a.png', { type: 'image/png' })
+    fireEvent.change(input, { target: { files: [file] } })
+    await waitFor(() => expect(view.container.querySelector('img.dh-icon-preview')).toBeTruthy())
+    fireEvent.click(screen.getByText('保存'))
+    await waitFor(() => expect(view.calls.some((entry) => entry.method === 'registry.save')).toBe(true))
+    const save = view.calls.find((entry) => entry.method === 'registry.save')!
+    expect(save.payload.patch.icon).toMatch(/^data:image\/png;base64,/)
+  })
+
+  it('clears a configured icon', async () => {
+    view.unmount()
+    view = mount({ ...defaultAnswers(), 'registry.list': () => listValue([human({ icon: PNG_ICON })]) })
+    await settle()
+    fireEvent.click(screen.getByText('清除'))
+    fireEvent.click(screen.getByText('保存'))
+    await waitFor(() => expect(view.calls.some((entry) => entry.method === 'registry.save')).toBe(true))
+    const save = view.calls.find((entry) => entry.method === 'registry.save')!
+    expect(save.payload.patch.icon).toBe('')
+  })
+
+  it('refuses an unsupported icon file', async () => {
+    const input = view.container.querySelector('input.dh-icon-input') as HTMLInputElement
+    fireEvent.change(input, { target: { files: [new File(['x'], 'a.txt', { type: 'text/plain' })] } })
+    await waitFor(() => expect(screen.getByText(/只支持 png/)).toBeTruthy())
   })
 
   it('reports a refused save', async () => {
