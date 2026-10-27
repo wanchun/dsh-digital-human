@@ -37,6 +37,7 @@
   },
   "files": [
     "build/",
+    "tools/",
     "lib/",
     "locale/",
     "client.js",
@@ -95,6 +96,7 @@
     "test": "pnpm run build && pnpm run test:unit && pnpm run test:integration",
     "test:unit": "vitest run --coverage",
     "test:unit:watch": "vitest",
+    "migrate": "node tools/migrate.mjs",
     "test:integration": "node test/smoke.mjs && node test/memory.mjs && node test/apply.mjs && node test/wiring.mjs && node test/schema.mjs && node test/im.mjs"
   }
 }

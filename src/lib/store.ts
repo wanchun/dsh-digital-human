@@ -7,7 +7,7 @@
  * only source of truth; there is no combined registry file.
  */
 
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -237,6 +237,24 @@ export function parsePersona(text: string, id: string) {
   }
 }
 
+/**
+ * Whether a record read back from disk matches the one that was written.
+ *
+ * Name and description live on one frontmatter line, so their internal whitespace
+ * is collapsed on the way out; the comparison applies the same rule to the source
+ * instead of pretending the file kept it. The prompt is compared line-ending
+ * normalized for the same reason: the file is text, and a CRLF source becomes LF.
+ */
+function sameRecord(read: Human, source: Human): boolean {
+  const shape = (human: Human) => JSON.stringify({
+    ...human,
+    name: oneLine(human.name),
+    description: oneLine(human.description),
+    systemPrompt: human.systemPrompt.replace(/\r\n/g, '\n'),
+  })
+  return shape(read) === shape(source)
+}
+
 /** Registry backed by one directory per human plus their private state. */
 export class HumanStore {
   #home
@@ -412,6 +430,89 @@ export class HumanStore {
       }
     }
     return records
+  }
+
+  /** The legacy combined registry, when a deployment still has one. */
+  legacyPath() {
+    return join(this.#home, 'humans.json')
+  }
+
+  /**
+   * Read the legacy combined registry.
+   *
+   * A separate path from `load`: normal reads never fall back to the old file, so
+   * a host that starts before migration cannot mistake stale data for the truth.
+   * Only the migration command calls this.
+   */
+  async readLegacy(): Promise<Human[]> {
+    const path = this.legacyPath()
+    if (!existsSync(path)) return []
+    let parsed
+    try {
+      parsed = JSON.parse(await readFile(path, 'utf8'))
+    } catch (error) {
+      throw new Error(`legacy registry is not valid JSON: ${error.message}`)
+    }
+    if (!Array.isArray(parsed)) throw new Error('legacy registry must hold a JSON array')
+    return parsed.map((entry) => {
+      const normalized = normalizeHuman(entry, entry?.createdAt)
+      return typeof entry?.updatedAt === 'string' ? { ...normalized, updatedAt: entry.updatedAt } : normalized
+    })
+  }
+
+  /** Copy the legacy file aside, stamping the backup with the moment it was taken. */
+  async #backupLegacy() {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const target = `${this.legacyPath()}.legacy-${stamp}`
+    await copyFile(this.legacyPath(), target)
+    return target
+  }
+
+  /**
+   * Migrate the legacy combined registry into record directories.
+   *
+   * The legacy file is deleted only after every record has been written back and
+   * read again field for field, so a partial migration leaves the source intact.
+   * A target directory that already holds a record aborts the run before anything
+   * is written: a migration must never overwrite a record someone already edited.
+   *
+   * @param options.dryRun - report the plan without writing, backing up or deleting.
+   */
+  migrateLegacy({ dryRun = false } = {}): Promise<{
+    dryRun: boolean
+    records: Array<{ id: string; dir: string }>
+    backup?: string
+    removed?: string
+    reason?: string
+  }> {
+    return this.#serialize(async () => {
+      const path = this.legacyPath()
+      if (!existsSync(path)) return { dryRun, records: [] as Array<{ id: string; dir: string }>, reason: 'no legacy registry' }
+      const records = await this.readLegacy()
+      const plan = records.map((entry) => ({ id: entry.id, dir: this.dir(entry.id) }))
+      const conflicts = records.filter((entry) => existsSync(this.personaPath(entry.id)) || existsSync(this.configPath(entry.id)))
+      if (conflicts.length > 0) {
+        throw new Error(`refusing to migrate: ${conflicts.map((entry) => entry.id).join(', ')} already has a record directory`)
+      }
+      if (dryRun) return { dryRun, records: plan }
+      const backup = await this.#backupLegacy()
+      const written: string[] = []
+      try {
+        for (const record of records) {
+          await this.#writeRecord(record)
+          written.push(record.id)
+          const read = await this.#read(record.id)
+          if (read === undefined || !sameRecord(read, record)) {
+            throw new Error(`record ${record.id} did not round-trip`)
+          }
+        }
+      } catch (error) {
+        for (const id of written) await this.#removeRecord(id)
+        throw new Error(`migration aborted, legacy registry kept: ${error.message}`)
+      }
+      await unlink(path)
+      return { dryRun, records: plan, backup, removed: path }
+    })
   }
 
   /**

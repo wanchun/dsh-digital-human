@@ -166,7 +166,7 @@ check('a mismatched endpoint is a bad request', (await badEnvelope.json()).resul
 console.log('3) registry methods')
 const listed = await (await route.fetch(request(call('registry.list', {})))).json()
 check('list answers ok', listed.result.ok === true && listed.result.value.humans.length === 2)
-check('list names the registry file', listed.result.value.file.endsWith('humans.json'))
+check('list names the registry directory', listed.result.value.file.endsWith('humans'))
 // The page cannot resolve the config itself — the peer facts need every record's
 // name — so the Host attaches what the persona will actually see.
 const listedPm = listed.result.value.humans.find((entry) => entry.id === 'pm-assistant')

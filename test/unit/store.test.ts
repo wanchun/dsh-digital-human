@@ -362,6 +362,60 @@ describe('HumanStore writes', () => {
   })
 })
 
+describe('legacy migration', () => {
+  const legacyRecord = (patch: Record<string, unknown> = {}) => ({
+    id: 'one', name: 'One', enabled: true, systemPrompt: 'prompt', ...patch,
+  })
+  const writeLegacy = (records: unknown[]) => writeFile(join(home, 'humans.json'), JSON.stringify(records), 'utf8')
+
+  it('previews without writing, backing up or deleting', async () => {
+    await writeLegacy([legacyRecord({ id: 'a' }), legacyRecord({ id: 'b' })])
+    const result = await store.migrateLegacy({ dryRun: true })
+    expect(result.records.map((entry) => entry.id)).toEqual(['a', 'b'])
+    expect(result.backup).toBeUndefined()
+    expect(existsSync(join(home, 'humans'))).toBe(false)
+    expect(existsSync(join(home, 'humans.json'))).toBe(true)
+  })
+
+  it('migrates, backs up and removes the legacy file', async () => {
+    await writeLegacy([legacyRecord({ id: 'a', systemPrompt: 'line1\nline2' })])
+    const result = await store.migrateLegacy()
+    expect(result.records.map((entry) => entry.id)).toEqual(['a'])
+    expect(existsSync(store.personaPath('a'))).toBe(true)
+    expect(existsSync(join(home, 'humans.json'))).toBe(false)
+    expect(result.backup !== undefined && existsSync(result.backup)).toBe(true)
+    expect((await store.get('a'))?.systemPrompt).toBe('line1\nline2')
+  })
+
+  it('is a no-op when there is no legacy file', async () => {
+    expect(await store.migrateLegacy()).toMatchObject({ records: [], reason: 'no legacy registry' })
+  })
+
+  it('refuses a target directory that already holds a record', async () => {
+    await writeLegacy([legacyRecord({ id: 'a' })])
+    await store.upsert(record({ id: 'a' }))
+    await expect(store.migrateLegacy()).rejects.toThrow(/already has a record directory/)
+    expect(existsSync(join(home, 'humans.json'))).toBe(true)
+  })
+
+  it('refuses a legacy file that is not an array', async () => {
+    await writeFile(join(home, 'humans.json'), JSON.stringify({ nope: true }), 'utf8')
+    await expect(store.migrateLegacy()).rejects.toThrow(/JSON array/)
+  })
+
+  it('collapses whitespace in a frontmatter field when comparing', async () => {
+    await writeLegacy([legacyRecord({ id: 'a', name: 'A  B', description: 'x\n y' })])
+    await store.migrateLegacy()
+    expect((await store.get('a'))?.name).toBe('A B')
+  })
+
+  it('is idempotent', async () => {
+    await writeLegacy([legacyRecord({ id: 'a' })])
+    await store.migrateLegacy()
+    expect(await store.migrateLegacy()).toMatchObject({ records: [], reason: 'no legacy registry' })
+  })
+})
+
 describe('HumanStore paths', () => {
   it('keeps one private directory per human', () => {
     expect(store.dir('a')).toBe(join(home, 'humans', 'a'))

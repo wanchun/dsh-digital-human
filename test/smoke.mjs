@@ -5,8 +5,8 @@
  *   node test/smoke.mjs
  */
 
-import { readFileSync } from 'node:fs'
-import { mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HumanStore, normalizeHuman } from '../build/host/lib/store.js'
@@ -30,27 +30,17 @@ const check = (label, condition, extra = '') => {
 console.log('1) seed on first load')
 const seeded = await store.list(SEED_HUMANS)
 check('two humans seeded', seeded.length === 2, JSON.stringify(seeded.map((h) => h.id)))
-check('file written', (await readFile(store.file, 'utf8')).includes('dev-assistant'))
+check('record directory written', existsSync(store.personaPath('dev-assistant')))
 
 console.log('2) normalization')
-// humans.json is a plain file people edit by hand. A cache that never expires
-// hides those edits and lets the next save overwrite them from the stale copy.
+// The persona file is prose people edit by hand, so a read always goes to disk.
 {
-  const edited = JSON.parse(await readFile(store.file, 'utf8'))
-  edited[0].name = 'Hand Edited'
-  // The mtime has one-second resolution on some filesystems, so move it forward.
-  const later = new Date(Date.now() + 2000)
-  await writeFile(store.file, `${JSON.stringify(edited, null, 2)}\n`, 'utf8')
-  await utimes(store.file, later, later)
+  const personaPath = store.personaPath(seeded[0].id)
+  const original = await readFile(personaPath, 'utf8')
+  await writeFile(personaPath, original.replace(/^name: .*$/m, 'name: Hand Edited'), 'utf8')
   const reread = await store.list(SEED_HUMANS)
-  check('an edit on disk is picked up, not served from cache',
-    reread[0].name === 'Hand Edited', reread[0].name)
-
-  // Put the file back, so the checks below still see the seeded record.
-  edited[0].name = reread[0].name === 'Hand Edited' ? SEED_HUMANS[0].name : edited[0].name
-  await writeFile(store.file, `${JSON.stringify(edited, null, 2)}\n`, 'utf8')
-  const restored = new Date(Date.now() + 4000)
-  await utimes(store.file, restored, restored)
+  check('an edit on disk is picked up', reread[0].name === 'Hand Edited', reread[0].name)
+  await writeFile(personaPath, original, 'utf8')
   check('the edit is reversible', (await store.list(SEED_HUMANS))[0].name === SEED_HUMANS[0].name)
 }
 

@@ -14,7 +14,10 @@ import { join } from 'node:path'
 import { apply as applyPlatform } from '../build/host/index.js'
 import { apply as applyTools } from '../build/host/tools.js'
 import { presetIdOf } from '../build/host/lib/presets.js'
+import { HumanStore } from '../build/host/lib/store.js'
 import { SEED_HUMANS } from './fixtures/seed.mjs'
+
+const writeRegistry = (home, records) => new HumanStore(home).write(records)
 
 let pass = 0
 let fail = 0
@@ -341,7 +344,7 @@ console.log('12) an unclaimed owner is claimed at startup')
   const root = await mkdtemp(join(tmpdir(), 'dh-startup-claim-'))
   const claimHome = join(root, 'digital-human')
   await mkdir(claimHome, { recursive: true })
-  await writeFile(join(claimHome, 'humans.json'), JSON.stringify([{
+  await writeRegistry(claimHome, [{
     id: 'claimer',
     name: 'Claimer',
     description: '',
@@ -354,7 +357,7 @@ console.log('12) an unclaimed owner is claimed at startup')
     subscriptions: [],
     memory: false,
     escalation: { enabled: false, timeoutHours: 24 },
-  }]))
+  }])
   const botDir = join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_571e4e3104d704d7e99bcf79')
   await mkdir(botDir, { recursive: true })
   await writeFile(join(botDir, 'state.json'), JSON.stringify({
@@ -382,7 +385,7 @@ console.log('13) bound bots are aligned at startup, without a save')
   const root = await mkdtemp(join(tmpdir(), 'dh-startup-align-'))
   const alignHome = join(root, 'digital-human')
   await mkdir(alignHome, { recursive: true })
-  await writeFile(join(alignHome, 'humans.json'), JSON.stringify([{
+  await writeRegistry(alignHome, [{
     id: 'aligned',
     name: 'Aligned',
     description: '',
@@ -395,7 +398,7 @@ console.log('13) bound bots are aligned at startup, without a save')
     subscriptions: [],
     memory: false,
     escalation: { enabled: false, timeoutHours: 24 },
-  }]))
+  }])
   const botDir = join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_571e4e3104d704d7e99bcf79')
   await mkdir(botDir, { recursive: true })
   await writeFile(join(botDir, 'state.json'), JSON.stringify({
@@ -437,7 +440,7 @@ console.log('14) an alignment that found no connection recovers on a later refre
   const root = await mkdtemp(join(tmpdir(), 'dh-late-conn-'))
   const lateHome = join(root, 'digital-human')
   await mkdir(lateHome, { recursive: true })
-  await writeFile(join(lateHome, 'humans.json'), JSON.stringify([{
+  await writeRegistry(lateHome, [{
     id: 'late',
     name: 'Late',
     description: '',
@@ -450,7 +453,7 @@ console.log('14) an alignment that found no connection recovers on a later refre
     subscriptions: [],
     memory: false,
     escalation: { enabled: false, timeoutHours: 24 },
-  }]))
+  }])
 
   const logs = []
   const late = makeCtx()
@@ -486,7 +489,7 @@ console.log('15) an owner no sender can match is reported, not obeyed silently')
   const root = await mkdtemp(join(tmpdir(), 'dh-owner-mismatch-'))
   const mismatchHome = join(root, 'digital-human')
   await mkdir(mismatchHome, { recursive: true })
-  await writeFile(join(mismatchHome, 'humans.json'), JSON.stringify([{
+  await writeRegistry(mismatchHome, [{
     id: 'named',
     name: 'Named',
     description: '',
@@ -499,7 +502,7 @@ console.log('15) an owner no sender can match is reported, not obeyed silently')
     subscriptions: [],
     memory: false,
     escalation: { enabled: false, timeoutHours: 24 },
-  }]))
+  }])
   const botDir = join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_571e4e3104d704d7e99bcf79')
   await mkdir(botDir, { recursive: true })
   await writeFile(join(botDir, 'state.json'), JSON.stringify({
@@ -529,7 +532,7 @@ console.log('16) a delivered session is filed under its Workspace')
   const wsHome = join(root, 'digital-human')
   await mkdir(wsHome, { recursive: true })
   const target = join(wsHome, 'workspace')
-  await writeFile(join(wsHome, 'humans.json'), JSON.stringify([{
+  await writeRegistry(wsHome, [{
     id: 'ws-one',
     name: 'Ws',
     description: '',
@@ -542,7 +545,7 @@ console.log('16) a delivered session is filed under its Workspace')
     subscriptions: [],
     memory: false,
     escalation: { enabled: false, timeoutHours: 24 },
-  }]))
+  }])
 
   const items = [{ workspaceId: 'ws-digital-human', path: target, title: '数字人' }]
   const filed = makeCtx()
