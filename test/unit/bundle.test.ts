@@ -79,8 +79,16 @@ describe('packing', () => {
     expect(preview.humans).toHaveLength(1)
     expect(preview.humans[0].systemPrompt).toContain('{{bot}}')
     // A binding is the machine's, not the record's.
-    expect(preview.humans[0].im).toEqual({})
+    expect(preview.humans[0].im).toEqual({ botId: '', targetId: '' })
     expect(preview.skills).toEqual([{ name: 'qs', files: 2, bytes: expect.any(Number) }])
+  })
+
+  it('writes the persona and the config, never a combined record', async () => {
+    const { archive } = packHumans(home, [human({ im: { botId: 'wecom_1', targetId: 'g', owner: 'o' } })])
+    const files = readTar(gunzipSync(archive))
+    expect(files['humans/pm/persona.md'].toString('utf8')).toContain('name: 研发PM助手')
+    expect(JSON.parse(files['humans/pm/config.json'].toString('utf8'))).toMatchObject({ enabled: true, sessionMode: 'thread' })
+    expect(files['humans/pm.json']).toBeUndefined()
   })
 
   it('carries many records in one bundle, with the union of their skills', async () => {
@@ -136,7 +144,7 @@ describe('packing', () => {
 
   it('packs a raw record with no binding at all', () => {
     const bare = { id: 'bare', name: 'Bare' } as unknown as ReturnType<typeof normalizeHuman>
-    expect(readBundle(packHumans(home, [bare]).archive).humans[0].im).toBeUndefined()
+    expect(readBundle(packHumans(home, [bare]).archive).humans[0].im).toEqual({ botId: '', targetId: '' })
   })
 })
 
@@ -184,6 +192,28 @@ describe('reading', () => {
       { name: 'a', files: 1, bytes: 1 },
       { name: 'b', files: 2, bytes: 2 },
     ])
+  })
+
+  it('reads a directory record with no persona as an id-named record', () => {
+    const archive = gzipSync(writeTar({
+      'manifest.json': Buffer.from(`{"format":"${BUNDLE_FORMAT}"}`),
+      'humans/pm/config.json': Buffer.from('{"enabled":true}'),
+    }))
+    expect(readBundle(archive).humans[0]).toMatchObject({ id: 'pm', name: 'pm', systemPrompt: '' })
+  })
+
+  it('refuses a directory record with unreadable or non-object config', () => {
+    const manifest = Buffer.from(`{"format":"${BUNDLE_FORMAT}"}`)
+    const broken = gzipSync(writeTar({
+      'manifest.json': manifest,
+      'humans/pm/config.json': Buffer.from('{ nope'),
+    }))
+    expect(() => readBundle(broken)).toThrow(/unreadable/)
+    const notObject = gzipSync(writeTar({
+      'manifest.json': manifest,
+      'humans/pm/config.json': Buffer.from('[]'),
+    }))
+    expect(() => readBundle(notObject)).toThrow(/no usable/)
   })
 
   it('refuses a bundle over the size limit', () => {

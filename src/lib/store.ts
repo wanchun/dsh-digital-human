@@ -238,6 +238,58 @@ export function parsePersona(text: string, id: string) {
   }
 }
 
+/** What the config file holds for one record. */
+function configOf(human: Human): Record<string, unknown> {
+  return {
+    enabled: human.enabled,
+    workspace: human.workspace,
+    skills: human.skills,
+    peers: human.peers,
+    im: {
+      botId: human.im.botId,
+      targetId: human.im.targetId,
+      ...(human.im.owner ? { owner: human.im.owner } : {}),
+    },
+    permissionPreset: human.permissionPreset,
+    sessionMode: human.sessionMode ?? 'thread',
+    memory: human.memory,
+    subscriptions: human.subscriptions,
+    ...(human.config ? { config: human.config } : {}),
+    ...(human.configSchema ? { configSchema: human.configSchema } : {}),
+    createdAt: human.createdAt,
+    updatedAt: human.updatedAt,
+  }
+}
+
+/** The config file's text for one record. */
+export function configText(human: Human): string {
+  return `${JSON.stringify(configOf(human), null, 2)}\n`
+}
+
+/**
+ * Compose one record from its persona and its config.
+ *
+ * Shared by the registry and the bundle importer: both hold the same two pieces and
+ * must produce the same record, or an import would silently differ from a save.
+ */
+export function composeRecord(
+  id: string,
+  config: Record<string, unknown>,
+  persona: { name: string; description: string; body: string },
+): Human {
+  const picked = Object.fromEntries(CONFIG_FIELDS.filter((field) => config[field] !== undefined).map((field) => [field, config[field]]))
+  const normalized = normalizeHuman({
+    id,
+    name: persona.name || id,
+    description: persona.description,
+    systemPrompt: persona.body,
+    ...picked,
+  }, typeof config.createdAt === 'string' ? config.createdAt : undefined)
+  // Reading must not rewrite history. `normalizeHuman` stamps `updatedAt` for a
+  // write, so a plain load would make every record look edited just now.
+  return typeof config.updatedAt === 'string' ? { ...normalized, updatedAt: config.updatedAt } : normalized
+}
+
 /**
  * Whether a record read back from disk matches the one that was written.
  *
@@ -342,40 +394,7 @@ export class HumanStore {
     const persona = hasPersona
       ? parsePersona(await readFile(personaPath, 'utf8'), id)
       : { name: id, description: '', body: '' }
-    const picked = Object.fromEntries(CONFIG_FIELDS.filter((field) => config[field] !== undefined).map((field) => [field, config[field]]))
-    const normalized = normalizeHuman({
-      id,
-      name: persona.name || id,
-      description: persona.description,
-      systemPrompt: persona.body,
-      ...picked,
-    }, typeof config.createdAt === 'string' ? config.createdAt : undefined)
-    // Reading must not rewrite history. `normalizeHuman` stamps `updatedAt` for a
-    // write, so a plain load would make every record look edited just now.
-    return typeof config.updatedAt === 'string' ? { ...normalized, updatedAt: config.updatedAt } : normalized
-  }
-
-  /** What the config file holds for one record. */
-  #configOf(human: Human): Record<string, unknown> {
-    return {
-      enabled: human.enabled,
-      workspace: human.workspace,
-      skills: human.skills,
-      peers: human.peers,
-      im: {
-        botId: human.im.botId,
-        targetId: human.im.targetId,
-        ...(human.im.owner ? { owner: human.im.owner } : {}),
-      },
-      permissionPreset: human.permissionPreset,
-      sessionMode: human.sessionMode ?? 'thread',
-      memory: human.memory,
-      subscriptions: human.subscriptions,
-      ...(human.config ? { config: human.config } : {}),
-      ...(human.configSchema ? { configSchema: human.configSchema } : {}),
-      createdAt: human.createdAt,
-      updatedAt: human.updatedAt,
-    }
+    return composeRecord(id, config, persona)
   }
 
   /** Write one record's two files atomically. Never call this outside {@link #serialize}. */
@@ -387,7 +406,7 @@ export class HumanStore {
       await writeFile(temp, text, 'utf8')
       await rename(temp, path)
     }
-    await writes(this.configPath(human.id), `${JSON.stringify(this.#configOf(human), null, 2)}\n`)
+    await writes(this.configPath(human.id), configText(human))
     await writes(this.personaPath(human.id), personaText(human))
   }
 

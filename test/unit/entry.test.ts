@@ -458,7 +458,7 @@ describe('the bundle route', () => {
     const answer = await route.fetch(post(Buffer.from(exported), '?preview=1'))
     const value = (await answer.json()).value
     expect(value.preview.humans[0].id).toBe('pm-assistant')
-    expect(value.preview.manifest.format).toBe('dsh-digital-human/1')
+    expect(value.preview.manifest.format).toBe('dsh-digital-human/2')
     // A preview is a read: the registry is untouched.
     expect(platform.presets.size).toBe(2)
   })

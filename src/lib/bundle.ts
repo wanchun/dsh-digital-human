@@ -13,11 +13,15 @@
  *
  * Bundle layout:
  * ```
- * manifest.json        format, exported time, the ids it carries, contents
- * humans/<id>.json     one record each, with local-only fields stripped
- * memory/<id>.md       optional
- * skills/<name>/…      one directory per mounted skill, shared by every record
+ * manifest.json              format, exported time, the ids it carries, contents
+ * humans/<id>/persona.md     one persona each, with local-only fields stripped
+ * humans/<id>/config.json    the machine configuration beside it
+ * memory/<id>.md             optional
+ * skills/<name>/…            one directory per mounted skill, shared by every record
  * ```
+ *
+ * An older bundle carries `humans/<id>.json` instead of the two files; the reader
+ * accepts both so a package exported before the split still imports.
  *
  * A bundle carries one or many: an export of the whole registry is the same shape as
  * an export of a single record, so an import never has to ask which kind it got.
@@ -29,9 +33,13 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Human } from './types.js'
 import { libraryDir, validSkillName } from './skills.js'
+import { composeRecord, configText, normalizeHuman, parsePersona, personaText } from './store.js'
 
 /** Bundle format identifier, so a foreign archive is refused rather than guessed at. */
-export const BUNDLE_FORMAT = 'dsh-digital-human/1'
+export const BUNDLE_FORMAT = 'dsh-digital-human/2'
+
+/** Layouts this reader understands: the current one and the combined-record one. */
+const SUPPORTED_FORMATS = new Set([BUNDLE_FORMAT, 'dsh-digital-human/1'])
 
 /** Files one bundle may hold before it is refused. */
 const MAX_BUNDLE_FILES = 5000
@@ -41,9 +49,6 @@ const MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 
 /** Bytes in one tar block. */
 const BLOCK = 512
-
-/** Fields a record carries that only mean something on the machine it came from. */
-const LOCAL_ONLY = ['owner', 'targetId', 'botId'] as const
 
 /** Write one octal field, NUL-terminated, as tar wants it. */
 function octal(value: number, length: number): string {
@@ -189,20 +194,18 @@ export function packHumans(
 ): { archive: Buffer; manifest: BundleManifest } {
   if (humans.length === 0) throw new Error('there is no digital human to export')
   const files: Record<string, Buffer> = {}
-  for (const human of humans) {
-    const record = { ...human } as Record<string, unknown>
-    if (record.im && typeof record.im === 'object') {
-      // A binding is the machine's, not the record's: the bot id, its default target
-      // and the claimed owner all name things that do not exist elsewhere.
-      const im = { ...(record.im as Record<string, unknown>) }
-      for (const field of LOCAL_ONLY) delete im[field]
-      record.im = im
-    }
-    files[`humans/${human.id}.json`] = Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8')
+  const records = humans.map((entry) => normalizeHuman(entry))
+  for (const human of records) {
+    // A binding is the machine's, not the record's: the bot id, its default target
+    // and the claimed owner all name things that do not exist elsewhere. Writing
+    // empty fields rather than deleting them keeps the config shape stable.
+    const stripped: Human = { ...human, im: { botId: '', targetId: '' } }
+    files[`humans/${human.id}/persona.md`] = Buffer.from(personaText(stripped), 'utf8')
+    files[`humans/${human.id}/config.json`] = Buffer.from(configText(stripped), 'utf8')
   }
 
   const carried: string[] = []
-  for (const name of [...new Set(humans.flatMap((human) => human.skills ?? []))]) {
+  for (const name of [...new Set(records.flatMap((human) => human.skills ?? []))]) {
     if (!validSkillName(name)) continue
     const dir = join(libraryDir(home), name)
     if (!existsSync(dir)) continue
@@ -218,7 +221,7 @@ export function packHumans(
 
   let memory = false
   if (includeMemory) {
-    for (const human of humans) {
+    for (const human of records) {
       const memoryPath = join(home, 'humans', human.id, 'memory.md')
       if (!existsSync(memoryPath)) continue
       files[`memory/${human.id}.md`] = readFileSync(memoryPath)
@@ -229,7 +232,7 @@ export function packHumans(
   const manifest: BundleManifest = {
     format: BUNDLE_FORMAT,
     exportedAt: new Date().toISOString(),
-    humans: humans.map((human) => ({ id: human.id, name: human.name })),
+    humans: records.map((human) => ({ id: human.id, name: human.name })),
     memory,
     skills: carried,
   }
@@ -261,11 +264,33 @@ export function readBundle(archive: Buffer): BundlePreview {
   } catch (error) {
     throw new Error(`the bundle's JSON is unreadable: ${error.message}`)
   }
-  if (manifest?.format !== BUNDLE_FORMAT) {
+  if (!SUPPORTED_FORMATS.has(manifest?.format)) {
     throw new Error(`unsupported bundle format ${JSON.stringify(manifest?.format)}; expected ${BUNDLE_FORMAT}`)
   }
   const humans: Human[] = []
+  // Current layout: one directory per record.
   for (const [path, content] of Object.entries(files)) {
+    const match = /^humans\/([^/]+)\/config\.json$/.exec(path)
+    if (!match) continue
+    const id = match[1]
+    let config: Record<string, unknown>
+    try {
+      config = JSON.parse(content.toString('utf8'))
+    } catch (error) {
+      throw new Error(`the config in ${path} is unreadable: ${error.message}`)
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      throw new Error(`the bundle holds no usable digital human record at ${path}`)
+    }
+    const personaFile = files[`humans/${id}/persona.md`]
+    const persona = personaFile
+      ? parsePersona(personaFile.toString('utf8'), id)
+      : { name: id, description: '', body: '' }
+    humans.push(composeRecord(id, config, persona))
+  }
+  // Older layout: one combined record per file.
+  for (const [path, content] of Object.entries(files)) {
+    if (humans.length > 0) break
     if (!path.startsWith('humans/') || !path.endsWith('.json')) continue
     let record: Human
     try {
