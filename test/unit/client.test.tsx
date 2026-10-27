@@ -89,6 +89,7 @@ const defaultAnswers = () => ({
     ],
   }),
   'registry.save': (payload: any) => ({ human: human(payload.patch), presetId: 'dh-pm-assistant' }),
+  'registry.icons': () => ({ sessions: {} }),
   'registry.remove': () => ({ removed: true }),
 })
 
@@ -116,6 +117,69 @@ describe('slot registration', () => {
     view = mount(defaultAnswers())
     await settle()
     expect(view.calls[0].method).toBe('registry.list')
+  })
+})
+
+describe('the session row icon', () => {
+  it('puts the digital human icon on its session row', async () => {
+    view = mount({ ...defaultAnswers(), 'registry.icons': () => ({ sessions: { 'session-1': PNG_ICON } }) })
+    await settle()
+    const reg = view.registrations.find((entry) => entry.options.name === 'sidebar.session.row.leading')!
+    expect(reg).toBeTruthy()
+    const row = render(React.createElement(reg.Component, { sessionId: 'session-1', ...reg.options.inject() }))
+    await waitFor(() => expect(row.container.querySelector('img.dh-session-icon')?.getAttribute('src')).toBe(PNG_ICON))
+    row.unmount()
+  })
+
+  it('renders nothing when the icon map cannot be read', async () => {
+    view = mount({ ...defaultAnswers(), 'registry.icons': () => new Error('boom') })
+    await settle()
+    const reg = view.registrations.find((entry) => entry.options.name === 'sidebar.session.row.leading')!
+    const row = render(React.createElement(reg.Component, { sessionId: 'session-1', ...reg.options.inject() }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(row.container.querySelector('img.dh-session-icon')).toBeNull()
+    row.unmount()
+  })
+
+  it('renders nothing without a session id', async () => {
+    view = mount(defaultAnswers())
+    await settle()
+    const reg = view.registrations.find((entry) => entry.options.name === 'sidebar.session.row.leading')!
+    const row = render(React.createElement(reg.Component, { ...reg.options.inject() }))
+    expect(row.container.querySelector('img.dh-session-icon')).toBeNull()
+    row.unmount()
+  })
+
+  it('shares one in-flight icon request across rows', async () => {
+    view = mount(defaultAnswers())
+    await settle()
+    const reg = view.registrations.find((entry) => entry.options.name === 'sidebar.session.row.leading')!
+    // Move the clock past the five-second cache window, so the hook fetches instead
+    // of taking the fresh-map shortcut the page load just established.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6000)
+    const slowRpc = vi.fn(() => new Promise((resolve) => setTimeout(
+      () => resolve({ ok: true, value: { sessions: { 'session-1': PNG_ICON } } }),
+      30,
+    )))
+    const first = render(React.createElement(reg.Component, { sessionId: 'session-1', rpc: slowRpc }))
+    const second = render(React.createElement(reg.Component, { sessionId: 'session-1', rpc: slowRpc }))
+    await waitFor(() => {
+      expect(first.container.querySelector('img.dh-session-icon')).toBeTruthy()
+      expect(second.container.querySelector('img.dh-session-icon')).toBeTruthy()
+    })
+    expect(slowRpc).toHaveBeenCalledTimes(1)
+    first.unmount()
+    second.unmount()
+  })
+
+  it('leaves a row without a mapped icon empty', async () => {
+    view = mount(defaultAnswers())
+    await settle()
+    const reg = view.registrations.find((entry) => entry.options.name === 'sidebar.session.row.leading')!
+    const row = render(React.createElement(reg.Component, { sessionId: 'session-2', ...reg.options.inject() }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(row.container.querySelector('img.dh-session-icon')).toBeNull()
+    row.unmount()
   })
 })
 

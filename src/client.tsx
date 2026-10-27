@@ -60,6 +60,7 @@ const STYLE = `
 .dh-icon-preview { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); }
 .dh-icon-empty { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
 .dh-icon-input { font-size: 12px; max-width: 220px; }
+.dh-session-icon { width: 16px; height: 16px; border-radius: 4px; object-fit: cover; flex: 0 0 auto; }
 .dh-item-id { font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary); font-family: ui-monospace, monospace; }
 .dh-item-off .dh-item-name, .dh-item-name[data-off="true"] { color: var(--dsw-alias-label-tertiary); }
 .dh-section {
@@ -656,6 +657,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
     const value = await call('registry.list', {}, signal)
     if (signal?.aborted || !mounted.current) return
     setHumans(value.humans)
+    void refreshSessionIcons(rpc, true)
     setFile(value.file)
     setDraft((current) => {
       if (current?.creating === true) return current
@@ -1296,6 +1298,52 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   )
 }
 
+/** Session id -> the icon of the digital human that owns it, shared by every row. */
+let sessionIcons: Record<string, string> = {}
+let sessionIconsAt = 0
+let sessionIconsFlight: Promise<void> | null = null
+const sessionIconListeners = new Set<() => void>()
+
+function publishSessionIcons(next: Record<string, string>) {
+  sessionIcons = next
+  sessionIconsAt = Date.now()
+  for (const listener of [...sessionIconListeners]) listener()
+}
+
+/** Fetch the map, sharing one request across every mounted row. */
+function refreshSessionIcons(rpc: RpcCall, force = false) {
+  if (sessionIconsFlight) return sessionIconsFlight
+  if (!force && Date.now() - sessionIconsAt < 5000) return Promise.resolve()
+  sessionIconsFlight = rpc('registry.icons', {})
+    .then((result) => publishSessionIcons(result?.ok === true ? result.value?.sessions ?? {} : {}))
+    .catch(() => {})
+    .finally(() => { sessionIconsFlight = null })
+  return sessionIconsFlight
+}
+
+function useSessionIcons(rpc: RpcCall) {
+  const [icons, setIcons] = React.useState(sessionIcons)
+  React.useEffect(() => {
+    let live = true
+    const update = () => { if (live) setIcons(sessionIcons) }
+    sessionIconListeners.add(update)
+    void refreshSessionIcons(rpc)
+    return () => {
+      live = false
+      sessionIconListeners.delete(update)
+    }
+  }, [rpc])
+  return icons
+}
+
+/** The leading mark on one session row: its digital human's icon, or nothing. */
+function SessionRowIcon({ sessionId, rpc }: { sessionId?: string; rpc: RpcCall }) {
+  const icons = useSessionIcons(rpc)
+  const icon = sessionId ? icons[sessionId] : undefined
+  if (!icon) return null
+  return <img className="dh-session-icon" src={icon} alt="" />
+}
+
 /** Sidebar icon for the panel. */
 function DigitalHumansIcon({ size }: { size?: number }) {
   return (
@@ -1353,4 +1401,20 @@ export function apply(ctx) {
     }, DigitalHumansPanel)
     return () => dispose()
   }), 'digital-human: main panel')
+
+  // Leading mark on a session row. The seat only renders on an idle row, which is
+  // the accepted visibility rule; a host without a session list simply has no seat.
+  try {
+    ctx.effect(() => ctx.slots.inject('sidebar.session.row.leading', () => {
+      const dispose = ctx.slots.register({
+        name: 'sidebar.session.row.leading',
+        id: 'digital-human-icon',
+        order: 20,
+        inject: () => ({ rpc }),
+      }, SessionRowIcon)
+      return () => dispose()
+    }), 'digital-human: session row icon')
+  } catch {
+    // No session list in this host; the settings page still works.
+  }
 }
