@@ -55,11 +55,11 @@ const STYLE = `
 .dh-item[data-active="true"] { background: var(--dsw-alias-interactive-bg-hover); }
 .dh-item:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
 .dh-item-name { font-size: 14px; line-height: 20px; display: flex; align-items: center; gap: 6px; }
-.dh-item-icon { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
+.dh-item-icon { width: 14px; height: 14px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
 .dh-icon-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .dh-icon-empty { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
 .dh-icon-input { font-size: 12px; max-width: 220px; }
-.dh-session-icon { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
+.dh-session-icon { width: 14px; height: 14px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
 .dh-icon-preview { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); }
 .dh-item-id { font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary); font-family: ui-monospace, monospace; }
 .dh-item-off .dh-item-name, .dh-item-name[data-off="true"] { color: var(--dsw-alias-label-tertiary); }
@@ -963,7 +963,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
                 onClick={() => { setNotice(null); setError(null); setConfirmingDelete(false); setDraft(toDraft(entry)) }}
               >
                 <span className="dh-item-name" data-off={entry.enabled ? 'false' : 'true'}>
-                  {entry.icon ? <img className="dh-item-icon" src={entry.icon} alt="" width={16} height={16} /> : null}
+                  {entry.icon ? <img className="dh-item-icon" src={entry.icon} alt="" width={14} height={14} /> : null}
                   <StateDot state={entry.enabled ? 'done' : 'idle'} />
                   {entry.name}{entry.enabled ? '' : '（已停用）'}
                 </span>
@@ -1353,7 +1353,7 @@ function useSessionIcon(rpc: RpcCall, sessionId?: string) {
 function SessionRowIcon({ sessionId, rpc }: { sessionId?: string; rpc: RpcCall }) {
   const icon = useSessionIcon(rpc, sessionId)
   if (!icon) return null
-  return <img className="dh-session-icon" src={icon} alt="" width={16} height={16} />
+  return <img className="dh-session-icon" src={icon} alt="" width={14} height={14} />
 }
 
 /** Sidebar icon for the panel. */
