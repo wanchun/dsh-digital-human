@@ -281,9 +281,10 @@ describe('a session whose caller is not the owner', () => {
 
 describe('a registry that cannot be read', () => {
   it('degrades instead of failing activation', async () => {
-    // The file is documented as hand-editable, and the settings page is how it gets
-    // fixed — so a bad file must not take the whole platform down.
-    writeFileSync(join(home, 'humans.json'), '{ not json', 'utf8')
+    // The files are documented as hand-editable, and the settings page is how they
+    // get fixed — so a bad record must not take the whole platform down.
+    mkdirSync(join(home, 'humans', 'broken'), { recursive: true })
+    writeFileSync(join(home, 'humans', 'broken', 'config.json'), '{ not json', 'utf8')
     const log = vi.fn()
     const platform = makeCtx()
     platform.ctx.logger = { warn: log, info: () => {} }

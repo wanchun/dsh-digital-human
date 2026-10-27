@@ -1,14 +1,14 @@
 /**
  * Durable registry of digital humans.
  *
- * A digital human is a record, not a plugin row: the registry file is the only
- * source of truth, so humans are created, edited, paused, and deleted without
- * touching a composition. `humans.json` is small and human-editable on purpose;
- * per-human working state lives beside it under `humans/<id>/`.
+ * A digital human is a directory: `persona.md` for the human-editable identity,
+ * `config.json` for the machine configuration, and the per-human working state
+ * (memory, session index, conversation logs) beside them. The directory is the
+ * only source of truth; there is no combined registry file.
  */
 
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { existsSync, statSync } from 'node:fs'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { DEFAULT_PERMISSION_PRESET } from './types.js'
@@ -140,8 +140,6 @@ function configSchemaList(value) {
       ...(typeof entry.label === 'string' && entry.label.trim() ? { label: entry.label.trim() } : {}),
       ...(entry.type === undefined ? {} : { type: entry.type }),
       ...(typeof entry.description === 'string' && entry.description.trim() ? { description: entry.description.trim() } : {}),
-      // Trimmed like every other declared string: an untrimmed default would reach
-      // the prompt with its padding intact.
       ...(typeof entry.default === 'string' && entry.default.trim() ? { default: entry.default.trim() } : {}),
       ...(entry.required === true ? { required: true } : {}),
       ...(entry.hidden === true ? { hidden: true } : {}),
@@ -172,16 +170,10 @@ export function normalizeHuman(input, now = new Date().toISOString()) {
     im: {
       botId: typeof im.botId === 'string' && im.botId ? requireSlug(im.botId, 'im.botId') : '',
       targetId: typeof im.targetId === 'string' && im.targetId ? requireTarget(im.targetId, 'im.targetId') : '',
-      // An owner is an IM sender id or a display name. Both are opaque and may
-      // carry uppercase and separators, so neither goes through requireSlug —
-      // the same rule that would reject the real sender id.
       ...(typeof im.owner === 'string' && im.owner.trim() ? { owner: im.owner.trim() } : {}),
     },
     subscriptions: subscriptionList(input.subscriptions),
     memory: input.memory !== false,
-    // Every record carries the preset it runs under, so nothing invisible decides it.
-    // An empty string is not a preset name, so it falls back to the creation default
-    // rather than making the record claim a preset that does not exist.
     permissionPreset:
       typeof input.permissionPreset === 'string' && input.permissionPreset.trim()
         ? input.permissionPreset.trim()
@@ -193,13 +185,62 @@ export function normalizeHuman(input, now = new Date().toISOString()) {
   }
 }
 
-/** Registry backed by one JSON document plus a per-human state directory. */
+/** Fields the config file owns. Identity and prose live in the persona file. */
+const CONFIG_FIELDS = [
+  'enabled', 'workspace', 'skills', 'peers', 'im', 'permissionPreset', 'memory',
+  'subscriptions', 'config', 'configSchema', 'createdAt', 'updatedAt',
+]
+
+/** Collapse a value that must stay on one frontmatter line. */
+function oneLine(value): string {
+  return String(value ?? '').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Render the persona file: a two-key frontmatter block, then the prompt verbatim.
+ *
+ * The body is not touched: a prompt is authored prose, and trimming or re-wrapping
+ * it would silently change what the model reads.
+ */
+export function personaText(human: Human): string {
+  return `---\nname: ${oneLine(human.name)}\ndescription: ${oneLine(human.description)}\n---\n${human.systemPrompt}`
+}
+
+/**
+ * Read a persona file back.
+ *
+ * Only the two keys this file owns are parsed; anything else in the block is
+ * ignored. The body starts after the closing delimiter, byte for byte.
+ */
+export function parsePersona(text: string, id: string) {
+  const lines = text.split(/\r?\n/)
+  if (lines[0]?.trim() !== '---') {
+    throw new Error(`persona for ${id} must start with a frontmatter block`)
+  }
+  const end = lines.findIndex((line, at) => at > 0 && line.trim() === '---')
+  if (end < 0) throw new Error(`persona for ${id} has no closing frontmatter delimiter`)
+  const meta: Record<string, string> = {}
+  for (const line of lines.slice(1, end)) {
+    if (!line.trim()) continue
+    const match = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(line)
+    if (!match) throw new Error(`persona for ${id} has a malformed line: ${JSON.stringify(line)}`)
+    let value = match[2].trim()
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1)
+    }
+    meta[match[1]] = value
+  }
+  return {
+    name: meta.name?.trim() || '',
+    description: meta.description ?? '',
+    body: end + 1 < lines.length ? lines.slice(end + 1).join('\n') : '',
+  }
+}
+
+/** Registry backed by one directory per human plus their private state. */
 export class HumanStore {
   #home
-  #file
-  #cache
-  /** Modification time of the file behind {@link #cache}. */
-  #cachedAt
+  #humans
   /** Tail of the operation chain; see {@link #serialize}. */
   #queue = Promise.resolve()
   /** Counts writes, so one process never reuses a temp file name. */
@@ -207,20 +248,29 @@ export class HumanStore {
 
   constructor(home: string) {
     this.#home = home
-    this.#file = join(home, 'humans.json')
+    this.#humans = join(home, 'humans')
   }
 
   get home() {
     return this.#home
   }
 
+  /** The registry root: one directory per digital human. */
   get file() {
-    return this.#file
+    return this.#humans
   }
 
-  /** Root of one human's private state (sessions, conversations, memory). */
+  /** Root of one human's private state (record, sessions, conversations, memory). */
   dir(id) {
-    return join(this.#home, 'humans', requireSlug(id, 'digital human id'))
+    return join(this.#humans, requireSlug(id, 'digital human id'))
+  }
+
+  personaPath(id) {
+    return join(this.dir(id), 'persona.md')
+  }
+
+  configPath(id) {
+    return join(this.dir(id), 'config.json')
   }
 
   memoryPath(id) {
@@ -253,48 +303,114 @@ export class HumanStore {
     await mkdir(path, { recursive: true })
   }
 
-  /** The file's modification time, or undefined when it is absent. */
-  #mtime(): number | undefined {
+  /** Compose one record from the two files that describe it. */
+  async #read(id: string): Promise<Human | undefined> {
+    const personaPath = this.personaPath(id)
+    const configPath = this.configPath(id)
+    const hasPersona = existsSync(personaPath)
+    const hasConfig = existsSync(configPath)
+    if (!hasPersona && !hasConfig) return undefined
+    if (!hasConfig) throw new Error(`digital human ${id} has no config.json`)
+    let config: Record<string, unknown>
     try {
-      return statSync(this.#file).mtimeMs
-    } catch {
-      return undefined
+      config = JSON.parse(await readFile(configPath, 'utf8'))
+    } catch (error) {
+      throw new Error(`config.json of ${id} is not valid JSON: ${error.message}`)
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      throw new Error(`config.json of ${id} must hold a JSON object`)
+    }
+    const persona = hasPersona
+      ? parsePersona(await readFile(personaPath, 'utf8'), id)
+      : { name: id, description: '', body: '' }
+    const picked = Object.fromEntries(CONFIG_FIELDS.filter((field) => config[field] !== undefined).map((field) => [field, config[field]]))
+    const normalized = normalizeHuman({
+      id,
+      name: persona.name || id,
+      description: persona.description,
+      systemPrompt: persona.body,
+      ...picked,
+    }, typeof config.createdAt === 'string' ? config.createdAt : undefined)
+    // Reading must not rewrite history. `normalizeHuman` stamps `updatedAt` for a
+    // write, so a plain load would make every record look edited just now.
+    return typeof config.updatedAt === 'string' ? { ...normalized, updatedAt: config.updatedAt } : normalized
+  }
+
+  /** What the config file holds for one record. */
+  #configOf(human: Human): Record<string, unknown> {
+    return {
+      enabled: human.enabled,
+      workspace: human.workspace,
+      skills: human.skills,
+      peers: human.peers,
+      im: {
+        botId: human.im.botId,
+        targetId: human.im.targetId,
+        ...(human.im.owner ? { owner: human.im.owner } : {}),
+      },
+      permissionPreset: human.permissionPreset,
+      memory: human.memory,
+      subscriptions: human.subscriptions,
+      ...(human.config ? { config: human.config } : {}),
+      ...(human.configSchema ? { configSchema: human.configSchema } : {}),
+      createdAt: human.createdAt,
+      updatedAt: human.updatedAt,
     }
   }
 
+  /** Write one record's two files atomically. Never call this outside {@link #serialize}. */
+  async #writeRecord(human: Human) {
+    const dir = this.dir(human.id)
+    await this.ensureDir(dir)
+    const writes = async (path: string, text: string) => {
+      const temp = `${path}.${process.pid}.${++this.#writes}.tmp`
+      await writeFile(temp, text, 'utf8')
+      await rename(temp, path)
+    }
+    await writes(this.configPath(human.id), `${JSON.stringify(this.#configOf(human), null, 2)}\n`)
+    await writes(this.personaPath(human.id), personaText(human))
+  }
+
+  /** Remove the two record files, leaving memory and conversation state intact. */
+  async #removeRecord(id: string) {
+    const remove = (path: string) => unlink(path).catch((error) => {
+      if (error?.code !== 'ENOENT') throw error
+    })
+    await remove(this.personaPath(id))
+    await remove(this.configPath(id))
+  }
+
   /**
-   * Read the registry, creating it from `seed` on first use.
+   * Read the registry. One directory per record; there is no combined file and no
+   * fallback to the old one.
    *
-   * The cache is keyed to the file's modification time rather than held
-   * forever. `humans.json` is a plain JSON file that people edit by hand, and a
-   * permanent cache both hides those edits and lets the next save overwrite
-   * them from the stale copy.
+   * A fresh registry is seeded only when the registry root does not exist yet. An
+   * empty root means the operator removed every record, not that seeding should run
+   * again and resurrect them.
    */
   async load(seed: Human[] = []): Promise<Human[]> {
-    const stamp = this.#mtime()
-    if (this.#cache && stamp !== undefined && stamp === this.#cachedAt) return this.#cache
-    if (stamp === undefined) {
-      const records = seed.map((entry) => normalizeHuman(entry))
-      // The unqueued write, because this can run inside a queued operation: a save
-      // reads before it writes, and a queued write here would wait on the very
-      // operation that is waiting on it.
-      await this.#writeNow(records)
-      this.#cache = records
-      this.#cachedAt = this.#mtime()
-      return records
+    const records: Human[] = []
+    if (existsSync(this.#humans)) {
+      for (const name of readdirSync(this.#humans)) {
+        if (!SLUG.test(name)) continue
+        const full = join(this.#humans, name)
+        try {
+          if (!statSync(full).isDirectory()) continue
+        } catch {
+          continue
+        }
+        const record = await this.#read(name)
+        if (record) records.push(record)
+      }
     }
-    const raw = await readFile(this.#file, 'utf8')
-    const parsed = raw.trim() ? JSON.parse(raw) : []
-    if (!Array.isArray(parsed)) throw new Error(`${this.#file} must hold a JSON array`)
-    const records = parsed.map((entry) => {
-      const normalized = normalizeHuman(entry, entry?.createdAt)
-      // Reading must not rewrite history. `normalizeHuman` stamps `updatedAt` for a
-      // write, so a plain load would make every record look edited just now and
-      // erase the stored value in memory.
-      return typeof entry?.updatedAt === 'string' ? { ...normalized, updatedAt: entry.updatedAt } : normalized
-    })
-    this.#cache = records
-    this.#cachedAt = stamp
+    records.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.id.localeCompare(b.id))
+    if (records.length === 0 && !existsSync(this.#humans)) {
+      for (const entry of seed) {
+        const record = normalizeHuman(entry)
+        await this.#writeRecord(record)
+        records.push(record)
+      }
+    }
     return records
   }
 
@@ -313,23 +429,20 @@ export class HumanStore {
     return run
   }
 
-  /** Replace the whole registry atomically. */
+  /** Replace the whole registry: write every record, drop the ones no longer listed. */
   write(records) {
-    return this.#serialize(() => this.#writeNow(records))
-  }
-
-  /** The write itself. Never call this outside {@link #serialize}. */
-  async #writeNow(records) {
-    await this.ensureDir(dirname(this.#file))
-    // The sequence number is what makes the temp name unique within a process: a
-    // per-pid name lets two writers in the same process rename over each other,
-    // and one of them then fails with ENOENT.
-    const temp = `${this.#file}.${process.pid}.${++this.#writes}.tmp`
-    await writeFile(temp, `${JSON.stringify(records, null, 2)}\n`, 'utf8')
-    await rename(temp, this.#file)
-    this.#cache = records
-    this.#cachedAt = this.#mtime()
-    return records
+    return this.#serialize(async () => {
+      const wanted = records.map((entry) => normalizeHuman(entry))
+      const ids = new Set(wanted.map((entry) => entry.id))
+      if (existsSync(this.#humans)) {
+        for (const name of readdirSync(this.#humans)) {
+          if (!SLUG.test(name) || ids.has(name)) continue
+          await this.#removeRecord(name)
+        }
+      }
+      for (const record of wanted) await this.#writeRecord(record)
+      return wanted
+    })
   }
 
   async list(seed: Human[] = []): Promise<Human[]> {
@@ -351,10 +464,7 @@ export class HumanStore {
       const merged = index >= 0
         ? { ...records[index], ...next, createdAt: records[index].createdAt }
         : next
-      const updated = index >= 0
-        ? records.map((entry, at) => (at === index ? merged : entry))
-        : [...records, merged]
-      await this.#writeNow(updated)
+      await this.#writeRecord(merged)
       return merged
     })
   }
@@ -362,9 +472,8 @@ export class HumanStore {
   remove(id: string, seed: Human[] = []): Promise<boolean> {
     return this.#serialize(async () => {
       const records = await this.load(seed)
-      const updated = records.filter((entry) => entry.id !== id)
-      if (updated.length === records.length) return false
-      await this.#writeNow(updated)
+      if (!records.some((entry) => entry.id === id)) return false
+      await this.#removeRecord(id)
       return true
     })
   }

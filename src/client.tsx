@@ -903,7 +903,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
         </Button>
       </div>
 
-      {file ? <p className="dh-meta">注册表：{file}</p> : null}
+      {file ? <p className="dh-meta">注册表目录：{file}</p> : null}
       {error ? <p className="dh-error" role="alert">{error}</p> : null}
       {notice ? <p className="dh-notice">{notice}</p> : null}
 

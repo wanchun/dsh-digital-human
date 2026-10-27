@@ -77,6 +77,8 @@ export interface Human {
   id: string
   /** Set by the store on first write; absent on a seeded record. */
   createdAt?: string
+  /** Set by the store on every write. */
+  updatedAt?: string
   name: string
   description: string
   enabled: boolean

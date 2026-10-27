@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apply as applyPlatform } from '../../src/index'
+import { HumanStore } from '../../src/lib/store'
 import { apply as applyToolsEntry } from '../../src/tools'
 import { presetIdOf } from '../../src/lib/presets'
 import { SEED_HUMANS } from '../fixtures/seed.mjs'
@@ -296,7 +297,7 @@ describe('the management route', () => {
     const { route } = await platformWithRoute()
     const answer = await (await route.fetch(post(call('registry.list')))).json()
     expect(answer.result.ok).toBe(true)
-    expect(answer.result.value.file.endsWith('humans.json')).toBe(true)
+    expect(answer.result.value.file.endsWith('humans')).toBe(true)
     expect(answer.result.value.humans).toHaveLength(2)
     const pm = answer.result.value.humans.find((entry: any) => entry.id === 'pm-assistant')
     expect(pm.resolved.values.self_name).toBe('研发PM助手')
@@ -544,11 +545,10 @@ describe('the owner claim and the IM alignment', () => {
     await mkdir(join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_1'), { recursive: true })
     await writeFile(join(root, 'integrations', 'dsh-wecom', 'bots', 'wecom_1', 'state.json'),
       JSON.stringify({ version: 1, sessions: { 'direct:wohR_real': 's' } }))
-    await writeFile(join(mismatchHome, 'humans.json'), JSON.stringify([{
+    await new HumanStore(mismatchHome).write([{
       id: 'm1', name: 'M', enabled: true, systemPrompt: 'x', workspace: '', skills: [], peers: [],
       im: { botId: 'wecom_1', owner: 'a-typed-name' }, subscriptions: [], memory: false,
-      escalation: { enabled: false, timeoutHours: 24 },
-    }]))
+    }])
     const log = vi.fn()
     const platform = makeCtx()
     platform.ctx.logger = { warn: log, info: () => {} }
@@ -564,11 +564,10 @@ describe('the owner claim and the IM alignment', () => {
     const root = await mkdtemp(join(tmpdir(), 'dh-retry-'))
     const retryHome = join(root, 'digital-human')
     await mkdir(retryHome, { recursive: true })
-    await writeFile(join(retryHome, 'humans.json'), JSON.stringify([{
+    await new HumanStore(retryHome).write([{
       id: 'r1', name: 'R', enabled: true, systemPrompt: 'x', workspace: '', skills: [], peers: [],
       im: { botId: 'wecom_1', targetId: '' }, subscriptions: [], memory: false,
-      escalation: { enabled: false, timeoutHours: 24 },
-    }]))
+    }])
     let ready = false
     const connection = {
       createSharedFetchHandler: () => ({

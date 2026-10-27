@@ -203,11 +203,10 @@ describe('a session that announced itself before the presets existed', () => {
       sessionController: { create: async () => ({ sessionId: 's' }), prompt: async () => ({ accepted: true }), list: async () => ({ items: [] }), cancel: async () => ({}) },
       systemPrompt: { context: () => () => {} },
     }
-    writeFileSync(join(home, 'humans.json'), JSON.stringify([{
+    await new HumanStore(home).write([{
       id: 'early', name: 'Early', enabled: true, systemPrompt: 'p', workspace: '', skills: [], peers: [],
       im: { botId: '', targetId: '' }, subscriptions: [], memory: false,
-      escalation: { enabled: false, timeoutHours: 24 },
-    }]))
+    }])
 
     const applying = applyPlatform(platform, { home })
     // Wait until the hooks are subscribed, then announce a session while the first
@@ -424,12 +423,4 @@ describe('the permission roster the page offers', () => {
   })
 })
 
-describe('the store keeps its cache honest', () => {
-  it('reports a file that disappears between the stat and the read', async () => {
-    const store = new HumanStore(home)
-    await store.upsert(normalizeHuman({ id: 'a', name: 'A' }))
-    rmSync(join(home, 'humans.json'))
-    // A missing file re-seeds rather than throwing.
-    expect(await store.list([normalizeHuman({ id: 'seed' })])).toHaveLength(1)
-  })
-})
+

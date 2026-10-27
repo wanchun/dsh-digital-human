@@ -325,7 +325,7 @@ export function renderOperatingContext(human, store) {
     '## Operating context',
     '',
     `- You are the digital human \`${human.id}\` (${human.name}).`,
-    `- The digital-human registry lives at \`${store.file}\`. Read it when you need the current roster.`,
+    `- Digital humans live under \`${store.file}\`: one directory per human, with \`persona.md\` (identity) and \`config.json\` (settings). Read them when you need the current roster.`,
   ]
   if (human.memory !== false) {
     lines.push(`- Your durable memory is \`${store.memoryPath(human.id)}\`, and its \`# now\` block is already loaded into your prompt on every step. Update it with edit.`)
