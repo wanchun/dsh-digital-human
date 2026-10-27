@@ -169,12 +169,13 @@ describe('ensureSession', () => {
     expect(controller.sessions).toHaveLength(1)
   })
 
-  it('records the thread a Session-addressed message names', async () => {
-    // A peer answers the Session that asked, and may name the thread with it. Filing
-    // that name is what lets the next delivery by conversation find this Session
-    // instead of opening another, and what keeps the reply header off a raw id.
+  it('never lets a Session-addressed delivery take over the thread name', async () => {
+    // The name belongs to the thread's opener. A Session that merely received a
+    // message is not its owner, or a chat window a message landed in would swallow
+    // the thread and every later reply would follow it there.
     const controller = controllerStub()
     const { chat } = chatWith(controller)
+    const opened = await chat.ensureSession(human(), 'REQ-9', 'dh-pm')
     const delivered = await chat.deliver(human(), {
       sessionId: 'session-pm-1',
       conversationId: 'REQ-9',
@@ -182,8 +183,141 @@ describe('ensureSession', () => {
       presetId: 'dh-pm',
     })
     expect(delivered).toMatchObject({ sessionId: 'session-pm-1', conversationId: 'REQ-9' })
-    expect(await chat.ensureSession(human(), 'REQ-9', 'dh-pm')).toBe('session-pm-1')
     expect(controller.prompted[0].content[0].text).toContain('conversation="REQ-9"')
+    // The label still points at the Session that opened the thread.
+    expect(await chat.lookup('pm', 'REQ-9')).toBe(opened)
+    expect(await chat.ensureSession(human(), 'REQ-9', 'dh-pm')).toBe(opened)
+  })
+
+  it('records the edge a delivery creates, so a reply can follow it', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.deliver(human({ id: 'dev' }), {
+      sessionId: 'session-dev-1',
+      conversationId: 'REQ-1',
+      message: 'ask',
+      from: 'pm',
+      fromSession: 'session-pm-work-1',
+      presetId: 'dh-dev',
+    })
+    const target = await chat.threadTarget('dev', {
+      selfSession: 'session-dev-1',
+      peer: 'pm',
+      conversationId: 'REQ-1',
+    })
+    expect(target).toMatchObject({ sessionId: 'session-pm-work-1', via: 'inbound' })
+    const read = await chat.messages(human({ id: 'dev' }), 'session-dev-1')
+    expect(read.items[0]).toMatchObject({ session: 'session-pm-work-1', conversation: 'REQ-1' })
+  })
+
+  it('keeps an outbound edge, so the same Session finds the thread again', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.noteEdge('dev', {
+      dir: 'out',
+      selfSession: 'session-dev-1',
+      peer: 'pm',
+      peerSession: 'session-pm-work-1',
+      conversation: 'REQ-1',
+    })
+    const target = await chat.threadTarget('dev', {
+      selfSession: 'session-dev-1',
+      peer: 'pm',
+      conversationId: 'REQ-1',
+    })
+    expect(target).toMatchObject({ sessionId: 'session-pm-work-1', via: 'outbound' })
+  })
+
+  it('rebuilds its edges from disk, so a restart keeps routing replies', async () => {
+    const controller = controllerStub()
+    const first = chatWith(controller).chat
+    await first.noteEdge('dev', {
+      dir: 'in',
+      selfSession: 'session-dev-1',
+      peer: 'pm',
+      peerSession: 'session-pm-work-1',
+      conversation: 'REQ-1',
+    })
+    const reopened = chatWith(controller).chat
+    await reopened.prime([human({ id: 'dev' })])
+    const target = await reopened.threadTarget('dev', {
+      selfSession: 'session-dev-1',
+      peer: 'pm',
+      conversationId: 'REQ-1',
+    })
+    expect(target).toMatchObject({ sessionId: 'session-pm-work-1', via: 'inbound' })
+  })
+
+  it('finds a thread from another Session of the same human', async () => {
+    const { chat } = chatWith(controllerStub())
+    await chat.noteEdge('dev', {
+      dir: 'out',
+      selfSession: 'session-other',
+      peer: 'pm',
+      peerSession: 'session-pm-1',
+      conversation: 'REQ-1',
+    })
+    const target = await chat.threadTarget('dev', {
+      selfSession: 'session-dev-1',
+      peer: 'pm',
+      conversationId: 'REQ-1',
+    })
+    expect(target).toMatchObject({ sessionId: 'session-pm-1', via: 'thread' })
+  })
+
+  it('falls back to the legacy name index when no edge exists', async () => {
+    const { chat } = chatWith(controllerStub())
+    const opened = await chat.ensureSession(human({ id: 'dev' }), 'REQ-1', 'dh-dev')
+    const target = await chat.threadTarget('dev', {
+      selfSession: 'session-dev-9',
+      peer: 'pm',
+      conversationId: 'REQ-1',
+    })
+    expect(target).toMatchObject({ sessionId: opened, via: 'legacy' })
+  })
+
+  it('ignores an incomplete edge and survives a malformed line', async () => {
+    const { chat } = chatWith(controllerStub())
+    // An edge without a Session on both sides cannot route anything.
+    await chat.noteEdge('dev', { dir: 'in', selfSession: '', peer: 'pm', peerSession: 'x', conversation: 'REQ-1' })
+    expect(await chat.threadTarget('dev', { peer: 'pm', conversationId: 'REQ-1' })).toBeNull()
+    // A hand-edited line is skipped, and the next good one still loads.
+    await store.ensureDir(store.dir('dev'))
+    writeFileSync(store.edgePath('dev'), '{not json}\n'
+      + JSON.stringify({ at: '2026-01-01T00:00:00Z', dir: 'in', selfSession: 'session-dev-1', peer: 'pm', peerSession: 'session-pm-1', conversation: 'REQ-1' })
+      + '\n')
+    const reopened = chatWith(controllerStub()).chat
+    await reopened.prime([human({ id: 'dev' })])
+    expect(await reopened.threadTarget('dev', {
+      selfSession: 'session-dev-1', peer: 'pm', conversationId: 'REQ-1',
+    })).toMatchObject({ sessionId: 'session-pm-1' })
+  })
+
+  it('resolves nothing when no edge and no name exists', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    expect(await chat.threadTarget('dev', {
+      selfSession: 'session-dev-1',
+      peer: 'pm',
+      conversationId: 'never-used',
+    })).toBeNull()
+    // No thread named at all is the same answer, not the shared one.
+    expect(await chat.threadTarget('dev', { selfSession: 'session-dev-1', peer: 'pm' })).toBeNull()
+  })
+
+  it('orders edges by time and tolerates a tie', async () => {
+    const at = '2026-01-01T00:00:00.000Z'
+    const line = (peerSession: string) => JSON.stringify({
+      at, dir: 'in', selfSession: 'session-dev-1', peer: 'pm', peerSession, conversation: 'REQ-1',
+    })
+    await store.ensureDir(store.dir('dev'))
+    writeFileSync(store.edgePath('dev'), [line('session-a'), line('session-b')].join('\n') + '\n')
+    const { chat } = chatWith(controllerStub())
+    await chat.prime([human({ id: 'dev' })])
+    const target = await chat.threadTarget('dev', {
+      selfSession: 'session-dev-1', peer: 'pm', conversationId: 'REQ-1',
+    })
+    expect(target?.sessionId).toBe('session-a')
   })
 
   it('never names a Workspace and a cwd together, which the Host refuses', async () => {

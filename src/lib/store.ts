@@ -231,6 +231,17 @@ export class HumanStore {
     return join(this.dir(id), 'sessions.json')
   }
 
+  /**
+   * The append-only edge log: one line per peer message, recording which Sessions
+   * talked to each other on which thread.
+   *
+   * It is the durable answer to "who asked me", which the thread name cannot give:
+   * a name is a label shared by two agents, while an edge names both Sessions.
+   */
+  edgePath(id) {
+    return join(this.dir(id), 'edges.jsonl')
+  }
+
   conversationPath(id, conversationId) {
     // Percent-encode: a Halo conversation id carries colons, which are legal in
     // the id but not a safe filename. Plain ids encode to themselves, so

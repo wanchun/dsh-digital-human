@@ -21,6 +21,23 @@ export const DEFAULT_CONVERSATION = 'main'
 /** Longest message a peer may post, matching the IM text bound. */
 export const MESSAGE_MAX_CHARS = 32000
 
+/**
+ * One peer message, as a directed edge between two Sessions.
+ *
+ * `selfSession` is the side that keeps the line; `peerSession` is the other side.
+ * `dir` says which way the message travelled. A reply is resolved from the inbound
+ * edges of the Session that answers, so the answer follows the Session that asked
+ * instead of whatever the thread's name happens to be bound to.
+ */
+export interface PeerEdge {
+  at: string
+  dir: 'in' | 'out'
+  selfSession: string
+  peer: string
+  peerSession: string
+  conversation: string
+}
+
 /** Conversation ids stay path-safe, mirroring Halo's chatId rule. */
 // The Halo specification builds `app-chat:dev-assistant:http:direct:{slug}`,
 // so a colon must be legal here. `store.conversationPath` percent-encodes the
@@ -117,6 +134,12 @@ export class HumanChat {
   // Sessions this instance opened, so a first delivery can name them without
   // guessing from the transcript whether they already had a title.
   #fresh = new Set()
+  // Every peer message seen, per human: appended to edges.jsonl and read back by
+  // prime, so a restart keeps the routing.
+  #edges = new Map<string, PeerEdge[]>()
+  // One write at a time per human. The index is rewritten whole, so two concurrent
+  // writers would drop each other's line.
+  #writes = new Map<string, Promise<unknown>>()
   // `sessionController.prompt(request, signal)` requires an AbortSignal. One
   // controller lives as long as the chat service and is never aborted, so every
   // prompt it carries stays cancellable through `stop`.
@@ -173,16 +196,101 @@ export class HumanChat {
     return index
   }
 
+  /** Run one write after the previous write for the same human finished. */
+  #serial(humanId, task) {
+    const previous = this.#writes.get(humanId) ?? Promise.resolve()
+    const next = previous.then(task, task)
+    this.#writes.set(humanId, next.catch(() => {}))
+    return next
+  }
+
   async #remember(humanId, conversationId, sessionId) {
     const index = await this.#index(humanId)
     index[conversationId] = sessionId
     this.#bySession.set(sessionId, { humanId, conversationId })
-    await this.#store.ensureDir(this.#store.dir(humanId))
-    const path = this.#store.sessionIndexPath(humanId)
-    const temp = `${path}.${process.pid}.tmp`
-    await writeFile(temp, `${JSON.stringify(index, null, 2)}\n`, 'utf8')
-    await rename(temp, path)
+    await this.#serial(humanId, async () => {
+      await this.#store.ensureDir(this.#store.dir(humanId))
+      const path = this.#store.sessionIndexPath(humanId)
+      const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
+      await writeFile(temp, `${JSON.stringify(index, null, 2)}\n`, 'utf8')
+      await rename(temp, path)
+    })
     return sessionId
+  }
+
+  /** The edge list for one human, in arrival order. */
+  #edgesOf(humanId) {
+    let list = this.#edges.get(humanId)
+    if (list === undefined) {
+      list = []
+      this.#edges.set(humanId, list)
+    }
+    return list
+  }
+
+  /**
+   * Append one edge and keep it in memory.
+   *
+   * A failed write is contained: the delivery still happens, and the edge is still
+   * known to this process — losing the line costs routing after a restart, not the
+   * message that is already on its way.
+   */
+  async noteEdge(humanId: string, edge: Omit<PeerEdge, 'at'>) {
+    if (!edge.selfSession || !edge.peer || !edge.peerSession) return
+    const entry: PeerEdge = { at: new Date().toISOString(), ...edge }
+    this.#edgesOf(humanId).push(entry)
+    try {
+      await this.#serial(humanId, async () => {
+        await this.#store.ensureDir(this.#store.dir(humanId))
+        await appendFile(this.#store.edgePath(humanId), `${JSON.stringify(entry)}\n`, 'utf8')
+      })
+    } catch (error) {
+      this.#log(`edge for ${humanId} was not written: ${error.message}`)
+    }
+  }
+
+  /**
+   * The Session a message to one peer should reach, resolved from traffic.
+   *
+   * Order matters:
+   * 1. the newest message the peer sent into this Session — a reply belongs to the
+   *    Session that asked;
+   * 2. the newest message this Session sent to the peer on the same thread — a
+   *    continuation stays in the thread it opened;
+   * 3. the newest edge with that peer on that thread, from any of this human's
+   *    Sessions — a call from another window still finds the thread's home;
+   * 4. the legacy name index, for a thread that only ever existed before edges.
+   *
+   * @returns the target and how it was found, or null when nothing is known.
+   */
+  async threadTarget(humanId, { selfSession, peer, conversationId }: {
+    selfSession?: string
+    peer: string
+    conversationId?: string
+  }) {
+    const list = this.#edgesOf(humanId)
+    const newest = (a: PeerEdge, b: PeerEdge) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)
+    const pick = (predicate: (edge: PeerEdge) => boolean) => list.filter(predicate).sort(newest)[0]
+    const sameThread = (edge: PeerEdge) => conversationId === undefined || edge.conversation === conversationId
+    const inbound = selfSession
+      ? pick((edge) => edge.dir === 'in' && edge.selfSession === selfSession && edge.peer === peer && sameThread(edge))
+      : undefined
+    if (inbound) return { sessionId: inbound.peerSession, conversationId: inbound.conversation, via: 'inbound' as const }
+    const outbound = selfSession
+      ? pick((edge) => edge.dir === 'out' && edge.selfSession === selfSession && edge.peer === peer && sameThread(edge))
+      : undefined
+    if (outbound) return { sessionId: outbound.peerSession, conversationId: outbound.conversation, via: 'outbound' as const }
+    // Only a named thread may be found from another Session: without a name, the
+    // newest exchange could belong to a different subject entirely.
+    const thread = conversationId !== undefined
+      ? pick((edge) => edge.peer === peer && edge.conversation === conversationId)
+      : undefined
+    if (thread) return { sessionId: thread.peerSession, conversationId: thread.conversation, via: 'thread' as const }
+    if (conversationId !== undefined) {
+      const legacy = await this.lookup(humanId, conversationId)
+      if (typeof legacy === 'string') return { sessionId: legacy, conversationId, via: 'legacy' as const }
+    }
+    return null
   }
 
   /** Resolve the recorded Session for one conversation, without creating one. */
@@ -264,6 +372,33 @@ export class HumanChat {
         }
       }
     }
+    // Edges are what a restart would otherwise lose: the name index says what a
+    // thread is called, the edges say which Sessions actually talked on it.
+    for (const human of humans) await this.#loadEdges(human)
+  }
+
+  /** Read one human's edge log back into memory. */
+  async #loadEdges(human: Human) {
+    const path = this.#store.edgePath(human.id)
+    if (!existsSync(path)) return
+    try {
+      const lines = (await readFile(path, 'utf8')).split('\n').filter(Boolean)
+      const list: PeerEdge[] = []
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line)
+          if (entry && typeof entry.selfSession === 'string'
+            && typeof entry.peer === 'string' && typeof entry.peerSession === 'string') {
+            list.push(entry)
+          }
+        } catch {
+          this.#log(`skipped malformed edge line in ${path}`)
+        }
+      }
+      this.#edges.set(human.id, list)
+    } catch (error) {
+      this.#log(`edges unreadable for ${human.id}: ${error.message}`)
+    }
   }
 
   /**
@@ -327,9 +462,11 @@ export class HumanChat {
    * Session that asked for the work. A Session id is adopted as given; a name goes
    * through the index, and either way a Session that cannot be reused is replaced.
    *
-   * A sender may name the thread too. That name is recorded against the Session, so
-   * the next delivery by conversation finds it instead of opening a second one — and
-   * so the reply header carries a thread name rather than an id.
+   * A sender may name the thread too, but naming it does not move it: the name is
+   * a label, and a Session that merely received a message is not its owner. The
+   * delivery still goes to the addressed Session, and the thread's name keeps
+   * pointing where it pointed — otherwise a chat window a message happened to land
+   * in would take the thread over.
    *
    * @returns the Session id and the conversation name it belongs to, if any.
    */
@@ -348,11 +485,10 @@ export class HumanChat {
         resolved = await this.#create(human, presetId, text)
       }
       const conversation = named ?? (await this.#conversationOf(human.id, resolved)) ?? resolved
-      // Remembered either way: without the reverse entry this Session's own replies
-      // would not reach a mailbox, and it would be invisible to a caller asking which
-      // Sessions this digital human answers in.
-      if (named !== undefined) await this.#remember(human.id, named, resolved)
-      else this.#bySession.set(resolved, { humanId: human.id, conversationId: conversation })
+      // The reverse entry is needed even though nothing was filed: without it this
+      // Session's own replies would not reach a mailbox, and it would be invisible to
+      // a caller asking which Sessions this digital human answers in.
+      this.#bySession.set(resolved, { humanId: human.id, conversationId: conversation })
       return { sessionId: resolved, conversation }
     }
     const conversation = requireConversation(text)
@@ -498,7 +634,24 @@ export class HumanChat {
     if (this.#fresh.delete(target.sessionId) && !human.im?.botId) {
       await this.#name(target.sessionId, target.conversation, text)
     }
-    await this.#append(human.id, target.sessionId, target.conversation, record('inbound', { from, text }))
+    await this.#append(human.id, target.sessionId, target.conversation, record('inbound', {
+      from,
+      text,
+      // The two facts a reply needs, kept with the message they belong to.
+      session: fromSession,
+      conversation: target.conversation,
+    }))
+    // Written before the turn starts: an answer must never outrun the record of who
+    // asked. The edge names both Sessions, which the thread's name cannot.
+    if (fromSession) {
+      await this.noteEdge(human.id, {
+        dir: 'in',
+        selfSession: target.sessionId,
+        peer: from,
+        peerSession: fromSession,
+        conversation: target.conversation,
+      })
+    }
     const accepted = await this.#ctx.sessionController.prompt({
       requestId: randomUUID(),
       sessionId: target.sessionId,

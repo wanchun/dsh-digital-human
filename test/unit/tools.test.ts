@@ -17,7 +17,7 @@ afterEach(() => {
 
 /** The two records the tool surface talks about. */
 const people: Record<string, any> = {
-  pm: { id: 'pm', name: '研发PM助手', enabled: true, im: { botId: 'wecom_1', targetId: 'leader' } },
+  pm: { id: 'pm', name: '研发PM助手', enabled: true, peers: ['dev'], im: { botId: 'wecom_1', targetId: 'leader' } },
   dev: { id: 'dev', name: '开发助手', enabled: true, im: { botId: '', targetId: '' } },
   off: { id: 'off', name: '停用', enabled: false, im: { botId: '', targetId: '' } },
 }
@@ -44,7 +44,11 @@ function serviceStub(overrides: Record<string, unknown> = {}) {
     list: async () => { record('list'); return Object.values(people) },
     send: async (id: string, options: any) => {
       record('send', id, options)
-      return { sessionId: 'session-1', conversationId: options.conversationId ?? 'main', accepted: true }
+      return {
+        sessionId: options.sessionId ?? 'session-1',
+        conversationId: options.conversationId ?? 'main',
+        accepted: true,
+      }
     },
     status: async (id: string, conversationId: string) => {
       record('status', id, conversationId)
@@ -61,6 +65,13 @@ function serviceStub(overrides: Record<string, unknown> = {}) {
       record('stop', id, conversationId)
       return { stopped: true }
     },
+    // The transport's edge lookup. Undefined by default: no thread has been used, so
+    // a call that gives no address still has to open one.
+    threadTarget: async (id: string, options: any) => {
+      record('threadTarget', id, options)
+      return undefined
+    },
+    noteEdge: async (id: string, edge: any) => { record('noteEdge', id, edge) },
     chat: {
       conversations: async (id: string) => { record('conversations', id); return ['main', 'REQ-1'] },
       addresses: async (id: string) => {
@@ -178,6 +189,118 @@ describe('the chat tools', () => {
     const detail = (await toolOf(build(service), 'digital_human_send')
       .execute({ to: 'dev', message: 'x', conversation_id: 'main' })).detail
     expect(detail).toContain('session-1')
+  })
+
+  it('replies into the Session that asked when no address is given', async () => {
+    // The transport knows which Session asked on this thread; the model only says who.
+    const service = serviceStub({
+      threadTarget: async () => ({ sessionId: 'session-pm-work', conversationId: 'REQ-1', via: 'inbound' }),
+    })
+    const send = toolOf(build(service), 'digital_human_send')
+    const result = await send.execute(
+      { to: 'dev', message: 'x' },
+      { agent: { session: { header: { id: 'session-me-1' } } } },
+    )
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
+      .toMatchObject({ sessionId: 'session-pm-work', conversationId: 'REQ-1' })
+    expect(result).toMatchObject({ sessionId: 'session-pm-work', conversationId: 'REQ-1' })
+    expect(service.calls.find((entry) => entry.method === 'noteEdge')!.args[1])
+      .toMatchObject({ dir: 'out', selfSession: 'session-me-1', peer: 'dev', peerSession: 'session-pm-work' })
+  })
+
+  it('lets an explicit Session address win over the edge', async () => {
+    const service = serviceStub({
+      threadTarget: async () => { throw new Error('must not be asked when an address is given') },
+    })
+    await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'x', session_id: 'session-them-2' })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBe('session-them-2')
+  })
+
+  it('refuses to reach a digital human outside the declared peers', async () => {
+    const send = toolOf(build(serviceStub()), 'digital_human_send')
+    await expect(send.execute({ to: 'off', message: 'x', conversation_id: 'main' }))
+      .rejects.toThrow(/may only message/)
+  })
+
+  it('lets a record with no peers declared reach anyone', async () => {
+    const service = serviceStub()
+    await toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
+      .execute({ to: 'pm', message: 'x', conversation_id: 'main' })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[0]).toBe('pm')
+  })
+
+  it('resolves status, messages and stop through the edge too', async () => {
+    const service = serviceStub({
+      threadTarget: async () => ({ sessionId: 'session-pm-work', conversationId: 'REQ-1', via: 'inbound' }),
+    })
+    const tools = build(service)
+    const exec = { agent: { session: { header: { id: 'session-me-1' } } } }
+    await toolOf(tools, 'digital_human_status').execute({ to: 'dev', conversation_id: 'REQ-1' }, exec)
+    await toolOf(tools, 'digital_human_messages').execute({ to: 'dev', conversation_id: 'REQ-1' }, exec)
+    await toolOf(tools, 'digital_human_stop').execute({ to: 'dev', conversation_id: 'REQ-1' }, exec)
+    const argsOf = (method: string) => service.calls.find((entry) => entry.method === method)!.args
+    expect(argsOf('status')[1]).toBe('session-pm-work')
+    expect(argsOf('messages')[1]).toBe('session-pm-work')
+    expect(argsOf('stop')[1]).toBe('session-pm-work')
+  })
+
+  it('keeps the named thread when the edge carries none', async () => {
+    const service = serviceStub({
+      threadTarget: async () => ({ sessionId: 'session-pm-work', via: 'inbound' }),
+    })
+    await toolOf(build(service), 'digital_human_send')
+      .execute(
+        { to: 'dev', message: 'x', conversation_id: 'REQ-1' },
+        { agent: { session: { header: { id: 'session-me-1' } } } },
+      )
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
+      .toMatchObject({ sessionId: 'session-pm-work', conversationId: 'REQ-1' })
+  })
+
+  it('still addresses by conversation when the transport cannot resolve edges', async () => {
+    const service = serviceStub({ threadTarget: undefined })
+    await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'x', conversation_id: 'main' })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
+      .toMatchObject({ conversationId: 'main', sessionId: undefined })
+  })
+
+  it('polls by conversation when the delivery reports no Session', async () => {
+    const service = serviceStub({
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return { sessionId: undefined, conversationId: options.conversationId ?? 'main', accepted: true }
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1 })
+    expect(result.finished).toBe(true)
+    expect(service.calls.find((entry) => entry.method === 'status')!.args[1]).toBe('main')
+  })
+
+  it('reports an idle peer and a turn that was not stopped', async () => {
+    const service = serviceStub({
+      status: async () => ({ exists: false, isGenerating: false, conversationId: 'REQ-1' }),
+      stop: async () => ({ stopped: false }),
+    })
+    const tools = build(service)
+    const idle = await toolOf(tools, 'digital_human_status').execute({ to: 'dev', conversation_id: 'REQ-1' })
+    expect(idle.exists).toBe(false)
+    const stopped = await toolOf(tools, 'digital_human_stop').execute({ to: 'dev', conversation_id: 'REQ-1' })
+    expect(stopped.stopped).toBe(false)
+  })
+
+  it('reads a conversation whose last line is outbound', async () => {
+    const service = serviceStub({
+      messages: async () => ({
+        conversationId: 'REQ-1',
+        items: [{ at: '2026-01-01T00:00:00Z', kind: 'outbound', text: 'sent' }],
+      }),
+    })
+    const read = await toolOf(build(service), 'digital_human_messages')
+      .execute({ to: 'dev', conversation_id: 'REQ-1' })
+    expect(read.detail).toContain('开发助手 → pm')
   })
 
   it('refuses a send that names no address at all', async () => {

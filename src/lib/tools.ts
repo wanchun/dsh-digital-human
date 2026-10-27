@@ -32,7 +32,41 @@ async function resolvePeer(service, self, reference) {
   const peer = await service.resolve(wanted)
   if (!peer) throw new Error(`unknown digital human: ${JSON.stringify(reference)}`)
   if (peer.id === self.id) throw new Error('a digital human cannot send to itself')
+  // A declared peer list is enforced when it exists. An empty one means the record
+  // never restricted its correspondents, so it keeps the old open behaviour.
+  const peers = Array.isArray(self.peers) ? self.peers : []
+  if (peers.length > 0 && !peers.includes(peer.id)) {
+    throw new Error(`${self.id} may only message ${peers.join(', ')}; ${peer.id} is not a peer`)
+  }
   return peer
+}
+
+/**
+ * The address a call about one peer should use.
+ *
+ * An explicit Session id wins. Otherwise the transport's edges decide: the Session
+ * that last asked, then the one this Session last wrote to, then the thread's home.
+ * A thread nobody has used resolves to nothing, which is what opens it.
+ *
+ * @returns the address to pass on, with the thread name it belongs to.
+ */
+async function addressOf(service, humanId, peer, { conversationId, sessionId, exec }: {
+  conversationId?: string
+  sessionId?: string
+  exec?: unknown
+}) {
+  if (sessionId) return { sessionId, conversationId }
+  const selfSession = callerSession(exec)
+  // Without the caller's own Session there is nothing to scope an edge to, so the
+  // named thread is the only address the call has.
+  if (!selfSession) return { sessionId: undefined, conversationId }
+  const target = await service.threadTarget?.(humanId, {
+    selfSession,
+    peer: peer.id,
+    conversationId,
+  })
+  if (!target) return { sessionId: undefined, conversationId }
+  return { sessionId: target.sessionId, conversationId: target.conversationId ?? conversationId }
 }
 
 /**
@@ -160,7 +194,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     description:
       'Send a message to another digital human and start a turn in its conversation. '
       + 'Delivery is asynchronous, like handing over a task. Set wait_seconds to wait for its reply, '
-      + 'then read it with digital_human_messages, or poll with digital_human_status.',
+      + 'then read it with digital_human_messages, or poll with digital_human_status. '
+      + 'Omit the address to reply in the thread this Session already shares with the peer — the '
+      + 'transport sends it back to the Session that asked. Pass session_id to choose a Session, '
+      + 'or conversation_id to open a new thread.',
     parameters: {
       to: { type: 'string', required: true, description: 'Target digital human id or display name.' },
       message: { type: 'string', required: true, description: 'Message body. State the task, the acceptance criteria, and how to report back.' },
@@ -169,7 +206,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       conversation_id: {
         type: 'string',
         description: 'Conversation id that isolates one thread, for example a requirement or version name. '
-          + 'Required unless session_id is given.',
+          + 'Opens the thread when it is new; omit it to reply in the thread this Session is already in.',
       },
       // The other form of the same address, for answering the Session that asked.
       session_id: { type: 'string', description: 'The target Session id to deliver into, as reported by a <dsh_peer_source> block. Use this to answer the Session that asked for the work. One of session_id and conversation_id is required.' },
@@ -194,13 +231,21 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       render: (_args, value) => renderText(value),
     },
     async execute(args, exec) {
-      const peer = await resolvePeer(service, await self(), args.to)
-      const conversationId = args.conversation_id
-      const sessionId = typeof args.session_id === 'string' ? args.session_id : undefined
-      // Omitting both would pour every subject into one shared `main` thread, which is
-      // silent and permanent. An explicit `conversation_id: "main"` still works; a
-      // missing address does not.
-      if (typeof conversationId !== 'string' && !sessionId) {
+      const me = await self()
+      const peer = await resolvePeer(service, me, args.to)
+      // Its own Session travels with the message, so the reply can come back to the
+      // Session that asked for the work rather than to a shared thread name.
+      const fromSession = callerSession(exec)
+      // No address means "the thread this Session is already in": the edges say which
+      // Session of the peer last asked here, and a reply goes back to it.
+      const address = await addressOf(service, humanId, peer, {
+        conversationId: typeof args.conversation_id === 'string' ? args.conversation_id : undefined,
+        sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
+        exec,
+      })
+      // Nothing to address and nothing to reply to: say what is missing rather than
+      // pour the subject into the one shared `main` thread.
+      if (address.conversationId === undefined && address.sessionId === undefined) {
         throw new Error(
           'conversation_id or session_id is required. A digital human is reached in a named '
           + 'conversation, and sending without one would put every requirement into the same '
@@ -209,20 +254,29 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         )
       }
       const delivered = await service.send(peer.id, {
-        conversationId,
-        sessionId,
+        conversationId: address.conversationId,
+        sessionId: address.sessionId,
         message: args.message,
         from: humanId,
-        // Its own Session travels with the message, so the reply can come back to the
-        // Session that asked for the work rather than to a shared thread name.
-        fromSession: callerSession(exec),
+        fromSession,
       })
+      // An outbound edge lets this Session find the thread again. The peer's name index
+      // is not touched: neither side has to rewrite a label to keep routing true.
+      if (fromSession && delivered.sessionId) {
+        await service.noteEdge?.(humanId, {
+          dir: 'out',
+          selfSession: fromSession,
+          peer: peer.id,
+          peerSession: delivered.sessionId,
+          conversation: delivered.conversationId,
+        })
+      }
       const wait = Math.min(Math.max(Number(args.wait_seconds) || 0, 0), WAIT_MAX_SECONDS)
       let finished = false
       if (wait > 0) {
         const deadline = Date.now() + wait * 1000
         for (;;) {
-          const state = await service.status(peer.id, conversationId)
+          const state = await service.status(peer.id, delivered.sessionId ?? address.conversationId)
           if (!state.isGenerating) {
             finished = true
             break
@@ -266,9 +320,13 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       },
       render: (_args, value) => renderText(value),
     },
-    async execute(args) {
+    async execute(args, exec) {
       const peer = await resolvePeer(service, await self(), args.to)
-      const state = await service.status(peer.id, args.conversation_id)
+      const address = await addressOf(service, humanId, peer, {
+        conversationId: args.conversation_id,
+        exec,
+      })
+      const state = await service.status(peer.id, address.sessionId ?? address.conversationId)
       return {
         detail: state.exists
           ? `${peer.name} (${peer.id}) ${state.isGenerating ? 'is still working' : 'is idle'} on conversation "${state.conversationId}".`
@@ -301,10 +359,14 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       },
       render: (_args, value) => renderText(value),
     },
-    async execute(args) {
+    async execute(args, exec) {
       const peer = await resolvePeer(service, await self(), args.to)
-      const conversationId = requireConversation(args.conversation_id)
-      const result = await service.stop(peer.id, conversationId)
+      const address = await addressOf(service, humanId, peer, {
+        conversationId: args.conversation_id,
+        exec,
+      })
+      const conversationId = requireConversation(address.conversationId)
+      const result = await service.stop(peer.id, address.sessionId ?? conversationId)
       return {
         detail: result.stopped
           ? `Stopped the current turn of ${peer.name} (${peer.id}) on conversation "${conversationId}".`
@@ -336,10 +398,14 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       },
       render: (_args, value) => renderText(value),
     },
-    async execute(args) {
+    async execute(args, exec) {
       const peer = await resolvePeer(service, await self(), args.to)
+      const address = await addressOf(service, humanId, peer, {
+        conversationId: args.conversation_id,
+        exec,
+      })
       const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 200)
-      const read = await service.messages(peer.id, args.conversation_id, limit)
+      const read = await service.messages(peer.id, address.sessionId ?? address.conversationId, limit)
       if (read.items.length === 0) {
         return { detail: `No messages in "${read.conversationId}" with ${peer.name} (${peer.id}).`, to: peer.id, conversationId: read.conversationId }
       }

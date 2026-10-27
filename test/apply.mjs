@@ -249,7 +249,7 @@ check('send refuses an unknown peer', await scope.tools.get('digital_human_send'
 const listed = await scope.tools.get('digital_human_list').execute({})
 check('list names the caller as you', listed.detail.includes('you'))
 const mail = await scope.tools.get('digital_human_messages').execute({ to: 'pm-assistant', limit: 5 })
-check('messages reads the peer mailbox', mail.detail.includes('status please'))
+check('messages reads the peer mailbox', mail.detail.includes('status please'), mail.detail)
 
 console.log('8) IM binding')
 check('notify_bot refuses without a bound bot', await scope.tools.get('notify_bot').execute({ message: 'x' }).then(() => false, () => true))

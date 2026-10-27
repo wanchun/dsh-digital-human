@@ -427,6 +427,28 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         presetId: presetIdOf(human.id),
       })
     },
+    /**
+     * The Session a message to one peer should reach, resolved from the edges the
+     * transport has seen — a reply follows the Session that asked, not the thread's
+     * name. `null` when nothing is known yet, which is what opens a new thread.
+     */
+    async threadTarget(humanId: string, options: {
+      selfSession?: string
+      peer: string
+      conversationId?: string
+    }) {
+      return chat.threadTarget(humanId, options)
+    },
+    /** Record one outbound edge, so the thread can be found from this side too. */
+    async noteEdge(humanId: string, edge: {
+      dir: 'in' | 'out'
+      selfSession: string
+      peer: string
+      peerSession: string
+      conversation: string
+    }) {
+      return chat.noteEdge(humanId, edge)
+    },
     /** Report whether a digital human is working on a conversation, like `/chat/status`. */
     async status(idOrName, conversationId) {
       return chat.status(await service.require(idOrName), conversationId)
