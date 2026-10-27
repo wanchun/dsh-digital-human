@@ -119,6 +119,14 @@ export interface Human {
    * full access. Name a built-in preset to differ per digital human.
    */
   permissionPreset?: string
+  /**
+   * How peer conversations map to Sessions.
+   *
+   * `thread` (default) keeps one Session per conversation id and steers a busy turn.
+   * `single` keeps one standing Session for the record and queues each task behind
+   * the turn already running.
+   */
+  sessionMode?: 'thread' | 'single'
 }
 
 /**

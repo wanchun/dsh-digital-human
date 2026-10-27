@@ -653,8 +653,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
 
   const tools: any[] = [send, status, stop, messages, conversations, roster]
   // A digital human with no bot speaks to its peers only: the chat tools land in a
-  // Session, while these two can only reach an IM contact.
-  if (im) tools.push(notify, targets, setTitle)
+  // Session, while these two can only reach an IM contact. The title tool is not one
+  // of them: naming a Session has nothing to do with an IM bot.
+  if (im) tools.push(notify, targets)
+  tools.push(setTitle)
   if (memory) tools.push(memoryStatus, memoryCompact)
   return tools.map(normalizeTool)
 }
@@ -689,6 +691,12 @@ export function buildRegistryTool({ service }) {
       target_id: { type: 'string', description: 'Default IM target id for notify_bot.' },
       enabled: { type: 'boolean', description: 'Whether the digital human may run. Defaults to true.' },
       memory: { type: 'boolean', description: 'Whether to give it a durable memory file. Defaults to true.' },
+      session_mode: {
+        type: 'string',
+        enum: ['thread', 'single'],
+        description: 'How peer conversations map to Sessions. "thread" (default) keeps one Session per '
+          + 'conversation id and steers a busy turn; "single" keeps one standing Session whose tasks queue.',
+      },
     },
     output: TEXT_OUTPUT,
     async execute(args) {
@@ -730,6 +738,7 @@ export function buildRegistryTool({ service }) {
       }
       if (args.enabled !== undefined) patch.enabled = args.enabled
       if (args.memory !== undefined) patch.memory = args.memory
+      if (args.session_mode !== undefined) patch.sessionMode = args.session_mode === 'single' ? 'single' : 'thread'
       const saved = await service.upsert(patch, { partial: action === 'update' })
       return {
         detail: `${action === 'create' ? 'Created' : 'Updated'} digital human ${saved.id} (${saved.name}); preset ${saved.presetId}.`,

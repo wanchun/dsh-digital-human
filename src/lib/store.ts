@@ -153,7 +153,7 @@ function configSchemaList(value) {
  * Validate and default one digital-human record. Unknown fields are dropped, so
  * a hand-edited file cannot smuggle state the runtime does not understand.
  */
-export function normalizeHuman(input, now = new Date().toISOString()) {
+export function normalizeHuman(input, now = new Date().toISOString()): Human {
   if (!input || typeof input !== 'object') throw new Error('digital human must be an object')
   const id = requireSlug(input.id, 'digital human id')
   const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim() : id
@@ -180,6 +180,7 @@ export function normalizeHuman(input, now = new Date().toISOString()) {
         : DEFAULT_PERMISSION_PRESET,
     ...(configMap(input.config) === undefined ? {} : { config: configMap(input.config) }),
     ...(configSchemaList(input.configSchema).length === 0 ? {} : { configSchema: configSchemaList(input.configSchema) }),
+    sessionMode: input.sessionMode === 'single' ? 'single' : 'thread',
     createdAt: typeof input.createdAt === 'string' ? input.createdAt : now,
     updatedAt: now,
   }
@@ -188,7 +189,7 @@ export function normalizeHuman(input, now = new Date().toISOString()) {
 /** Fields the config file owns. Identity and prose live in the persona file. */
 const CONFIG_FIELDS = [
   'enabled', 'workspace', 'skills', 'peers', 'im', 'permissionPreset', 'memory',
-  'subscriptions', 'config', 'configSchema', 'createdAt', 'updatedAt',
+  'subscriptions', 'config', 'configSchema', 'sessionMode', 'createdAt', 'updatedAt',
 ]
 
 /** Collapse a value that must stay on one frontmatter line. */
@@ -367,6 +368,7 @@ export class HumanStore {
         ...(human.im.owner ? { owner: human.im.owner } : {}),
       },
       permissionPreset: human.permissionPreset,
+      sessionMode: human.sessionMode ?? 'thread',
       memory: human.memory,
       subscriptions: human.subscriptions,
       ...(human.config ? { config: human.config } : {}),

@@ -430,6 +430,52 @@ describe('naming a conversation', () => {
   })
 })
 
+describe('session modes', () => {
+  it('keeps one standing Session and queues each task in single mode', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const qa = human({ id: 'qa', name: 'QA', systemPrompt: 'x', sessionMode: 'single' })
+    const first = await chat.deliver(qa, {
+      conversationId: 'task-a', message: 'one', from: 'pm', fromSession: 'session-pm',
+    })
+    const second = await chat.deliver(qa, {
+      conversationId: 'task-b', message: 'two', from: 'pm', fromSession: 'session-pm',
+    })
+    expect(first.sessionId).toBe(second.sessionId)
+    expect(controller.sessions).toHaveLength(1)
+    expect(controller.prompted.map((request: any) => request.mode)).toEqual(['queue', 'queue'])
+    // The thread name still rides the message, even though it does not pick a Session.
+    expect(first.conversationId).toBe('task-a')
+    expect(second.conversationId).toBe('task-b')
+    expect(controller.renamed).toEqual([{ sessionId: first.sessionId, title: 'QA' }])
+  })
+
+  it('accepts an explicit Session and an unnamed task in single mode', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const qa = human({ id: 'qa', name: 'QA', systemPrompt: 'x', sessionMode: 'single' })
+    const named = await chat.deliver(qa, {
+      sessionId: 'session-standing', conversationId: 'task-c', message: 'x', fromSession: 'session-pm',
+    })
+    expect(named.sessionId).toBe('session-standing')
+    expect(named.conversationId).toBe('task-c')
+    const unnamed = await chat.deliver(qa, { message: 'y' })
+    expect(unnamed.conversationId).toBe('main')
+    expect(controller.prompted.every((request: any) => request.mode === 'queue')).toBe(true)
+  })
+
+  it('keeps one Session per thread and steers in thread mode', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const dev = human({ id: 'dev', name: 'Dev', systemPrompt: 'x', sessionMode: 'thread' })
+    const first = await chat.deliver(dev, { conversationId: 'req-a', message: 'a' })
+    const second = await chat.deliver(dev, { conversationId: 'req-b', message: 'b' })
+    expect(first.sessionId).not.toBe(second.sessionId)
+    expect(controller.sessions).toHaveLength(2)
+    expect(controller.prompted.map((request: any) => request.mode)).toEqual(['steer', 'steer'])
+  })
+})
+
 describe('delivery while the target is busy', () => {
   it('steers, so a busy peer reads the message at its next step', async () => {
     // Not queued behind the running turn: a peer's message is news the recipient

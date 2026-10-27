@@ -111,7 +111,8 @@ describe('the chat tools', () => {
       .map((tool) => tool.name)
     expect(names).not.toContain('notify_bot')
     expect(names).not.toContain('list_bot_targets')
-    expect(names).not.toContain('set_session_title')
+    // Naming a Session does not need a bot, so this tool stays.
+    expect(names).toContain('set_session_title')
     expect(names).toContain('digital_human_send')
   })
 
@@ -615,12 +616,20 @@ describe('the registry tool', () => {
     const service = serviceStub({ upsert: async (patch: any) => { seen.push(patch); return patch } })
     await build(service).execute({
       action: 'update', id: 'x', name: 'N', description: 'D', system_prompt: 'S', workspace: '/w',
-      bot_id: 'wecom_1', target_id: 't', enabled: false, memory: false,
+      bot_id: 'wecom_1', target_id: 't', enabled: false, memory: false, session_mode: 'single',
     })
     expect(seen[0]).toMatchObject({
       name: 'N', description: 'D', systemPrompt: 'S', workspace: '/w',
-      im: { botId: 'wecom_1', targetId: 't' }, enabled: false, memory: false,
+      im: { botId: 'wecom_1', targetId: 't' }, enabled: false, memory: false, sessionMode: 'single',
     })
+  })
+
+  it('only treats an explicit single as the shared mode', async () => {
+    const seen: any[] = []
+    const service = serviceStub({ upsert: async (patch: any) => { seen.push(patch); return patch } })
+    await build(service).execute({ action: 'create', id: 'x', session_mode: 'thread' })
+    await build(service).execute({ action: 'create', id: 'y', session_mode: 'typo' })
+    expect(seen.map((entry) => entry.sessionMode)).toEqual(['thread', 'thread'])
   })
 
   it('keeps the IM pair out when neither half was given', async () => {

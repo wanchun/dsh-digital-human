@@ -627,19 +627,29 @@ export class HumanChat {
     const text = String(message ?? '').trim()
     if (!text) throw new Error('message must not be empty')
     if (text.length > MESSAGE_MAX_CHARS) throw new Error(`message exceeds ${MESSAGE_MAX_CHARS} characters`)
-    const target = await this.#resolve(human, { conversationId, sessionId }, presetId)
+    const single = human.sessionMode === 'single'
+    // A shared-session record ignores the thread name when choosing its Session; the
+    // name still rides the message, so both sides keep the subject's label.
+    const label = single ? (String(conversationId ?? '').trim() || DEFAULT_CONVERSATION) : conversationId
+    const target = await this.#resolve(human, {
+      conversationId: single && sessionId === undefined ? DEFAULT_CONVERSATION : conversationId,
+      sessionId,
+    }, presetId)
+    const conversation = single ? label : target.conversation
     // Name a conversation the moment it opens: only a peer-only record (no bot of
     // its own) is named from the message, because a front-of-house record names its
-    // own session from the IM source and would lose that here.
-    if (this.#fresh.delete(target.sessionId) && !human.im?.botId) {
-      await this.#name(target.sessionId, target.conversation, text)
+    // own session from the IM source and would lose that here. A shared-session
+    // record is named after itself: its one Session is the record, not a subject.
+    if (this.#fresh.delete(target.sessionId)) {
+      if (single) await this.#setTitle(target.sessionId, human.name)
+      else if (!human.im?.botId) await this.#name(target.sessionId, conversation, text)
     }
-    await this.#append(human.id, target.sessionId, target.conversation, record('inbound', {
+    await this.#append(human.id, target.sessionId, conversation, record('inbound', {
       from,
       text,
       // The two facts a reply needs, kept with the message they belong to.
       session: fromSession,
-      conversation: target.conversation,
+      conversation,
     }))
     // Written before the turn starts: an answer must never outrun the record of who
     // asked. The edge names both Sessions, which the thread's name cannot.
@@ -649,7 +659,7 @@ export class HumanChat {
         selfSession: target.sessionId,
         peer: from,
         peerSession: fromSession,
-        conversation: target.conversation,
+        conversation,
       })
     }
     const accepted = await this.#ctx.sessionController.prompt({
@@ -657,16 +667,18 @@ export class HumanChat {
       sessionId: target.sessionId,
       // `steer` puts the message into the running turn, so a busy peer reads it at its
       // next step instead of after the current turn. A peer's message is news the
-      // recipient wants now, not a request to queue behind the work in progress.
-      mode: 'steer',
+      // recipient wants now, not a request to queue behind the work in progress. A
+      // shared-session record is different: its tasks are work items, so they queue
+      // behind the turn instead of interrupting it.
+      mode: single ? 'queue' : 'steer',
       // The mailbox keeps the message as written; the model also gets the two facts
       // only the transport knows: who sent it, and which Session to answer.
-      content: [{ type: 'text', text: `${peerSource(from, fromSession, target.conversation)}\n${text}` }],
+      content: [{ type: 'text', text: `${peerSource(from, fromSession, conversation)}\n${text}` }],
       clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     }, this.#abort.signal)
     return {
       sessionId: target.sessionId,
-      conversationId: target.conversation,
+      conversationId: conversation,
       accepted: accepted?.accepted === true,
     }
   }
@@ -678,14 +690,17 @@ export class HumanChat {
    * which is what a requirement thread wants — its subject does not change.
    */
   async #name(sessionId, conversation, text) {
-    const title = sessionTitleFor(text, conversation)
+    await this.#setTitle(sessionId, sessionTitleFor(text, conversation))
+  }
+
+  /** Rename one Session, containing a failure: a title is a convenience. */
+  async #setTitle(sessionId, title) {
     if (!title) return
     const rename = this.#ctx.sessionController?.rename
     if (typeof rename !== 'function') return
     try {
       await rename.call(this.#ctx.sessionController, { sessionId, title })
     } catch (error) {
-      // A title is a convenience; failing to set one must not fail the delivery.
       this.#log(`could not name session ${sessionId}: ${error.message}`)
     }
   }

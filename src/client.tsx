@@ -160,6 +160,7 @@ interface Draft {
   botId: string
   owner: string
   permissionPreset: string
+  sessionMode: 'thread' | 'single'
   enabled: boolean
   memory: boolean
   creating: boolean
@@ -419,6 +420,7 @@ const BLANK: Draft = {
   botId: '',
   owner: '',
   permissionPreset: DEFAULT_PERMISSION_PRESET,
+  sessionMode: 'thread',
   enabled: true,
   memory: true,
   creating: false,
@@ -440,6 +442,7 @@ function toDraft(human: Human): Draft {
     botId: human.im?.botId ?? '',
     owner: human.im?.owner ?? '',
     permissionPreset: human.permissionPreset ?? DEFAULT_PERMISSION_PRESET,
+    sessionMode: human.sessionMode === 'single' ? 'single' : 'thread',
     enabled: human.enabled !== false,
     memory: human.memory !== false,
     creating: false,
@@ -462,6 +465,7 @@ function toPatch(draft: Draft): HumanPatch {
     // defaults to.
     im: { botId: draft.botId.trim(), owner: draft.owner.trim() },
     permissionPreset: draft.permissionPreset,
+    sessionMode: draft.sessionMode,
     enabled: draft.enabled,
     memory: draft.memory,
   }
@@ -1126,6 +1130,18 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
                 + '。bot 可能缺工作区、预设或来源块，重启或重新保存会再试一次。'}
             </p>
           ) : null}
+
+          <MenuField
+            key={`session-mode-${draft?.id ?? 'new'}`}
+            label="会话模式"
+            value={draft?.sessionMode ?? 'thread'}
+            options={[
+              { id: 'thread', label: '按线程 —— 每个线程标识一条会话，消息插话进入' },
+              { id: 'single', label: '共享一条 —— 所有派活进同一条会话，任务排队' },
+            ]}
+            onChange={(value) => patch({ sessionMode: value === 'single' ? 'single' : 'thread' })}
+            hint="共享一条适合自测类助手：一条常驻会话，后到的任务等当前回合结束再处理。"
+          />
 
           <MenuField
             key={`permission-${draft?.id ?? 'new'}`}

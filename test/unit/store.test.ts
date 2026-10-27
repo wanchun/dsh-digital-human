@@ -44,7 +44,7 @@ describe('normalizeHuman', () => {
     const human = normalizeHuman({ id: 'a' })
     expect(human).toMatchObject({
       id: 'a', name: 'a', description: '', enabled: true, systemPrompt: '', workspace: '',
-      skills: [], peers: [], subscriptions: [], memory: true,
+      skills: [], peers: [], subscriptions: [], memory: true, sessionMode: 'thread',
     })
     expect(human.createdAt).toBeTypeOf('string')
   })
@@ -310,6 +310,12 @@ describe('HumanStore writes', () => {
     await rm(store.personaPath('a'))
     await mkdir(store.personaPath('a'), { recursive: true })
     await expect(store.remove('a')).rejects.toThrow()
+  })
+
+  it('persists the session mode in the config file', async () => {
+    await store.upsert(record({ id: 'qa', sessionMode: 'single' }))
+    expect((await store.get('qa'))?.sessionMode).toBe('single')
+    expect(JSON.parse(await readFile(store.configPath('qa'), 'utf8')).sessionMode).toBe('single')
   })
 
   it('keeps createdAt across an update', async () => {
