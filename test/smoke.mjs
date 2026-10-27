@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HumanStore, normalizeHuman } from '../build/host/lib/store.js'
+import { HumanStore, defaultHome, normalizeHuman } from '../build/host/lib/store.js'
 import { buildPresetDefinition, builtinConfig, effectiveConfig, neutralizePlaceholders, presetIdOf, renderConfigBlock, resolveConfig, resolveConfigValues } from '../build/host/lib/presets.js'
 import { SEED_HUMANS } from '../build/host/lib/seed.js'
 
@@ -327,7 +327,8 @@ console.log('11) no placeholder survives that the renderer would reject')
     neutralizePlaceholders(undefined) === '' && neutralizePlaceholders('') === '')
 
   // And the assembled prompt must be clean for every real record.
-  const humans = JSON.parse(readFileSync('/Users/harrywan/.dsh/digital-human/humans.json', 'utf8'))
+  const liveStore = new HumanStore(defaultHome())
+  const humans = existsSync(liveStore.file) ? await liveStore.list() : []
   const peerNames = Object.fromEntries(humans.map((entry) => [entry.id, entry.name]))
   for (const human of humans) {
     const config = buildPresetDefinition(normalizeHuman(human), {

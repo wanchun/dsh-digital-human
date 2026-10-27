@@ -294,15 +294,18 @@ describe('every tool renders its own result', () => {
   })
 
   it('reports an empty roster', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dh-empty-'))
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-empty' })
+    await applyPlatform(platform.ctx, { home })
     const detail = (await platform.tools.get('digital_human').execute({ action: 'list' })).detail
     expect(detail).toContain('No digital humans are configured')
+    rmSync(home, { recursive: true, force: true })
   })
 
   it('marks a record that carries a workspace and a target', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dh-roster-'))
     const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-roster' })
+    await applyPlatform(platform.ctx, { home })
     const service2 = platform.provided.get('digitalHumans')
     await service2.upsert({ id: 'a', name: 'A', workspace: '/w', im: { botId: 'wecom_1', targetId: 't' }, memory: false })
     const detail = (await platform.tools.get('digital_human').execute({ action: 'list' })).detail

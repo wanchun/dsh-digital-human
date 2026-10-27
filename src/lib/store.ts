@@ -443,6 +443,12 @@ export class HumanStore {
       }
     }
     records.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.id.localeCompare(b.id))
+    // A legacy file and no directories is the one state this code refuses to guess
+    // at: reading it would be the fallback the split removed, and starting empty
+    // would look like every digital human was deleted. Say what to run instead.
+    if (records.length === 0 && existsSync(this.legacyPath())) {
+      throw new Error('a legacy humans.json is present; run "node tools/migrate.mjs" before starting')
+    }
     if (records.length === 0 && !existsSync(this.#humans)) {
       for (const entry of seed) {
         const record = normalizeHuman(entry)

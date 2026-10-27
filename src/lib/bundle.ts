@@ -289,19 +289,20 @@ export function readBundle(archive: Buffer): BundlePreview {
     humans.push(composeRecord(id, config, persona))
   }
   // Older layout: one combined record per file.
-  for (const [path, content] of Object.entries(files)) {
-    if (humans.length > 0) break
-    if (!path.startsWith('humans/') || !path.endsWith('.json')) continue
-    let record: Human
-    try {
-      record = JSON.parse(content.toString('utf8'))
-    } catch (error) {
-      throw new Error(`the record in ${path} is unreadable: ${error.message}`)
+  if (humans.length === 0) {
+    for (const [path, content] of Object.entries(files)) {
+      if (!path.startsWith('humans/') || !path.endsWith('.json')) continue
+      let record: Human
+      try {
+        record = JSON.parse(content.toString('utf8'))
+      } catch (error) {
+        throw new Error(`the record in ${path} is unreadable: ${error.message}`)
+      }
+      if (!record || typeof record !== 'object' || typeof record.id !== 'string') {
+        throw new Error(`the bundle holds no usable digital human record at ${path}`)
+      }
+      humans.push(record)
     }
-    if (!record || typeof record !== 'object' || typeof record.id !== 'string') {
-      throw new Error(`the bundle holds no usable digital human record at ${path}`)
-    }
-    humans.push(record)
   }
   if (humans.length === 0) throw new Error('the bundle holds no digital human record')
   const bySkill = new Map<string, { files: number; bytes: number }>()

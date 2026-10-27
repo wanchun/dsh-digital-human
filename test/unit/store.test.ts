@@ -207,9 +207,9 @@ describe('HumanStore reads', () => {
     await expect(store.list()).rejects.toThrow(/must hold a JSON object/)
   })
 
-  it('does not read a legacy combined file', async () => {
+  it('refuses to run while a legacy combined file is unmigrated', async () => {
     await writeFile(join(home, 'humans.json'), JSON.stringify([record({ id: 'legacy' })]), 'utf8')
-    expect(await store.list()).toEqual([])
+    await expect(store.list()).rejects.toThrow(/migrate/)
   })
 
   it('refuses a record whose persona has no config file', async () => {
@@ -398,8 +398,8 @@ describe('legacy migration', () => {
   })
 
   it('refuses a target directory that already holds a record', async () => {
-    await writeLegacy([legacyRecord({ id: 'a' })])
     await store.upsert(record({ id: 'a' }))
+    await writeLegacy([legacyRecord({ id: 'a' })])
     await expect(store.migrateLegacy()).rejects.toThrow(/already has a record directory/)
     expect(existsSync(join(home, 'humans.json'))).toBe(true)
   })
