@@ -657,7 +657,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
     const value = await call('registry.list', {}, signal)
     if (signal?.aborted || !mounted.current) return
     setHumans(value.humans)
-    void refreshSessionIcons(rpc, true)
+    invalidateSessionIcons()
     setFile(value.file)
     setDraft((current) => {
       if (current?.creating === true) return current
@@ -1255,6 +1255,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
                   if (at === -1) return [...existing, saved]
                   return existing.map((entry, index) => (index === at ? saved : entry))
                 })
+                invalidateSessionIcons()
                 if (mounted.current) {
                   setDraft((existing) => (existing ? { ...existing, id: value.human.id, creating: false } : existing))
                 }
@@ -1281,6 +1282,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
                   // Dropping only the draft left the deleted row in the list until a reload.
                   if (mounted.current) {
                     setHumans((existing) => existing.filter((entry) => entry.id !== current.id))
+                    invalidateSessionIcons()
                     setDraft(null)
                   }
                   return `已删除 ${current.id}`
@@ -1298,48 +1300,58 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   )
 }
 
-/** Session id -> the icon of the digital human that owns it, shared by every row. */
-let sessionIcons: Record<string, string> = {}
-let sessionIconsAt = 0
-let sessionIconsFlight: Promise<void> | null = null
+/** One entry per Session: its digital human's icon, or null once resolved. */
+const sessionIconCache = new Map<string, string | null>()
+const sessionIconFlights = new Map<string, Promise<void>>()
 const sessionIconListeners = new Set<() => void>()
+let sessionIconEpoch = 0
 
-function publishSessionIcons(next: Record<string, string>) {
-  sessionIcons = next
-  sessionIconsAt = Date.now()
+function notifySessionIcons() {
   for (const listener of [...sessionIconListeners]) listener()
 }
 
-/** Fetch the map, sharing one request across every mounted row. */
-function refreshSessionIcons(rpc: RpcCall, force = false) {
-  if (sessionIconsFlight) return sessionIconsFlight
-  if (!force && Date.now() - sessionIconsAt < 5000) return Promise.resolve()
-  sessionIconsFlight = rpc('registry.icons', {})
-    .then((result) => publishSessionIcons(result?.ok === true ? result.value?.sessions ?? {} : {}))
-    .catch(() => {})
-    .finally(() => { sessionIconsFlight = null })
-  return sessionIconsFlight
+/** Drop every resolved icon so the next render asks again (after a record changes). */
+function invalidateSessionIcons() {
+  sessionIconCache.clear()
+  sessionIconEpoch += 1
+  notifySessionIcons()
 }
 
-function useSessionIcons(rpc: RpcCall) {
-  const [icons, setIcons] = React.useState(sessionIcons)
+function useSessionIcon(rpc: RpcCall, sessionId?: string) {
+  const [icon, setIcon] = React.useState<string | null>(sessionId ? sessionIconCache.get(sessionId) ?? null : null)
+  const [epoch, setEpoch] = React.useState(sessionIconEpoch)
   React.useEffect(() => {
     let live = true
-    const update = () => { if (live) setIcons(sessionIcons) }
+    const update = () => {
+      if (!live) return
+      setIcon(sessionId ? sessionIconCache.get(sessionId) ?? null : null)
+      setEpoch(sessionIconEpoch)
+    }
     sessionIconListeners.add(update)
-    void refreshSessionIcons(rpc)
     return () => {
       live = false
       sessionIconListeners.delete(update)
     }
-  }, [rpc])
-  return icons
+  }, [sessionId])
+  React.useEffect(() => {
+    if (!sessionId || sessionIconCache.has(sessionId) || sessionIconFlights.has(sessionId)) return
+    const flight = rpc('registry.sessionIcon', { sessionId })
+      .then((result) => {
+        sessionIconCache.set(sessionId, result?.ok === true ? result.value?.icon ?? null : null)
+      })
+      .catch(() => { sessionIconCache.set(sessionId, null) })
+      .finally(() => {
+        sessionIconFlights.delete(sessionId)
+        notifySessionIcons()
+      })
+    sessionIconFlights.set(sessionId, flight)
+  }, [rpc, sessionId, epoch])
+  return icon
 }
 
 /** The leading mark on one session row: its digital human's icon, or nothing. */
 function SessionRowIcon({ sessionId, rpc }: { sessionId?: string; rpc: RpcCall }) {
-  const icons = useSessionIcons(rpc)
-  const icon = sessionId ? icons[sessionId] : undefined
+  const icon = useSessionIcon(rpc, sessionId)
   if (!icon) return null
   return <img className="dh-session-icon" src={icon} alt="" />
 }

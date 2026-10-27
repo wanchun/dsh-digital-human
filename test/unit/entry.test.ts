@@ -304,20 +304,25 @@ describe('the management route', () => {
     expect(Array.isArray(pm.alignment)).toBe(true)
   })
 
-  it('maps sessions to the icon of their digital human', async () => {
+  it('resolves one session to its digital human icon', async () => {
     const { route, platform } = await platformWithRoute()
     const icon = 'data:image/png;base64,iVBORw0KGgo='
-    const before = await (await route.fetch(post(call('registry.icons')))).json()
-    expect(before.result.value.sessions).toEqual({})
+    const controller = platform.ctx.sessionController
+    await controller.create({ sessionId: 'session-pm', agentPreset: 'dh-pm-assistant', cwd: WORKSPACE_PATH })
+    await controller.create({ sessionId: 'session-nopreset', cwd: WORKSPACE_PATH })
+    const before = await (await route.fetch(post(call('registry.sessionIcon', { sessionId: 'session-pm' })))).json()
+    expect(before.result.value.icon).toBeNull()
     await (await route.fetch(post(call('registry.save', {
       id: 'pm-assistant', partial: true, patch: { icon },
     })))).json()
-    const controller = platform.ctx.sessionController
-    await controller.create({ sessionId: 'session-pm', agentPreset: 'dh-pm-assistant', cwd: WORKSPACE_PATH })
-    await controller.create({ sessionId: 'session-other', agentPreset: 'dh-dev-assistant', cwd: WORKSPACE_PATH })
-    await controller.create({ sessionId: 'session-nopreset', cwd: WORKSPACE_PATH })
-    const answer = await (await route.fetch(post(call('registry.icons')))).json()
-    expect(answer.result.value.sessions).toEqual({ 'session-pm': icon })
+    const found = await (await route.fetch(post(call('registry.sessionIcon', { sessionId: 'session-pm' })))).json()
+    expect(found.result.value.icon).toBe(icon)
+    const other = await (await route.fetch(post(call('registry.sessionIcon', { sessionId: 'session-nopreset' })))).json()
+    expect(other.result.value.icon).toBeNull()
+    const unknown = await (await route.fetch(post(call('registry.sessionIcon', { sessionId: 'nope' })))).json()
+    expect(unknown.result.value.icon).toBeNull()
+    const missing = await (await route.fetch(post(call('registry.sessionIcon', {})))).json()
+    expect(missing.result.ok).toBe(false)
   })
 
   it('gets one record, and refuses an unknown one', async () => {

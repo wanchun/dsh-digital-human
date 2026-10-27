@@ -510,20 +510,21 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       const humans = await service.list()
       return ok({ home, file: store.file, humans: humans.map((entry) => withResolved(entry, humans)) })
     }
-    if (method === 'registry.icons') {
-      // One small map for the client: session id -> the icon of the digital human
-      // whose preset that session runs. The client cannot resolve a preset itself.
+    if (method === 'registry.sessionIcon') {
+      // Resolve one Session's preset and return its digital human's icon. The Session
+      // list API does not report presets here, but the resolver does, per Session.
+      if (typeof payload.sessionId !== 'string' || !payload.sessionId) return bad('sessionId is required')
       const humans = await service.list()
       const byPreset = new Map(humans.filter((entry) => entry.icon).map((entry) => [presetIdOf(entry.id), entry.icon]))
-      const sessions: Record<string, string> = {}
-      if (byPreset.size > 0) {
-        const listed = await ctx.sessionController.list({})
-        for (const item of listed?.items ?? []) {
-          const icon = typeof item?.agentPreset === 'string' ? byPreset.get(item.agentPreset) : undefined
-          if (icon && typeof item?.sessionId === 'string') sessions[item.sessionId] = icon
-        }
+      if (byPreset.size === 0) return ok({ icon: null })
+      let preset: string | undefined
+      try {
+        const resolved = await ctx.sessionController.resolveAgent(payload.sessionId)
+        preset = resolved?.agent?.session?.header?.agentPreset
+      } catch {
+        preset = undefined
       }
-      return ok({ sessions })
+      return ok({ icon: preset ? byPreset.get(preset) ?? null : null })
     }
     if (method === 'registry.get') {
       const found = await service.resolve(payload.id)

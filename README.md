@@ -149,7 +149,7 @@ pm-assistant-202610131954.dh.tar.gz
 
 ### 宿主能力
 
-- **RPC**（一条 `/api/digital-human` 精确路由）：`registry.list/get/save/remove/icons`、
+- **RPC**（一条 `/api/digital-human` 精确路由）：`registry.list/get/save/remove/sessionIcon`、
   `im.bots`、`im.targets`、`skills.list`、`skills.library/upload/remove`、
   `workspaces.list`、`permissions.list`
 - **订阅事件**：`session/created`（上权限、重试对齐）、`session/event`（记信箱、识别 preset 切换）、
@@ -172,7 +172,7 @@ pm-assistant-202610131954.dh.tar.gz
 
 每条数字人可选一个图标：png/jpeg/webp/svg 的 base64 data URI，上限 64KB。设置页上传、预览、清除；数字人列表与会话行共用同一张图。
 
-会话行在标题前显示图标，按会话的 `agentPreset` 映射到记录。只在**空闲行**渲染——运行中让位给状态点，归档行留空；标题文字、自动命名与置顶都不变。没有图标就不显示。
+会话行在标题前显示图标：宿主按 `sessionId` 解析该会话的 `agentPreset`，再映射到记录。只在**空闲行**渲染——运行中让位给状态点，归档行留空；标题文字、自动命名与置顶都不变。没有图标就不显示。
 
 ### 落盘布局
 
