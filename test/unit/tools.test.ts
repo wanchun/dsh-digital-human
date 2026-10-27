@@ -617,10 +617,12 @@ describe('the registry tool', () => {
     await build(service).execute({
       action: 'update', id: 'x', name: 'N', description: 'D', system_prompt: 'S', workspace: '/w',
       bot_id: 'wecom_1', target_id: 't', enabled: false, memory: false, session_mode: 'single',
+      icon: 'data:image/png;base64,iVBORw0KGgo=',
     })
     expect(seen[0]).toMatchObject({
       name: 'N', description: 'D', systemPrompt: 'S', workspace: '/w',
       im: { botId: 'wecom_1', targetId: 't' }, enabled: false, memory: false, sessionMode: 'single',
+      icon: 'data:image/png;base64,iVBORw0KGgo=',
     })
   })
 

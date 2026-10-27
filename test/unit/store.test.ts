@@ -18,6 +18,8 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true })
 })
 
+const PNG_ICON = 'data:image/png;base64,iVBORw0KGgo='
+
 const record = (patch: Record<string, unknown> = {}) => ({
   id: 'one',
   name: 'One',
@@ -113,6 +115,14 @@ describe('normalizeHuman', () => {
 
   it('drops a declaration list that ends up empty', () => {
     expect(normalizeHuman({ id: 'a', configSchema: [] }).configSchema).toBeUndefined()
+  })
+
+  it('keeps a valid icon and refuses a bad one', () => {
+    expect(normalizeHuman({ id: 'a', icon: PNG_ICON }).icon).toBe(PNG_ICON)
+    expect(normalizeHuman({ id: 'a', icon: '  ' }).icon).toBeUndefined()
+    expect(() => normalizeHuman({ id: 'a', icon: 'https://example.com/a.png' })).toThrow(/data URI/)
+    expect(() => normalizeHuman({ id: 'a', icon: 'data:image/gif;base64,AAAA' })).toThrow(/data URI/)
+    expect(() => normalizeHuman({ id: 'a', icon: 'data:image/png;base64,' + 'A'.repeat(70 * 1024) })).toThrow(/exceeds/)
   })
 
   it('treats a null config as unset', () => {
@@ -316,6 +326,15 @@ describe('HumanStore writes', () => {
     await store.upsert(record({ id: 'qa', sessionMode: 'single' }))
     expect((await store.get('qa'))?.sessionMode).toBe('single')
     expect(JSON.parse(await readFile(store.configPath('qa'), 'utf8')).sessionMode).toBe('single')
+  })
+
+  it('round-trips the icon and clears it when saved empty', async () => {
+    await store.upsert(record({ id: 'a', icon: PNG_ICON }))
+    expect((await store.get('a'))?.icon).toBe(PNG_ICON)
+    expect(JSON.parse(await readFile(store.configPath('a'), 'utf8')).icon).toBe(PNG_ICON)
+    await store.upsert(record({ id: 'a', icon: '' }))
+    expect((await store.get('a'))?.icon).toBeUndefined()
+    expect(JSON.parse(await readFile(store.configPath('a'), 'utf8')).icon).toBeUndefined()
   })
 
   it('keeps createdAt across an update', async () => {

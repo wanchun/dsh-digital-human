@@ -691,6 +691,11 @@ export function buildRegistryTool({ service }) {
       target_id: { type: 'string', description: 'Default IM target id for notify_bot.' },
       enabled: { type: 'boolean', description: 'Whether the digital human may run. Defaults to true.' },
       memory: { type: 'boolean', description: 'Whether to give it a durable memory file. Defaults to true.' },
+      icon: {
+        type: 'string',
+        description: 'Optional icon: a base64 data URI for png, jpeg, webp or svg+xml, at most 64KB. '
+          + 'An empty string clears it. Rendered beside this human\'s session titles.',
+      },
       session_mode: {
         type: 'string',
         enum: ['thread', 'single'],
@@ -739,6 +744,7 @@ export function buildRegistryTool({ service }) {
       if (args.enabled !== undefined) patch.enabled = args.enabled
       if (args.memory !== undefined) patch.memory = args.memory
       if (args.session_mode !== undefined) patch.sessionMode = args.session_mode === 'single' ? 'single' : 'thread'
+      if (args.icon !== undefined) patch.icon = String(args.icon)
       const saved = await service.upsert(patch, { partial: action === 'update' })
       return {
         detail: `${action === 'create' ? 'Created' : 'Updated'} digital human ${saved.id} (${saved.name}); preset ${saved.presetId}.`,

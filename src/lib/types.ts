@@ -83,6 +83,11 @@ export interface Human {
   description: string
   enabled: boolean
   systemPrompt: string
+  /**
+   * Optional icon, a base64 image data URI rendered beside session titles.
+   * Empty or absent means no icon.
+   */
+  icon?: string
   workspace: string
   /**
    * The plugin-space skills this digital human mounts, by name.

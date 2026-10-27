@@ -91,6 +91,14 @@ describe('packing', () => {
     expect(files['humans/pm.json']).toBeUndefined()
   })
 
+  it('carries the icon through the bundle', () => {
+    const icon = 'data:image/png;base64,iVBORw0KGgo='
+    const { archive } = packHumans(home, [human({ icon })])
+    expect(readBundle(archive).humans[0].icon).toBe(icon)
+    const files = readTar(gunzipSync(archive))
+    expect(JSON.parse(files['humans/pm/config.json'].toString('utf8')).icon).toBe(icon)
+  })
+
   it('carries many records in one bundle, with the union of their skills', async () => {
     await writeSkill(home, 'a', { 'SKILL.md': skillMd('a') })
     await writeSkill(home, 'b', { 'SKILL.md': skillMd('b') })

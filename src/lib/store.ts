@@ -157,6 +157,7 @@ export function normalizeHuman(input, now = new Date().toISOString()): Human {
   if (!input || typeof input !== 'object') throw new Error('digital human must be an object')
   const id = requireSlug(input.id, 'digital human id')
   const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim() : id
+  const icon = iconValue(input.icon)
   const im = input.im && typeof input.im === 'object' ? input.im : {}
   return {
     id,
@@ -164,6 +165,7 @@ export function normalizeHuman(input, now = new Date().toISOString()): Human {
     description: typeof input.description === 'string' ? input.description : '',
     enabled: input.enabled !== false,
     systemPrompt: typeof input.systemPrompt === 'string' ? input.systemPrompt : '',
+    ...(icon === undefined ? {} : { icon }),
     workspace: typeof input.workspace === 'string' && input.workspace ? input.workspace : '',
     skills: stringList(input.skills, 'skills'),
     peers: stringList(input.peers, 'peers'),
@@ -189,8 +191,25 @@ export function normalizeHuman(input, now = new Date().toISOString()): Human {
 /** Fields the config file owns. Identity and prose live in the persona file. */
 const CONFIG_FIELDS = [
   'enabled', 'workspace', 'skills', 'peers', 'im', 'permissionPreset', 'memory',
-  'subscriptions', 'config', 'configSchema', 'sessionMode', 'createdAt', 'updatedAt',
+  'subscriptions', 'config', 'configSchema', 'sessionMode', 'icon', 'createdAt', 'updatedAt',
 ]
+
+/** Largest icon the registry accepts, measured on the data URI itself. */
+const ICON_MAX_CHARS = 64 * 1024
+
+/** The only image forms an icon may take: a base64 data URI, never a URL. */
+const ICON_DATA_URI = /^data:image\/(?:png|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/]+={0,2}$/
+
+/** Validate one optional icon. Empty means "no icon", not "an empty icon". */
+function iconValue(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') throw new Error('icon must be a string')
+  const text = value.trim()
+  if (!text) return undefined
+  if (text.length > ICON_MAX_CHARS) throw new Error(`icon exceeds ${ICON_MAX_CHARS} characters`)
+  if (!ICON_DATA_URI.test(text)) throw new Error('icon must be a base64 data URI for png, jpeg, webp or svg+xml')
+  return text
+}
 
 /** Collapse a value that must stay on one frontmatter line. */
 function oneLine(value): string {
@@ -252,6 +271,7 @@ function configOf(human: Human): Record<string, unknown> {
     },
     permissionPreset: human.permissionPreset,
     sessionMode: human.sessionMode ?? 'thread',
+    ...(human.icon ? { icon: human.icon } : {}),
     memory: human.memory,
     subscriptions: human.subscriptions,
     ...(human.config ? { config: human.config } : {}),
@@ -592,6 +612,9 @@ export class HumanStore {
       const merged = index >= 0
         ? { ...records[index], ...next, createdAt: records[index].createdAt }
         : next
+      // An optional field the caller cleared must not survive the merge: the
+      // normalizer omits an empty icon, so spreading would keep the stored one.
+      if (typeof input.icon === 'string' && input.icon.trim() === '') delete merged.icon
       await this.#writeRecord(merged)
       return merged
     })
