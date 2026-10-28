@@ -11,7 +11,7 @@
  * who has to read a wall of text will stop reading escalations altogether.
  */
 
-import type { TaskRow } from './ledger.js'
+import type { TaskRow, TaskState } from './ledger.js'
 
 /** Minutes a handover may run before it is due, when nothing configures a value. */
 export const DEFAULT_DEADLINE_MINUTES = 30
@@ -25,7 +25,7 @@ export const DEFAULT_DEADLINE_MINUTES = 30
 export const ESCALATION_MERGE_MS = 5 * 60 * 1000
 
 /** The states a person has to hear about. Everything else is not an escalation. */
-export function escalates(state: string): boolean {
+export function escalates(state: TaskState): boolean {
   return state === 'failed' || state === 'blocked'
 }
 

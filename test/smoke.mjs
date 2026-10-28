@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HumanStore, defaultHome, normalizeHuman } from '../build/host/lib/store.js'
 import { buildPresetDefinition, builtinConfig, effectiveConfig, neutralizePlaceholders, presetIdOf, renderConfigBlock, resolveConfig, resolveConfigValues } from '../build/host/lib/presets.js'
-import { SEED_HUMANS } from '../build/host/lib/seed.js'
+import { SEED_HUMANS } from './fixtures/seed.mjs'
 
 const home = await mkdtemp(join(tmpdir(), 'dh-'))
 const store = new HumanStore(home)

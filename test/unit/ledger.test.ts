@@ -160,14 +160,39 @@ describe('the work-item ledger', () => {
     const now = new Date('2026-10-28T12:00:00.000Z')
     await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1', deadline: '2026-10-28T11:00:00.000Z' })
     await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1', deadline: '2026-10-28T13:00:00.000Z' })
-    const blocked = await ledger.timeout('dev', { now, fallbackMinutes: 30 })
+    const blocked = await ledger.timeout('dev', { now, fallbackMinutes: 30, isIdle: async () => true })
     expect(blocked).toEqual([
       expect.objectContaining({ id: 'w-01', state: 'blocked', reason: 'timeout', endedAt: now.toISOString() }),
     ])
     // The item that is not overdue keeps its state, and a second pass changes nothing.
     expect((await ledger.list('dev')).map((task) => [task.id, task.state]))
       .toEqual([['w-01', 'blocked'], ['w-02', 'queued']])
-    expect(await ledger.timeout('dev', { now, fallbackMinutes: 30 })).toEqual([])
+    expect(await ledger.timeout('dev', { now, fallbackMinutes: 30, isIdle: async () => true })).toEqual([])
+  })
+
+  it('leaves an item alone while its conversation is still running', async () => {
+    const now = new Date('2026-10-28T12:00:00.000Z')
+    await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1', deadline: '2026-10-28T11:00:00.000Z' })
+    await ledger.start('dev', { conversation: 'REQ-1', sessionId: 'session-1' })
+    const seen: string[] = []
+    const blocked = await ledger.timeout('dev', {
+      now,
+      fallbackMinutes: 30,
+      isIdle: async (conversation) => {
+        seen.push(conversation)
+        return false
+      },
+    })
+    expect(blocked).toEqual([])
+    expect(seen).toEqual(['REQ-1'])
+    // A turn/end still finds the item it owns, because nothing blocked it behind its back.
+    expect((await ledger.list('dev'))[0].state).toBe('in_progress')
+    expect(await ledger.end('dev', { sessionId: 'session-1', reason: { kind: 'interrupted' } }))
+      .toMatchObject({ closed: { state: 'stopped', reason: 'restart' } })
+    // Once the conversation is idle the same deadline does time the item out.
+    await ledger.assign('dev', { from: 'pm', conversation: 'REQ-2', deadline: '2026-10-28T11:00:00.000Z' })
+    expect(await ledger.timeout('dev', { now, fallbackMinutes: 30, isIdle: async () => true }))
+      .toEqual([expect.objectContaining({ conversation: 'REQ-2', state: 'blocked', reason: 'timeout' })])
   })
 
   it('times out a row that carries no deadline using the fallback', async () => {
@@ -179,7 +204,7 @@ describe('the work-item ledger', () => {
       createdAt: '2026-10-28T10:00:00.000Z', owner: 'session-1',
     })}\n`)
     const now = new Date('2026-10-28T10:31:00.000Z')
-    expect(await ledger.timeout('dev', { now, fallbackMinutes: 30 }))
+    expect(await ledger.timeout('dev', { now, fallbackMinutes: 30, isIdle: async () => true }))
       .toEqual([expect.objectContaining({ id: 'w-01', state: 'blocked', reason: 'timeout' })])
     // Just inside the fallback window nothing happens.
     await store.ensureDir(store.dir('dev2'))
@@ -187,7 +212,7 @@ describe('the work-item ledger', () => {
       id: 'w-01', from: 'pm', to: 'dev2', conversation: 'REQ-1', state: 'queued',
       createdAt: '2026-10-28T10:00:00.000Z',
     })}\n`)
-    expect(await ledger.timeout('dev2', { now: new Date('2026-10-28T10:29:59.000Z'), fallbackMinutes: 30 }))
+    expect(await ledger.timeout('dev2', { now: new Date('2026-10-28T10:29:59.000Z'), fallbackMinutes: 30, isIdle: async () => true }))
       .toEqual([])
   })
 
@@ -255,6 +280,9 @@ describe('endStateOf', () => {
     expect(endStateOf({ kind: 'aborted', reason: { kind: 'user' } }))
       .toEqual({ state: 'stopped', reason: 'aborted' })
     expect(endStateOf({ kind: 'blocked' })).toEqual({ state: 'blocked', reason: 'blocked' })
+    // Interrupted and forked turns were stopped from outside, never completed.
+    expect(endStateOf({ kind: 'interrupted' })).toEqual({ state: 'stopped', reason: 'restart' })
+    expect(endStateOf({ kind: 'forked' })).toEqual({ state: 'stopped', reason: 'forked' })
     // A Host that reports no reason at all still finished the turn.
     expect(endStateOf(undefined)).toEqual({ state: 'done', reason: 'completed' })
   })

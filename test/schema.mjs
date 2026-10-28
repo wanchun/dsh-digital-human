@@ -117,7 +117,7 @@ const service = provided.get('digitalHumans')
 
 console.log('1) preset-scoped tools')
 const scoped = buildHumanTools({ ctx, service, humanId: 'dev-assistant' })
-check('every scoped tool is declared', scoped.length === 11, String(scoped.length))
+check('every scoped tool is declared', scoped.length === 12, String(scoped.length))
 check('the title tool is exposed to a record with a bot', scoped.some((tool) => tool.name === 'set_session_title'))
 // Inventing a conversation id splits one subject across two Sessions, so the
 // capability to see what already exists is what lets a caller reuse it.

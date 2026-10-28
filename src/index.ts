@@ -17,7 +17,7 @@
 
 import { dirname } from 'node:path'
 
-import { HumanStore, defaultHome } from './lib/store.js'
+import { HumanStore, deadlineMinutesOf, defaultHome } from './lib/store.js'
 import { DEFAULT_CONVERSATION, HumanChat, requireConversation } from './lib/chat.js'
 import { archiveHistoryOnTurnEnd, memoryPaths } from './lib/memory.js'
 import { HumanLedger } from './lib/ledger.js'
@@ -392,6 +392,13 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     if (human.sessionMode === 'single') return DEFAULT_CONVERSATION
     if (conversationId !== undefined) return requireConversation(conversationId)
     const known = sessionId ? await chat.conversationOf(human.id, sessionId) : undefined
+    // A Session with no recorded thread keeps its own id as the label, which is the
+    // same answer `chat.#resolve` gives; a caller naming neither address lands in
+    // `main`. The tool is the layer that refuses both addresses at once (README:
+    // "两个地址都不传 → 报错") and it resolves the address before calling here, so
+    // this stays the service-level default: raising an error here would reject the
+    // bare `service.send` calls the chat API and tests rely on. IM inbound never
+    // reaches this function — `dsh-im` delivers into its own Session.
     return known ?? sessionId ?? DEFAULT_CONVERSATION
   }
 
@@ -434,10 +441,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   async function sweepTasks(): Promise<void> {
     for (const human of await store.list(seed)) {
       try {
-        await ledger.sweep(human.id, async (conversation) => {
-          const state = await chat.status(human, conversation)
-          return !state.isGenerating
-        })
+        await ledger.sweep(human.id, idleIn(human))
       } catch (error) {
         log(`work-item sweep failed for ${human.id}: ${error.message}`)
       }
@@ -445,14 +449,13 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   }
 
   /**
-   * Minutes one record allows before escalation: its own value, else the platform's.
+   * Whether one conversation is between turns, as the ledger's predicates expect.
    *
-   * A zero or malformed record value would mean "escalate immediately" or "never",
-   * neither of which an operator asked for, so it falls back like an absent one.
+   * A turn that is still running owns its work item: settling it behind the turn's
+   * back would leave `turn/end` with nothing to close and call running work blocked.
    */
-  function deadlineMinutesOf(human: Human): number {
-    const own = Number(human.escalationDeadlineMinutes)
-    return Number.isFinite(own) && own > 0 ? own : deadlineMinutes
+  function idleIn(human: Human): (conversation: string) => Promise<boolean> {
+    return async (conversation) => !(await chat.status(human, conversation)).isGenerating
   }
 
   /**
@@ -460,8 +463,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
    *
    * The ledger is the source of truth: any failed or blocked item that has not been
    * claimed yet is escalated, so a send missed by a crash is retried by the next
-   * query or turn ending. Claiming happens before sending — a person told twice
-   * stops trusting the channel, while an unsent message is only a lost notification.
+   * query or turn ending. An item folded into a message sent moments ago is left
+   * unclaimed on purpose: it was never delivered, so a claim would lose it for good,
+   * while leaving it pending lets the first settle after the window send it. The
+   * claim still comes before sending — a person told twice stops trusting the
+   * channel, while an unsent message is only a lost notification.
    */
   async function escalateStopped(human: Human, conversation?: string): Promise<void> {
     const rows = await ledger.list(human.id)
@@ -484,16 +490,18 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         .sort()
         .at(-1)
       const now = new Date()
+      const ids = items.map((task) => task.id).join(', ')
+      // Decide the fold before claiming: a folded item was not sent, so claiming it
+      // would mark it handled and no later settle would ever deliver it.
+      if (foldedInto(lastAt, now)) {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} folded into the message sent at ${lastAt}`)
+        continue
+      }
       const claimed = await ledger.claim(human.id, {
         taskIds: items.map((task) => task.id),
         at: now.toISOString(),
       })
       if (claimed.length === 0) continue
-      const ids = claimed.map((task) => task.id).join(', ')
-      if (foldedInto(lastAt, now)) {
-        log(`escalation of ${ids} in "${thread}" for ${human.id} folded into the message sent at ${lastAt}`)
-        continue
-      }
       // No exit, no alternative channel: say why once and keep the ledger settled.
       const botId = String(human.im?.botId ?? '').trim()
       if (!botId) {
@@ -530,7 +538,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
    * matter — a status or task query, or a turn ending — so this is the whole clock.
    */
   async function settleWork(human: Human, conversation?: string): Promise<void> {
-    await ledger.timeout(human.id, { now: new Date(), fallbackMinutes: deadlineMinutesOf(human) })
+    await ledger.timeout(human.id, {
+      now: new Date(),
+      fallbackMinutes: deadlineMinutesOf(human, deadlineMinutes),
+      isIdle: idleIn(human),
+    })
     await escalateStopped(human, conversation)
   }
 
@@ -677,7 +689,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         // for a person to notice, which is the failure mode this field removes.
         deadline: typeof deadline === 'string' && deadline.trim()
           ? deadline.trim()
-          : deadlineIn(new Date(), deadlineMinutesOf(human)),
+          : deadlineIn(new Date(), deadlineMinutesOf(human, deadlineMinutes)),
       })
       try {
         // A queued task must not steer the running turn: it is the next turn, not

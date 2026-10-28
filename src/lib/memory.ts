@@ -212,10 +212,12 @@ function truncateSection(lines: string[], budget: number): string {
 /**
  * Fit `# now` into the injection budget.
  *
- * Multi-section blocks keep their leading `##` sections whole and report the rest,
- * because a section cut in half is harder to trust than one left out. When the very
- * first section alone overflows, it is cut by line with {@link truncateSection}
- * instead: a version of `# now` that keeps no State is not worth injecting.
+ * Multi-section blocks keep their leading `##` sections and their last one whole,
+ * and report the middle they had to leave out; the last section is the newest, which
+ * 06 anchors the current task on, so it is never dropped just because it came last.
+ * A section that alone overflows is cut by line with {@link truncateSection} instead,
+ * keeping its head and its newest lines: a version of `# now` that keeps no State is
+ * not worth injecting.
  */
 function truncateNow(now: string, budget: number): string {
   if (bytesOf(now) <= budget) return now
@@ -230,31 +232,33 @@ function truncateNow(now: string, budget: number): string {
   // Without a `##` the block is one section, and cutting it by line is the only
   // way to keep both its first lines and its newest ones.
   if (groups.length === 1) return truncateSection(groups[0], budget)
-  const kept: string[][] = []
-  let used = 0
-  for (const group of groups) {
+  // The newest section is the one 06 anchors the current task on, so it is kept
+  // whole when it fits and cut to its own head and tail when it does not. Only the
+  // sections between it and the heading are candidates for being dropped.
+  const head = [groups[0]]
+  const used = bytesOf(groups[0].join('\n')) + 1
+  const middle = groups.slice(1, -1)
+  const tail = groups[groups.length - 1]
+  const reserved = middle.length > 0 ? TRUNCATION_NOTE_RESERVE : 0
+  const tailRoom = Math.max(budget - used - reserved, 0)
+  const tailSize = bytesOf(tail.join('\n')) + 1
+  const tailText = tailSize <= tailRoom ? tail.join('\n') : truncateSection(tail, tailRoom)
+  let left = Math.max(budget - used - (bytesOf(tailText) + 1), 0)
+  const keptMiddle: string[][] = []
+  for (const [index, group] of middle.entries()) {
     const size = bytesOf(group.join('\n')) + 1
-    if (used + size > budget - TRUNCATION_NOTE_RESERVE) break
-    kept.push(group)
-    used += size
+    // Keeping a section that leaves no room for the note would silently drop the
+    // rest, so a section that is not the last of the middle needs the note's room too.
+    const laterDrop = index < middle.length - 1
+    if (size > left || (laterDrop && size + TRUNCATION_NOTE_RESERVE > left)) break
+    keptMiddle.push(group)
+    left -= size
   }
-  if (kept.length === groups.length) return kept.map((group) => group.join('\n')).join('\n')
-  // Even the heading group does not fit, so it is cut and every section behind it
-  // is reported rather than injected unread.
-  if (kept.length === 0) {
-    return [
-      truncateSection(groups[0], budget - TRUNCATION_NOTE_RESERVE),
-      droppedSectionsNote(groups.slice(1)),
-    ].join('\n')
-  }
-  if (kept.length === 1) {
-    const rest = groups.slice(2)
-    const room = budget - used - (rest.length > 0 ? TRUNCATION_NOTE_RESERVE : 0)
-    const parts = [groups[0].join('\n'), truncateSection(groups[1], room)]
-    if (rest.length > 0) parts.push(droppedSectionsNote(rest))
-    return parts.join('\n')
-  }
-  return [...kept.map((group) => group.join('\n')), droppedSectionsNote(groups.slice(kept.length))].join('\n')
+  const dropped = middle.slice(keptMiddle.length)
+  const parts = [...head, ...keptMiddle].map((group) => group.join('\n'))
+  if (dropped.length > 0) parts.push(droppedSectionsNote(dropped))
+  parts.push(tailText)
+  return parts.join('\n')
 }
 
 /** Where the next archive goes, refusing to overwrite one written in the same minute. */
