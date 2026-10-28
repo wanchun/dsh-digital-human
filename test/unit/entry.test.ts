@@ -1014,6 +1014,25 @@ describe('escalation to a human', () => {
     expect(rows.at(-1).state).toBe('in_progress')
   })
 
+  it('claims the queue head when the turn was already running', async () => {
+    // The item arrived mid-turn: no turn/start will ever fire for it. A reply from the
+    // Session proves the turn is real, so the head is claimed there instead of the
+    // item sitting queued with nothing left to close it.
+    const platform = makeCtx({})
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    const sent = await service.send('dev-assistant', {
+      message: 'work', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    emit(platform, sent.sessionId, 'assistant/message', {
+      message: { content: [{ type: 'text', text: 'working on it' }] },
+    })
+    await tick()
+
+    const rows = await service.tasks('dev-assistant')
+    expect(rows.at(-1).state).toBe('in_progress')
+  })
+
   it('direct-messages the owner when a work item fails', async () => {
     const im = imStub()
     const platform = makeCtx({ dshIm: im })

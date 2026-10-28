@@ -1182,9 +1182,16 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     if (kind === 'assistant/message') {
       // Same recovery: a reply whose Session was never primed would otherwise go
       // unlogged, and the thread would lose the half of the conversation it wrote.
-      void known().then((owner) => (owner
-        ? chat.noteAssistant(sessionId, event.data?.message ?? event.data)
-        : undefined)).catch((error) => log(`mailbox write failed: ${error.message}`))
+      void known().then(async (owner) => {
+        if (!owner) return
+        // A turn that was already running when its item arrived never emitted
+        // turn/start for it, so the item would stay queued with nothing to close it.
+        // A reply is proof the turn is real, so it claims the queue head too; the
+        // call is a no-op when an item is already in progress.
+        await ledger.start(owner.humanId, { conversation: owner.conversationId, sessionId })
+          .catch((error) => log(`work item claim failed for ${sessionId}: ${error.message}`))
+        await chat.noteAssistant(sessionId, event.data?.message ?? event.data)
+      }).catch((error) => log(`mailbox write failed: ${error.message}`))
     }
   }, { global: true })
 
