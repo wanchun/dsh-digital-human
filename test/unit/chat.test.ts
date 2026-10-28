@@ -787,6 +787,30 @@ describe('the conversation index', () => {
     expect(await chat.conversations('pm')).toEqual([])
   })
 
+  it('refuses to file a second name for a Session another thread owns', async () => {
+    const controller = controllerStub()
+    // The Host handing back an id that already carries a thread is the one way a
+    // second name could be written for it; the index must refuse the merge.
+    controller.create = async () => ({ sessionId: 'session-shared' })
+    const { chat, log } = chatWith(controller)
+    await chat.deliver(human(), { message: 'a', conversationId: 'thread-a' })
+    await expect(chat.deliver(human(), { message: 'b', conversationId: 'thread-b' }))
+      .rejects.toThrow(/already belongs to "thread-a"/)
+    expect(await chat.conversations('pm')).toEqual(['thread-a'])
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('already belongs'))
+  })
+
+  it('announces a session filed under two names, without touching the file', async () => {
+    await store.ensureDir(store.dir('pm'))
+    const path = store.sessionIndexPath('pm')
+    const shared = JSON.stringify({ 'thread-a': 'session-1', 'thread-b': 'session-1' })
+    writeFileSync(path, shared)
+    const { chat, log } = chatWith(controllerStub())
+    await chat.conversations('pm')
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('filed under both "thread-a" and "thread-b"'))
+    expect(readFileSync(path, 'utf8')).toBe(shared)
+  })
+
   it('drops a non-string entry from a hand-edited index', async () => {
     await store.ensureDir(store.dir('pm'))
     writeFileSync(store.sessionIndexPath('pm'), JSON.stringify({ main: 'session-1', broken: 42 }))

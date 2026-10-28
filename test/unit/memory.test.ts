@@ -109,10 +109,16 @@ describe('buildSnapshot', () => {
     expect(buildSnapshot(paths()).needsCompaction).toBe(false)
   })
 
-  it('lists the run archives', () => {
+  it('lists the archives compaction writes', () => {
     write('# now\n')
-    mkdirSync(paths().runDir, { recursive: true })
-    writeFileSync(join(paths().runDir, 'run-1.md'), 'r')
+    mkdirSync(paths().archiveDir, { recursive: true })
+    writeFileSync(join(paths().archiveDir, '2026-10-28-11-00.md'), 'r')
+    expect(buildSnapshot(paths()).archiveFiles).toHaveLength(1)
+  })
+
+  it('lists the archive a compaction just wrote', () => {
+    write('# now\n## State | x\n')
+    compactMemory(paths())
     expect(buildSnapshot(paths()).archiveFiles).toHaveLength(1)
   })
 
@@ -144,8 +150,8 @@ describe('renderSnapshot', () => {
 
   it('lists the recent archives when there are any', () => {
     write('# now\n')
-    mkdirSync(paths().runDir, { recursive: true })
-    writeFileSync(join(paths().runDir, 'run-1.md'), 'r')
+    mkdirSync(paths().archiveDir, { recursive: true })
+    writeFileSync(join(paths().archiveDir, '2026-10-28-11-00.md'), 'r')
     expect(renderSnapshot(buildSnapshot(paths()))).toContain('recent archives')
   })
 })

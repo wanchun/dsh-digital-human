@@ -192,8 +192,27 @@ export class HumanChat {
         this.#log(`session index unreadable for ${humanId}: ${error.message}`)
       }
     }
+    this.#warnSharedSessions(humanId, index)
     this.#indexes.set(humanId, index)
     return index
+  }
+
+  /**
+   * Say out loud when one Session carries two conversation names.
+   *
+   * The name is written once per thread, so a duplicate can only come from a
+   * hand-edited index or an older build. It is announced, not repaired here: which
+   * name owns the Session is the operator's call, and guessing would move a thread's
+   * history without telling anyone.
+   */
+  #warnSharedSessions(humanId, index) {
+    const owners = new Map()
+    for (const [name, recorded] of Object.entries(index)) {
+      if (typeof recorded !== 'string') continue
+      const first = owners.get(recorded)
+      if (first === undefined) owners.set(recorded, name)
+      else this.#log(`session ${recorded} of ${humanId} is filed under both "${first}" and "${name}"`)
+    }
   }
 
   /** Run one write after the previous write for the same human finished. */
@@ -206,6 +225,15 @@ export class HumanChat {
 
   async #remember(humanId, conversationId, sessionId) {
     const index = await this.#index(humanId)
+    // One Session carries one thread: two names for it merge two subjects into one
+    // history, and the second thread's replies land in the first thread's mailbox.
+    // Refused, not overwritten — a silent merge is the failure this guards against.
+    const owner = Object.keys(index).find((name) => name !== conversationId && index[name] === sessionId)
+    if (owner !== undefined) {
+      const problem = `conversation "${conversationId}" resolved to ${sessionId}, which already belongs to "${owner}"`
+      this.#log(problem)
+      throw new Error(problem)
+    }
     index[conversationId] = sessionId
     this.#bySession.set(sessionId, { humanId, conversationId })
     await this.#serial(humanId, async () => {

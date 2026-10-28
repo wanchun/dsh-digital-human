@@ -143,7 +143,9 @@ export function buildSnapshot(paths: MemoryPaths): MemorySnapshot {
     nowSection: null,
     headers: [],
     fullContent: null,
-    archiveFiles: archiveFiles(paths.runDir),
+    // What `compactMemory` writes. `runDir` is never written by this plugin, so
+    // listing it reported no archives right after a compaction.
+    archiveFiles: archiveFiles(paths.archiveDir),
     lastModified: null,
     needsCompaction: false,
   }
