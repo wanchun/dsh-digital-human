@@ -1291,6 +1291,29 @@ describe('escalation to a human', () => {
       .toMatchObject({ state: 'failed', reason: 'undelivered', escalatedAt: expect.any(String) })
   })
 
+  it('sends a worker failure through the record that assigned the work', async () => {
+    // A worker usually has no bot: the handover came from the front-of-house record,
+    // which is the one a person watches.
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    const sender = {
+      id: 'pm-assistant', name: 'PM', enabled: true, systemPrompt: 'x', memory: false,
+      im: { botId: 'wecom_pm', owner: 'wohR_boss' },
+    }
+    const worker = {
+      id: 'dev-assistant', name: 'Dev', enabled: true, systemPrompt: 'x', memory: false,
+      peers: ['pm-assistant'], im: {},
+    }
+    await applyPlatform(platform.ctx, { home: join(home, 'route'), humans: [sender, worker] })
+    const service = platform.provided.get('digitalHumans')
+    await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
+
+    await expect.poll(() => im.sent.length).toBe(1)
+    expect(im.sent[0][0]).toBe('wecom_pm')
+    expect(im.sent[0][1]).toEqual({ kind: 'user', route: { chatId: 'wohR_boss' } })
+    expect(im.sent[0][2]).toContain('w-01')
+  })
+
   it('stays silent and logs when there is no bot or no owner', async () => {
     const cases = [
       { label: 'no bot', human: boundHuman({ im: { botId: '', targetId: '', owner: 'wohR_boss' } }) },

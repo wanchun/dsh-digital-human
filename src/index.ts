@@ -527,17 +527,15 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         at: now.toISOString(),
       })
       if (claimed.length === 0) continue
-      // No exit, no alternative channel: say why once and keep the ledger settled.
-      const botId = String(human.im?.botId ?? '').trim()
-      if (!botId) {
-        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: no IM bot is bound`)
+      // A worker rarely carries a bot of its own. The record that handed the work
+      // over is the one a person watches, so its bot and owner carry the news back;
+      // without that hop a worker's failure would be visible to nobody.
+      const notifier = await notifierFor(human, claimed)
+      if (!notifier) {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: neither it nor the record that assigned the work has a bot and an owner`)
         continue
       }
-      const owner = String(human.im?.owner ?? '').trim()
-      if (!owner) {
-        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: it has no owner`)
-        continue
-      }
+      const { botId, owner } = notifier
       if (typeof dshIm?.send !== 'function') {
         log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: the IM service is absent`)
         continue
@@ -549,11 +547,37 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           escalationText(claimed),
           { format: 'plain' },
         )
-        log(`escalated ${ids} in "${thread}" to ${owner} through ${botId}`)
+        log(`escalated ${ids} in "${thread}" to ${owner} through ${botId} (via ${notifier.via})`)
       } catch (error) {
         log(`escalation of ${ids} in "${thread}" could not be sent: ${error.message}`)
       }
     }
+  }
+
+  /**
+   * Which bot carries one failure to a person.
+   *
+   * The record that owns the failed item wins when it has a bot; otherwise the
+   * record that assigned the work does, because that is the one bound to a human
+   * and the one whose chain the failure belongs to.
+   */
+  async function notifierFor(
+    human: Human,
+    items: TaskRow[],
+  ): Promise<{ botId: string; owner: string; via: string } | undefined> {
+    const own = {
+      botId: String(human.im?.botId ?? '').trim(),
+      owner: String(human.im?.owner ?? '').trim(),
+    }
+    if (own.botId && own.owner) return { ...own, via: human.id }
+    for (const senderId of [...new Set(items.map((task) => task.from))]) {
+      if (!senderId || senderId === human.id) continue
+      const sender = await store.get(senderId, seed)
+      const botId = String(sender?.im?.botId ?? '').trim()
+      const owner = String(sender?.im?.owner ?? '').trim()
+      if (botId && owner) return { botId, owner, via: senderId }
+    }
+    return undefined
   }
 
   /**
