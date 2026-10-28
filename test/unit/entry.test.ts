@@ -996,7 +996,7 @@ describe('escalation to a human', () => {
     await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
     const service = platform.provided.get('digitalHumans')
     await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
     const [botId, target, text, options] = im.sent[0]
     expect(botId).toBe('wecom_1')
     // The owner is a raw chat id: the plugin never invents a target id for it.
@@ -1022,7 +1022,7 @@ describe('escalation to a human', () => {
     expect(im.sent).toEqual([])
     const tasks = await service.tasks('dev-assistant', 'REQ-1')
     expect(tasks[0]).toMatchObject({ id: 'w-01', state: 'blocked', reason: 'timeout', deadline: past })
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
     const text = im.sent[0][2]
     expect(text).toContain('w-01')
     expect(text).toContain('blocked')
@@ -1077,7 +1077,7 @@ describe('escalation to a human', () => {
     await service.tasks('dev-assistant', 'REQ-1')
     await service.tasks('dev-assistant', 'REQ-1')
     await tick()
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
     expect((await service.tasks('dev-assistant', 'REQ-1'))[0].escalatedAt).toEqual(expect.any(String))
   })
 
@@ -1095,7 +1095,7 @@ describe('escalation to a human', () => {
     })
     const tasks = await service.tasks('dev-assistant', 'REQ-1')
     expect(tasks.map((task: any) => task.state)).toEqual(['blocked', 'blocked'])
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
     const lines = im.sent[0][2].split('\n')
     expect(lines).toHaveLength(2)
     expect(lines[0]).toContain('w-01')
@@ -1108,14 +1108,14 @@ describe('escalation to a human', () => {
     await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
     const service = platform.provided.get('digitalHumans')
     await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
     // The next failure lands inside the window: the owner is told once.
     await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'AGAIN' } })
     const tasks = await service.tasks('dev-assistant', 'REQ-1')
     expect(tasks.map((task: any) => task.state)).toEqual(['failed', 'failed'])
     // Folded, not sent: the claim waits too, so a later settle can still deliver it.
     expect(tasks[1].escalatedAt).toBeUndefined()
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
   })
 
   it('leaves an escalation folded inside the window unclaimed, and sends it later', async () => {
@@ -1124,14 +1124,14 @@ describe('escalation to a human', () => {
     await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
     const service = platform.provided.get('digitalHumans')
     await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
     // A second failure inside five minutes is folded: the owner hears it once.
     await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'AGAIN' } })
     const folded = await service.tasks('dev-assistant', 'REQ-1')
     expect(folded.map((task: any) => task.state)).toEqual(['failed', 'failed'])
     // Folded is not sent, so it must not be claimed: a claim here loses the item forever.
     expect(folded[1].escalatedAt).toBeUndefined()
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
     // Once the window has passed the next settle sends it, and the older item stays quiet.
     const old = new Date(Date.now() - 6 * 60_000).toISOString()
     await appendFile(
@@ -1140,7 +1140,7 @@ describe('escalation to a human', () => {
     )
     const sent = await service.tasks('dev-assistant', 'REQ-1')
     expect(sent[1].escalatedAt).toEqual(expect.any(String))
-    expect(im.sent).toHaveLength(2)
+    await expect.poll(() => im.sent.length).toBe(2)
     expect(im.sent[1][2]).toContain('w-02')
     expect(im.sent[1][2]).not.toContain('w-01')
     // The ledger is append-only; reading it must not have grown a second row.
@@ -1159,7 +1159,7 @@ describe('escalation to a human', () => {
       message: 'work', from: 'pm-assistant', conversationId: 'REQ-1',
     })).rejects.toThrow(/socket closed/)
     // The failure is reported to the caller, and its owner still hears about it.
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
     expect(im.sent[0][2]).toContain('undelivered')
     expect((await service.tasks('dev-assistant', 'REQ-1'))[0])
       .toMatchObject({ state: 'failed', reason: 'undelivered', escalatedAt: expect.any(String) })
@@ -1222,7 +1222,7 @@ describe('escalation to a human', () => {
     const status = tools.find((tool: any) => tool.name === 'digital_human_status')!
     const answer = await status.execute({ to: 'dev-assistant', conversation_id: 'REQ-1' })
     expect(answer).toMatchObject({ taskId: 'w-01', state: 'blocked', reason: 'timeout' })
-    expect(im.sent).toHaveLength(1)
+    await expect.poll(() => im.sent.length).toBe(1)
   })
 
   it('stays silent when the IM service is absent', async () => {
