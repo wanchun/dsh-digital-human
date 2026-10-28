@@ -23,6 +23,31 @@ const people: Record<string, any> = {
 }
 
 /**
+ * Every key a value carries that its own output schema does not declare.
+ *
+ * The Host validates a tool result against the schema it was registered with, so a
+ * field the value carries but the schema omits fails the call at runtime — exactly
+ * the shape a test can see and a type cannot.
+ */
+function undeclaredKeys(schema: any, value: any, path = 'value'): string[] {
+  if (value === null || typeof value !== 'object') return []
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => undeclaredKeys(schema?.items, item, `${path}[${index}]`))
+  }
+  const properties = schema?.properties
+  if (!properties) return []
+  const found: string[] = []
+  for (const [key, entry] of Object.entries(value)) {
+    if (!(key in properties)) {
+      found.push(`${path}.${key}`)
+      continue
+    }
+    found.push(...undeclaredKeys(properties[key], entry, `${path}.${key}`))
+  }
+  return found
+}
+
+/**
  * The `digitalHumans` service surface the tools read, with every call recorded so a
  * tool's own argument handling is what the assertions measure.
  */
@@ -277,6 +302,47 @@ describe('the chat tools', () => {
     ])
     expect(result.detail).toContain('w-pm')
     expect(result.detail).toContain('w-qa')
+    // The Host rejects any undeclared key, so the receipt must match its own schema.
+    expect(undeclaredKeys(send.output.schema, result)).toEqual([])
+  })
+
+  it('does not hand the same work over twice when the caller retries', async () => {
+    // A send delivers before it reports: a caller that sees a failure retries a
+    // handover the peer already holds. Within a minute the retry returns the first
+    // receipt instead of assigning the same work again.
+    let delivered = 0
+    const service = serviceStub({
+      send: async (id: string, options: any) => {
+        delivered += 1
+        return {
+          sessionId: `session-${id}`,
+          conversationId: options.conversationId,
+          accepted: true,
+          task: { id: 'w-01', state: 'queued', intent: 'assign', queued: false },
+        }
+      },
+    })
+    const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
+    const first = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1' })
+    const again = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1' })
+    expect(delivered).toBe(1)
+    expect(again.taskId).toBe(first.taskId)
+    expect(again.detail).toContain('not handed over twice')
+  })
+
+  it('returns a single receipt that keeps to its own schema', async () => {
+    const service = serviceStub({
+      send: async (id: string, options: any) => ({
+        sessionId: `session-${id}`,
+        conversationId: options.conversationId,
+        accepted: true,
+        task: { id: 'w-01', state: 'queued', intent: 'assign', queued: false },
+      }),
+    })
+    const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
+    const result = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1' })
+    expect(undeclaredKeys(send.output.schema, result)).toEqual([])
+    expect(result.results[0].detail).toContain('w-01')
   })
 
   it('refuses the whole array when one target is unknown, delivering nothing', async () => {

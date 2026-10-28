@@ -23,6 +23,16 @@ import type { HumanPatch } from './types.js'
 /** Longest a `send` call waits for the peer's turn to finish. */
 const WAIT_MAX_SECONDS = 120
 
+/**
+ * How long an identical send is treated as a retry of the one before it.
+ *
+ * A send delivers before it reports, so a caller that sees a failure — a rejected
+ * result, a dropped connection — retries a handover that already reached the peer.
+ * Within this window the second call returns the first receipt instead of assigning
+ * the same work twice; past it, an identical message is a new request on purpose.
+ */
+const DUPLICATE_WINDOW_MS = 60_000
+
 const CONVERSATION_PARAM = {
   type: 'string',
   description: 'Conversation id that isolates one thread, for example a requirement or version name. Defaults to "main".',
@@ -227,6 +237,9 @@ function normalizeTool(definition) {
 export function buildHumanTools({ ctx, service, humanId, memory = true, im = true }) {
   const self = () => service.require(humanId)
   const botOf = async () => (await self()).im
+  // Fingerprint of a send that already landed, so a retry after a failed report does
+  // not assign the same work a second time.
+  const recentSends = new Map<string, { at: number; value: any }>()
 
   const send = {
     name: 'digital_human_send',
@@ -305,6 +318,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
               type: 'object',
               additionalProperties: false,
               properties: {
+                // Every per-target receipt carries its own sentence: the flat `detail`
+                // above is their join, and the Host rejects any key this object does not
+                // declare once `additionalProperties` is false.
+                detail: { type: 'string' },
                 to: { type: 'string' },
                 conversationId: { type: 'string' },
                 sessionId: { type: 'string' },
@@ -354,6 +371,26 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           )
         }
         addressed.push({ peer, address })
+      }
+      // Same targets, same thread, same words, within a minute: this is a retry of a
+      // handover that already landed, not a second piece of work.
+      const fingerprint = JSON.stringify([
+        [...targets].sort(),
+        typeof args.conversation_id === 'string' ? args.conversation_id : null,
+        typeof args.session_id === 'string' ? args.session_id : null,
+        mode ?? null,
+        note ?? null,
+        typeof args.task_id === 'string' ? args.task_id : null,
+        typeof args.deadline === 'string' ? args.deadline : null,
+        String(args.message ?? ''),
+      ])
+      const repeated = recentSends.get(fingerprint)
+      if (repeated !== undefined && Date.now() - repeated.at < DUPLICATE_WINDOW_MS) {
+        const seconds = Math.max(1, Math.round((Date.now() - repeated.at) / 1000))
+        return {
+          ...repeated.value,
+          detail: `${repeated.value.detail}\n(An identical send was accepted ${seconds}s ago; it was not handed over twice.)`,
+        }
       }
 
       /** Deliver to one peer, so each target owns its receipt and its state. */
@@ -437,7 +474,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       for (const { peer, address } of addressed) results.push(await deliver(peer, address))
       const single = results.length === 1
       const first = results[0]
-      return {
+      const receipt = {
         detail: results.map((entry) => entry.detail).join('\n'),
         // One target keeps the flat receipt it always had. Several report per target
         // in `results`, and the flat address fields say so by staying empty.
@@ -451,6 +488,12 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           ? { taskId: first.taskId, taskState: first.taskState, taskIntent: first.taskIntent }
           : {}),
       }
+      // Keep the last minute only: the map exists for a retry storm, not as history.
+      for (const [key, entry] of recentSends) {
+        if (Date.now() - entry.at >= DUPLICATE_WINDOW_MS) recentSends.delete(key)
+      }
+      recentSends.set(fingerprint, { at: Date.now(), value: receipt })
+      return receipt
     },
   }
 
