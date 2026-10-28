@@ -177,6 +177,26 @@ describe('syncBotToHuman', () => {
     expect(connection.seen).toEqual([])
   })
 
+  it('gives up on an IM route that never answers, so boot cannot hang', async () => {
+    // The Host awaits alignment while it boots. A route that is mounted but silent
+    // would hold startup open forever, which looked like "the Host never starts".
+    vi.useFakeTimers()
+    try {
+      const connection = {
+        createSharedFetchHandler: () => ({ fetch: () => new Promise<Response>(() => {}) }),
+        createPeer: () => ({ principal: { kind: 'owner' } }),
+      }
+      const pending = syncBotToHuman({ get: () => connection }, target)
+      // Let the call reach its timer before advancing the clock.
+      await vi.runAllTimersAsync()
+      const results = await pending
+      expect(results[0]).toMatchObject({ ok: false })
+      expect(results[0].reason).toContain('did not answer')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('dispatches as an in-process owner Peer, which the IM routes require', async () => {
     // dispatching without a Peer leaves `peer.principal` undefined inside the IM
     // routes, so preset and context pushes failed while the workspace push passed.

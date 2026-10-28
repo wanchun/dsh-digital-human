@@ -221,6 +221,16 @@ function channelMount(botId: string): string | undefined {
   return /^[a-z][a-z0-9-]*$/.test(channel) ? `/${channel}` : undefined
 }
 
+/**
+ * How long one alignment call may take before it is given up.
+ *
+ * The Host awaits this path while it boots, so a route that is registered but not
+ * yet answering would hold the whole startup open — the failure looked like "the
+ * Host sometimes never starts". A short bound turns that into a logged miss the
+ * retry loop already handles.
+ */
+const ALIGN_TIMEOUT_MS = 5_000
+
 /** Call one IM endpoint and normalise its answer. */
 async function call(
   handler: { fetch: (request: Request, peer?: unknown) => Promise<Response> },
@@ -231,8 +241,9 @@ async function call(
 ): Promise<ImSyncResult> {
   const rpcId = `digital-human-${endpoint}-${Date.now()}`
   let response: Response
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    response = await handler.fetch(new Request(`http://localhost${SHARED_CHANNEL}/${namespace}`, {
+    const request = new Request(`http://localhost${SHARED_CHANNEL}/${namespace}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -241,9 +252,15 @@ async function call(
         method: namespace,
         payload: { method: endpoint, payload },
       }),
-    }), peer)
+    })
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`the IM route did not answer within ${ALIGN_TIMEOUT_MS}ms`)), ALIGN_TIMEOUT_MS)
+    })
+    response = await Promise.race([handler.fetch(request, peer), expiry])
   } catch (error) {
     return { endpoint, ok: false, reason: error?.message ?? String(error) }
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
   if (response.status === 404) {
     return { endpoint, ok: false, reason: `no IM route at ${SHARED_CHANNEL}/${namespace}` }
