@@ -76,9 +76,16 @@ owner identity. Every bound bot is aligned at startup, and a failure is retried
 ### Memory
 
 One `memory.md` per digital human: `# now` (working memory, injected every step)
-and `# History` (a timeline). Above 100 KB the plugin suggests compaction: the file
-is archived to `memory/<timestamp>.md` and rebuilt.
-Tools: `memory_status` (inspect) and `memory_compact` (archive).
+and `# History` (a timeline). `# now` is injected under a 16 KB budget: an oversized
+block keeps its leading `##` sections, or the head (State) and the newest tail of one
+overlong section, and always says how much was omitted. A large file also carries the
+titles of the latest 8 History entries, never their bodies.
+Above 100 KB, or when `# now` alone passes 16 KB, the plugin suggests compaction: the
+file is archived to `memory/<timestamp>.md` and rebuilt. Above 100 KB the host also
+archives the oldest History entries on turn end, keeping the newest 60; `# now` is
+never moved automatically.
+Tools: `memory_status` (inspect, with per-section bytes) and `memory_compact`
+(archive everything, or `scope: "history"` for the timeline alone).
 
 ### Skill space
 
@@ -136,7 +143,7 @@ pm-assistant-202610131954.dh.tar.gz
 
 | Tool | Purpose | Scope |
 | --- | --- | --- |
-| `digital_human_send` | Send a message to a peer and start a turn | preset |
+| `digital_human_send` | Send a message to a peer and start a turn (`to` accepts an array: one independent work item each) | preset |
 | `digital_human_status` | Is the peer working? | preset |
 | `digital_human_stop` | Abort the peer's turn | preset |
 | `digital_human_messages` | Read the peer's replies | preset |
@@ -145,7 +152,7 @@ pm-assistant-202610131954.dh.tar.gz
 | `digital_human_usage` | Token usage over a window, optionally for another record | preset |
 | `notify_bot` | Send IM to a person or group (target names only, never chat ids) | preset |
 | `list_bot_targets` | List the targets that bot can reach | preset |
-| `memory_status` / `memory_compact` | Inspect / compact memory | preset |
+| `memory_status` / `memory_compact` | Inspect (per-section bytes) / archive all or history only | preset |
 | `digital_human` | Registry CRUD | global |
 
 ### Host surface

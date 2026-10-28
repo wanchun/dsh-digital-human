@@ -14,7 +14,7 @@
  */
 
 import { requireConversation } from './chat.js'
-import { buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
+import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
 import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
 import type { UsageRow } from './usage.js'
@@ -240,7 +240,15 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       + 'Every send is also a work item: a busy peer queues it, and a reply to its running turn '
       + 'amends the item already open. The detail says which it became.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target digital human id or display name.' },
+      to: {
+        required: true,
+        oneOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+        description: 'Target digital human id or display name, or an array of them. '
+          + 'An array assigns one independent work item per target, each with its own receipt.',
+      },
       message: { type: 'string', required: true, description: 'Message body. State the task, the acceptance criteria, and how to report back.' },
       // Required here, unlike on the reading tools: a send with no address would put
       // every subject into one shared thread.
@@ -286,106 +294,156 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           taskId: { type: 'string' },
           taskState: { type: 'string' },
           taskIntent: { type: 'string' },
+          results: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                to: { type: 'string' },
+                conversationId: { type: 'string' },
+                sessionId: { type: 'string' },
+                accepted: { type: 'boolean' },
+                finished: { type: 'boolean' },
+                taskId: { type: 'string' },
+                taskState: { type: 'string' },
+                taskIntent: { type: 'string' },
+              },
+            },
+          },
         },
       },
       render: (_args, value) => renderText(value),
     },
     async execute(args, exec) {
       const me = await self()
-      const peer = await resolvePeer(service, me, args.to)
+      const targets = Array.isArray(args.to) ? args.to : [args.to]
+      if (targets.length === 0) throw new Error('a target digital human is required')
       // Its own Session travels with the message, so the reply can come back to the
       // Session that asked for the work rather than to a shared thread name.
       const fromSession = callerSession(exec)
-      // No address means "the thread this Session is already in": the edges say which
-      // Session of the peer last asked here, and a reply goes back to it.
-      const address = await addressOf(service, humanId, peer, {
-        conversationId: typeof args.conversation_id === 'string' ? args.conversation_id : undefined,
-        sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
-        exec,
-      })
-      // Nothing to address and nothing to reply to: say what is missing rather than
-      // pour the subject into the one shared `main` thread.
-      if (address.conversationId === undefined && address.sessionId === undefined) {
-        throw new Error(
-          'conversation_id or session_id is required. A digital human is reached in a named '
-          + 'conversation, and sending without one would put every requirement into the same '
-          + 'shared thread. Use this requirement\'s conversation_id, or the session_id reported '
-          + 'by the <dsh_peer_source> block of the message being answered.',
-        )
-      }
       const mode = args.mode === 'new' || args.mode === 'amend' || args.mode === 'cancel' ? args.mode : undefined
       const note = typeof args.note === 'string' && args.note.trim() ? args.note.trim() : undefined
-      const delivered = await service.send(peer.id, {
-        conversationId: address.conversationId,
-        sessionId: address.sessionId,
-        message: args.message,
-        from: humanId,
-        fromSession,
-        ...(mode ? { mode } : {}),
-        ...(typeof args.task_id === 'string' && args.task_id.trim() ? { taskId: args.task_id.trim() } : {}),
-        ...(note ? { note } : {}),
-      })
-      const receipt = delivered.task
-      // A cancellation retires the item; there is nothing to route or to wait for.
-      if (receipt?.intent === 'cancel') {
+      // Resolve every name and every address before delivering anything: one unknown
+      // target must not leave half the recipients holding work items and the others
+      // none. Order is kept, because the caller reads the receipts in the order it
+      // wrote the targets.
+      const addressed: Array<{ peer: any; address: any }> = []
+      for (const target of targets) {
+        const peer = await resolvePeer(service, me, target)
+        // No address means "the thread this Session is already in": the edges say which
+        // Session of the peer last asked here, and a reply goes back to it.
+        const address = await addressOf(service, humanId, peer, {
+          conversationId: typeof args.conversation_id === 'string' ? args.conversation_id : undefined,
+          sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
+          exec,
+        })
+        // Nothing to address and nothing to reply to: say what is missing rather than
+        // pour the subject into the one shared `main` thread.
+        if (address.conversationId === undefined && address.sessionId === undefined) {
+          throw new Error(
+            'conversation_id or session_id is required. A digital human is reached in a named '
+            + 'conversation, and sending without one would put every requirement into the same '
+            + 'shared thread. Use this requirement\'s conversation_id, or the session_id reported '
+            + 'by the <dsh_peer_source> block of the message being answered.',
+          )
+        }
+        addressed.push({ peer, address })
+      }
+
+      /** Deliver to one peer, so each target owns its receipt and its state. */
+      const deliver = async (peer, address) => {
+        const delivered = await service.send(peer.id, {
+          conversationId: address.conversationId,
+          sessionId: address.sessionId,
+          message: args.message,
+          from: humanId,
+          fromSession,
+          ...(mode ? { mode } : {}),
+          ...(typeof args.task_id === 'string' && args.task_id.trim() ? { taskId: args.task_id.trim() } : {}),
+          ...(note ? { note } : {}),
+        })
+        const receipt = delivered.task
+        // A cancellation retires the item; there is nothing to route or to wait for.
+        if (receipt?.intent === 'cancel') {
+          return {
+            detail: `Cancelled work item ${receipt.id} for ${peer.name} (${peer.id}); nothing was delivered.`,
+            to: peer.id,
+            conversationId: delivered.conversationId,
+            sessionId: delivered.sessionId ?? '',
+            accepted: false,
+            finished: false,
+            taskId: receipt.id,
+            taskState: receipt.state,
+            taskIntent: receipt.intent,
+          }
+        }
+        // An outbound edge lets this Session find the thread again. The peer's name index
+        // is not touched: neither side has to rewrite a label to keep routing true.
+        if (fromSession && delivered.sessionId) {
+          await service.noteEdge?.(humanId, {
+            dir: 'out',
+            selfSession: fromSession,
+            peer: peer.id,
+            peerSession: delivered.sessionId,
+            conversation: delivered.conversationId,
+          })
+        }
+        const wait = Math.min(Math.max(Number(args.wait_seconds) || 0, 0), WAIT_MAX_SECONDS)
+        let finished = false
+        // A queued item runs after the turn in front of it, so waiting here could only
+        // report that turn — never the reply to this one.
+        if (wait > 0 && receipt?.queued !== true) {
+          const deadline = Date.now() + wait * 1000
+          for (;;) {
+            const state = await service.status(peer.id, delivered.sessionId ?? address.conversationId)
+            if (!state.isGenerating) {
+              finished = true
+              break
+            }
+            if (Date.now() >= deadline) break
+            await new Promise((resolve) => setTimeout(resolve, 2000))
+          }
+        }
+        const taskLine = receipt
+          ? receipt.intent === 'amend'
+            ? ` Delivered as an amendment to ${receipt.id}.`
+            : receipt.queued
+              ? ` Queued as ${receipt.id} behind the turn in progress.`
+              : ` Assigned as ${receipt.id}.`
+          : ''
         return {
-          detail: `Cancelled work item ${receipt.id} for ${peer.name} (${peer.id}); nothing was delivered.`,
+          detail: (finished
+            ? `Delivered to ${peer.name} (${peer.id}) and its turn finished. Read the reply with digital_human_messages.`
+            : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`)
+            + taskLine
+            + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`,
           to: peer.id,
           conversationId: delivered.conversationId,
-          sessionId: delivered.sessionId ?? '',
-          accepted: false,
-          finished: false,
-          taskId: receipt.id,
-          taskState: receipt.state,
-          taskIntent: receipt.intent,
+          sessionId: delivered.sessionId,
+          accepted: delivered.accepted,
+          finished,
+          ...(receipt ? { taskId: receipt.id, taskState: receipt.state, taskIntent: receipt.intent } : {}),
         }
       }
-      // An outbound edge lets this Session find the thread again. The peer's name index
-      // is not touched: neither side has to rewrite a label to keep routing true.
-      if (fromSession && delivered.sessionId) {
-        await service.noteEdge?.(humanId, {
-          dir: 'out',
-          selfSession: fromSession,
-          peer: peer.id,
-          peerSession: delivered.sessionId,
-          conversation: delivered.conversationId,
-        })
-      }
-      const wait = Math.min(Math.max(Number(args.wait_seconds) || 0, 0), WAIT_MAX_SECONDS)
-      let finished = false
-      // A queued item runs after the turn in front of it, so waiting here could only
-      // report that turn — never the reply to this one.
-      if (wait > 0 && receipt?.queued !== true) {
-        const deadline = Date.now() + wait * 1000
-        for (;;) {
-          const state = await service.status(peer.id, delivered.sessionId ?? address.conversationId)
-          if (!state.isGenerating) {
-            finished = true
-            break
-          }
-          if (Date.now() >= deadline) break
-          await new Promise((resolve) => setTimeout(resolve, 2000))
-        }
-      }
-      const taskLine = receipt
-        ? receipt.intent === 'amend'
-          ? ` Delivered as an amendment to ${receipt.id}.`
-          : receipt.queued
-            ? ` Queued as ${receipt.id} behind the turn in progress.`
-            : ` Assigned as ${receipt.id}.`
-        : ''
+
+      const results: any[] = []
+      for (const { peer, address } of addressed) results.push(await deliver(peer, address))
+      const single = results.length === 1
+      const first = results[0]
       return {
-        detail: (finished
-          ? `Delivered to ${peer.name} (${peer.id}) and its turn finished. Read the reply with digital_human_messages.`
-          : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`)
-          + taskLine
-          + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`,
-        to: peer.id,
-        conversationId: delivered.conversationId,
-        sessionId: delivered.sessionId,
-        accepted: delivered.accepted,
-        finished,
-        ...(receipt ? { taskId: receipt.id, taskState: receipt.state, taskIntent: receipt.intent } : {}),
+        detail: results.map((entry) => entry.detail).join('\n'),
+        // One target keeps the flat receipt it always had. Several report per target
+        // in `results`, and the flat address fields say so by staying empty.
+        to: single ? first.to : results.map((entry) => entry.to).join(', '),
+        conversationId: single ? first.conversationId : '',
+        sessionId: single ? first.sessionId : '',
+        accepted: results.every((entry) => entry.accepted),
+        finished: results.every((entry) => entry.finished),
+        results,
+        ...(single && first.taskId
+          ? { taskId: first.taskId, taskState: first.taskState, taskIntent: first.taskIntent }
+          : {}),
       }
     },
   }
@@ -838,7 +896,8 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
   const memoryStatus = {
     name: 'memory_status',
     description:
-      'Report the structure of your own memory.md: size, headings, archives, and whether compaction is needed. '
+      'Report the structure of your own memory.md: size, headings, the bytes of each section, archives, and '
+      + 'whether compaction is needed. Sections over the 16KB `# now` injection budget are marked. '
       + 'The `# now` block is already loaded into your prompt, so use this only to check structure after editing, '
       + 'or to decide whether to compact.',
     parameters: {},
@@ -852,13 +911,30 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
   const memoryCompact = {
     name: 'memory_compact',
     description:
-      'Archive your memory.md into memory/<timestamp>.md and start a fresh one. '
-      + 'Call this only when memory_status reports that compaction is needed, then rewrite `# now` from the archive.',
-    parameters: {},
+      'Archive memory.md into memory/<timestamp>.md. With scope "all" (the default) the whole file is '
+      + 'archived and a fresh one started; with scope "history" only the `# History` entries move and '
+      + '`# now` is left in place. Use "history" when the timeline is what grew, and "all" when memory_status '
+      + 'reports that compaction is needed.',
+    parameters: {
+      scope: {
+        type: 'string',
+        enum: ['all', 'history'],
+        description: 'What to archive. Defaults to "all"; "history" keeps `# now` and moves only the timeline.',
+      },
+    },
     output: TEXT_OUTPUT,
-    async execute() {
+    async execute(args) {
       const me = await self()
-      const archived = compactMemory(memoryPaths(service.store, me.id))
+      const paths = memoryPaths(service.store, me.id)
+      if (args.scope === 'history') {
+        const archived = archiveHistory(paths, { keep: 0 })
+        return {
+          detail: archived
+            ? `Archived ${archived.moved} \`# History\` entries to ${archived.archive}; \`# now\` is unchanged.`
+            : 'There is no \`# History\` entry to archive yet.',
+        }
+      }
+      const archived = compactMemory(paths)
       return {
         detail: archived
           ? `Archived to ${archived} and started a fresh memory.md. Read the archive and rewrite \`# now\` from it.`

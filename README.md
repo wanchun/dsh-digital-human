@@ -81,8 +81,10 @@ Agent preset（`dh-<id>`），所以新增、修改、停用、删除数字人�
 ### 记忆
 
 每个数字人一份 `memory.md`：`# now`（工作记忆，每轮注入）+ `# History`（时间线）。
-超过 100KB 提示压缩：归档到 `memory/<时间戳>.md` 并重建。
-工具：`memory_status`（看结构）、`memory_compact`（归档）。
+`# now` 的注入上限是 16KB：超出按 `##` 边界保留前几节；单节超长则保留头部 State 与尾部最新内容，中间省略并写明省略量。大文件另注入最近 8 条 History 标题，不带正文。
+整份超过 100KB 或 `# now` 超过 16KB 时提示压缩：归档到 `memory/<时间戳>.md` 并重建。
+文件超过 100KB 时，宿主在回合结束自动把最旧的 History 条目归档到 `memory/<时间戳>.md`（保留最近 60 条）；`# now` 永不自动搬。
+工具：`memory_status`（看结构与分节字节）、`memory_compact`（整份归档，或只用 `scope: "history"` 归档时间线）。
 
 ### 技能空间
 
@@ -135,7 +137,7 @@ pm-assistant-202610131954.dh.tar.gz
 
 | 工具 | 作用 | 注册范围 |
 | --- | --- | --- |
-| `digital_human_send` | 给同伴发消息并起一轮 | 预设内 |
+| `digital_human_send` | 给同伴发消息并起一轮（`to` 可传数组，展开成 N 条独立工作项） | 预设内 |
 | `digital_human_status` | 同伴在干活吗 | 预设内 |
 | `digital_human_stop` | 中止同伴的那一轮 | 预设内 |
 | `digital_human_messages` | 读同伴回复 | 预设内 |
@@ -145,7 +147,7 @@ pm-assistant-202610131954.dh.tar.gz
 | `notify_bot` | 给人发 IM（`to` 必填：已登记目标或原始 chatId） | 预设内 |
 | `list_bot_targets` | 列出可投递目标 | 预设内 |
 | `set_session_title` | 给自己的会话改名（不依赖 IM bot） | 预设内 |
-| `memory_status` / `memory_compact` | 记忆结构 / 压缩 | 预设内 |
+| `memory_status` / `memory_compact` | 记忆结构（含分节字节）/ 整份或仅时间线归档 | 预设内 |
 | `digital_human` | 注册表增删改查 | 全局 |
 
 ### 宿主能力
