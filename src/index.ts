@@ -666,6 +666,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       },
     ) {
       const human = await service.require(idOrName)
+      // A disabled record cannot run: say so before the ledger records a handover
+      // nobody will ever pick up.
+      if (!human.enabled) throw new Error(`digital human "${human.id}" is disabled`)
       const conversation = await conversationFor(human, { conversationId, sessionId })
       const delivery = {
         conversationId,

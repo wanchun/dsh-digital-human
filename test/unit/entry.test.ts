@@ -954,6 +954,73 @@ describe('the work-item ledger', () => {
     const tasks = await second.provided.get('digitalHumans').tasks('dev-assistant', 'REQ-1')
     expect(tasks[0]).toMatchObject({ id: 'w-01', state: 'stopped', reason: 'restart' })
   })
+
+  // The extremes a real handover rarely reaches. Each one is a way the queue could
+  // close the wrong item, close one twice, or leave one closed by nobody.
+  it('closes nothing when a second turn ends in the same Session', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    const sent = await service.send('dev-assistant', {
+      message: 'build REQ-1', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    emit(platform, sent.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+
+    const tasks = await service.tasks('dev-assistant', 'REQ-1')
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]).toMatchObject({ state: 'done', reason: 'completed' })
+  })
+
+  it('leaves the queue alone when an unrelated Session ends a turn', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    const sent = await service.send('dev-assistant', {
+      message: 'build REQ-1', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    emit(platform, sent.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    emit(platform, 'session-unknown', 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+
+    const tasks = await service.tasks('dev-assistant', 'REQ-1')
+    expect(tasks[0].state).toBe('in_progress')
+  })
+
+  it('leaves a cancelled item cancelled when its turn ends later', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    const sent = await service.send('dev-assistant', {
+      message: 'build REQ-1', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    emit(platform, sent.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    await service.send('dev-assistant', {
+      message: 'cancel it', from: 'pm-assistant', conversationId: 'REQ-1', mode: 'cancel',
+    })
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+
+    const tasks = await service.tasks('dev-assistant', 'REQ-1')
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0].state).toBe('cancelled')
+  })
+
+  it('records nothing for a record that is disabled', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: [{ id: 'off', name: 'Off', enabled: false, systemPrompt: 'x', memory: false }] })
+    const service = platform.provided.get('digitalHumans')
+    await expect(service.send('off', {
+      message: 'build', from: 'pm-assistant', conversationId: 'REQ-1',
+    })).rejects.toThrow(/disabled/)
+    await expect(service.tasks('off')).resolves.toHaveLength(0)
+  })
 })
 describe('escalation to a human', () => {
   /** Let the fire-and-forget ledger writes settle. */
@@ -1238,7 +1305,9 @@ describe('escalation to a human', () => {
       const service = platform.provided.get('digitalHumans')
       await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
       expect(im.sent).toEqual([])
-      expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('escalat'))).toBe(true)
+      // The settle runs after the turn boundary, so give it a moment before the log.
+      await expect.poll(() => warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('escalat')))
+        .toBe(true)
     }
   })
 
