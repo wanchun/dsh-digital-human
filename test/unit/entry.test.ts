@@ -990,6 +990,30 @@ describe('escalation to a human', () => {
     return sent
   }
 
+  it('recovers the work item owner when the reverse index was never primed', async () => {
+    // A restarted Host whose startup read was missed used to drop turn events for the
+    // Session: the item stayed queued forever. The header names the preset, so the
+    // owner is recoverable at the event.
+    const platform = makeCtx({ dshIm: imStub() })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    const sent = await service.send('dev-assistant', {
+      message: 'work', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    service.chat.forget('dev-assistant')
+    expect(service.chat.ownerOf(sent.sessionId)).toBeUndefined()
+
+    const handler = platform.listeners.find((entry: any) => entry.event === 'session/event')!.handler
+    await handler(
+      { id: sent.sessionId, header: { agentPreset: 'dh-dev-assistant' } },
+      { type: 'turn/start', data: { turn: 1 } },
+    )
+    await tick()
+
+    const rows = await service.tasks('dev-assistant')
+    expect(rows.at(-1).state).toBe('in_progress')
+  })
+
   it('direct-messages the owner when a work item fails', async () => {
     const im = imStub()
     const platform = makeCtx({ dshIm: im })

@@ -779,6 +779,21 @@ describe('the conversation index', () => {
     expect(restarted.ownerOf(delivered.sessionId)).toEqual({ humanId: 'pm', conversationId: 'main' })
   })
 
+  it('recovers the owner of a Session no startup read had primed', async () => {
+    // A Host that restarted with an empty reverse index used to drop every event for
+    // this Session: no mailbox entry, no turn boundary, an item that never closed.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const delivered = await chat.deliver(human(), { message: 'a', conversationId: 'REQ-1' })
+
+    const restarted = chatWith(controller).chat
+    expect(restarted.ownerOf(delivered.sessionId)).toBeUndefined()
+
+    const adopted = await restarted.adopt(delivered.sessionId, 'pm')
+    expect(adopted).toEqual({ humanId: 'pm', conversationId: 'REQ-1' })
+    expect(restarted.ownerOf(delivered.sessionId)).toEqual({ humanId: 'pm', conversationId: 'REQ-1' })
+  })
+
   it('survives a session index that is malformed', async () => {
     const controller = controllerStub()
     await store.ensureDir(store.dir('pm'))

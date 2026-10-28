@@ -434,6 +434,22 @@ export class HumanChat {
     for (const human of humans) await this.#loadEdges(human)
   }
 
+  /**
+   * Recognise a Session as one digital human's, at the moment an event names it.
+   *
+   * `prime` is the normal path, but a Host that restarted while the reverse index was
+   * empty would otherwise drop every event for that Session: no mailbox entry, no turn
+   * boundary, and an in-progress work item that never closes. The Session header names
+   * the preset, which names the record; the name index says which thread it belongs to.
+   * Recovering the mapping here keeps one missed startup read from silencing a record.
+   */
+  async adopt(sessionId, humanId): Promise<{ humanId: string; conversationId: string }> {
+    const known = await this.#conversationOf(humanId, sessionId)
+    const entry = { humanId, conversationId: known ?? sessionId }
+    this.#bySession.set(sessionId, entry)
+    return entry
+  }
+
   /** Read one human's edge log back into memory. */
   async #loadEdges(human: Human) {
     const path = this.#store.edgePath(human.id)

@@ -178,6 +178,14 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   /** human id -> generated preset id, for enabled records only. */
   const activePresets = new Map<string, string>()
   /**
+   * generated preset id -> human id.
+   *
+   * Its job is the event nobody primed for: a Session's header names the preset, and
+   * that is enough to recognise whose turn just started without trusting a startup
+   * read that may have been missed.
+   */
+  const humanByPreset = new Map<string, string>()
+  /**
    * generated preset id -> the permission preset its sessions run under.
    *
    * A session announces its creation synchronously, so the lookup that decides
@@ -272,6 +280,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       }
     }
     activePresets.clear()
+    humanByPreset.clear()
     permissionByPreset.clear()
     boundByPreset.clear()
     // Cleared with the others: a stale outcome would report a bot as aligned after
@@ -350,6 +359,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       try {
         disposers.push(await ctx.agentPresets.register(definition))
         activePresets.set(record.id, definition.id)
+        humanByPreset.set(definition.id, record.id)
       } catch (error) {
         log(`preset "${definition.id}" failed to register: ${error.message}`)
       }
@@ -1131,29 +1141,50 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       grantPermission(session, event.data?.agentPreset)
       return
     }
-    const owner = chat.ownerOf(sessionId)
-    if (!owner) return
+    // The reverse index is the fast path. When it is empty — a startup read that was
+    // missed, a Session it does not name — the header's preset still says whose turn
+    // this is, so the mapping is recovered instead of the event being dropped.
+    const known = async () => {
+      const primed = chat.ownerOf(sessionId)
+      if (primed) return primed
+      const humanId = humanByPreset.get(session?.header?.agentPreset)
+      if (!humanId) return undefined
+      try {
+        return await chat.adopt(sessionId, humanId)
+      } catch (error) {
+        log(`could not recognise session ${sessionId}: ${error.message}`)
+        return undefined
+      }
+    }
     // The Host's turn boundaries are the only authoritative source of a work item's
     // state: a model reporting its own success is not a completion signal.
     if (kind === 'turn/start') {
-      ledger.start(owner.humanId, { conversation: owner.conversationId, sessionId })
-        .catch((error) => log(`work item start failed for ${sessionId}: ${error.message}`))
+      void known().then((owner) => {
+        if (!owner) return undefined
+        return ledger.start(owner.humanId, { conversation: owner.conversationId, sessionId })
+      }).catch((error) => log(`work item start failed for ${sessionId}: ${error.message}`))
       return
     }
     if (kind === 'turn/end') {
-      // Only this turn's own item is closed; the queue behind it is untouched.
-      settleTurn(owner.humanId, sessionId, event.data?.reason)
-        .catch((error) => log(`work item end failed for ${sessionId}: ${error.message}`))
-      // The same boundary reclaims the timeline, so memory maintenance shares the one
-      // subscription instead of adding a timer of its own.
-      reclaimHistory(owner.humanId)
+      void known().then((owner) => {
+        if (!owner) return undefined
+        // Only this turn's own item is closed; the queue behind it is untouched.
+        // The same boundary reclaims the timeline, so memory maintenance shares the
+        // one subscription instead of adding a timer of its own.
+        reclaimHistory(owner.humanId)
+        return settleTurn(owner.humanId, sessionId, event.data?.reason)
+      }).catch((error) => log(`work item end failed for ${sessionId}: ${error.message}`))
       return
     }
     // Only the assistant side is mirrored. An inbound message is already written
     // by `deliver`, and a `user/message` event also carries injected
     // system-reminders and runtime-context snapshots, which are not conversation.
     if (kind === 'assistant/message') {
-      Promise.resolve(chat.noteAssistant(sessionId, event.data?.message ?? event.data)).catch((error) => log(`mailbox write failed: ${error.message}`))
+      // Same recovery: a reply whose Session was never primed would otherwise go
+      // unlogged, and the thread would lose the half of the conversation it wrote.
+      void known().then((owner) => (owner
+        ? chat.noteAssistant(sessionId, event.data?.message ?? event.data)
+        : undefined)).catch((error) => log(`mailbox write failed: ${error.message}`))
     }
   }, { global: true })
 
