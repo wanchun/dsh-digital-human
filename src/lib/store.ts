@@ -34,9 +34,16 @@ function requireTarget(value: unknown, label: string): string {
   return value
 }
 
-/** Default registry root when the plugin row configures none. */
+/**
+ * Default registry root when the plugin row configures none.
+ *
+ * `DSH_HOME` wins when it is set, so a second Host — a verification sandbox, a test
+ * run — keeps its digital humans to itself instead of reading and writing the ones the
+ * everyday Host owns.
+ */
 export function defaultHome() {
-  return join(homedir(), '.dsh', 'digital-human')
+  const root = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+  return join(root, 'digital-human')
 }
 
 /** Fail loud on identifiers that would escape their directory or confuse IM targets. */

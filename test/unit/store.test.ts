@@ -39,6 +39,19 @@ describe('defaultHome', () => {
   it('sits under the harness home', () => {
     expect(defaultHome()).toContain('digital-human')
   })
+
+  it('follows DSH_HOME so a second host keeps its own records', () => {
+    // Without this a sandbox or a test host reads and writes the everyday host's
+    // digital humans — the one thing an isolated run must not do.
+    const previous = process.env.DSH_HOME
+    process.env.DSH_HOME = '/tmp/dsh-verify'
+    try {
+      expect(defaultHome()).toBe('/tmp/dsh-verify/digital-human')
+    } finally {
+      if (previous === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previous
+    }
+  })
 })
 
 describe('normalizeHuman', () => {

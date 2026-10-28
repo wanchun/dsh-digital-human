@@ -95,7 +95,7 @@ export async function ensureDefaultWorkspace(
  *
  * @returns {Promise<{aliases: Record<string, string>, workspaces: Record<string, string>}>}
  */
-export async function readBotMeta(dshRoot = join(homedir(), '.dsh')) {
+export async function readBotMeta(dshRoot = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')) {
   const aliases: Record<string, string> = {}
   const workspaces: Record<string, string> = {}
   const root = join(dshRoot, 'integrations')
