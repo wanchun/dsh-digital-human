@@ -279,6 +279,11 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         type: 'string',
         description: 'One line recorded on a new work item, visible in digital_human_status.',
       },
+      deadline: {
+        type: 'string',
+        description: 'When this handover is due, as an ISO 8601 timestamp. Omit it to use the '
+          + 'record\'s escalation window (30 minutes unless configured).',
+      },
     },
     output: {
       schema: {
@@ -362,6 +367,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           ...(mode ? { mode } : {}),
           ...(typeof args.task_id === 'string' && args.task_id.trim() ? { taskId: args.task_id.trim() } : {}),
           ...(note ? { note } : {}),
+          ...(typeof args.deadline === 'string' && args.deadline.trim() ? { deadline: args.deadline.trim() } : {}),
         })
         const receipt = delivered.task
         // A cancellation retires the item; there is nothing to route or to wait for.

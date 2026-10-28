@@ -322,6 +322,16 @@ describe('HumanStore writes', () => {
     await expect(store.remove('a')).rejects.toThrow()
   })
 
+  it('persists the escalation window and drops one no window can use', async () => {
+    await store.upsert(record({ id: 'a', escalationDeadlineMinutes: 5 }))
+    expect((await store.get('a'))?.escalationDeadlineMinutes).toBe(5)
+    expect(JSON.parse(await readFile(store.configPath('a'), 'utf8')).escalationDeadlineMinutes).toBe(5)
+    await store.upsert(record({ id: 'b', escalationDeadlineMinutes: 0 }))
+    expect((await store.get('b'))?.escalationDeadlineMinutes).toBeUndefined()
+    await store.upsert(record({ id: 'c', escalationDeadlineMinutes: 'soon' as unknown as number }))
+    expect((await store.get('c'))?.escalationDeadlineMinutes).toBeUndefined()
+  })
+
   it('persists the session mode in the config file', async () => {
     await store.upsert(record({ id: 'qa', sessionMode: 'single' }))
     expect((await store.get('qa'))?.sessionMode).toBe('single')
