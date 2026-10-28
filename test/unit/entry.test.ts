@@ -811,3 +811,145 @@ describe('the preset-scoped tools row', () => {
     expect(platform.tools.has('digital_human_send')).toBe(true)
   })
 })
+
+describe('the work-item ledger', () => {
+  /** Let the fire-and-forget ledger writes settle. */
+  const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms))
+  const eventOf = (platform: any) => platform.listeners.find((entry: any) => entry.event === 'session/event')!.handler
+  const emit = (platform: any, sessionId: string, type: string, data: any) => eventOf(platform)({ id: sessionId }, { type, data })
+
+  it('assigns a work item and closes it when the turn ends', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    const sent = await service.send('dev-assistant', {
+      message: 'build REQ-1', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    expect(sent.task).toMatchObject({ id: 'w-01', state: 'queued', intent: 'assign', queued: false })
+    emit(platform, sent.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    expect(await service.tasks('dev-assistant', 'REQ-1')).toEqual([
+      expect.objectContaining({ id: 'w-01', state: 'in_progress', owner: sent.sessionId }),
+    ])
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    expect(await service.tasks('dev-assistant', 'REQ-1')).toEqual([
+      expect.objectContaining({ id: 'w-01', state: 'done', reason: 'completed', endedAt: expect.any(String) }),
+    ])
+  })
+
+  it('queues a second assignment while the conversation is busy, then runs it', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    const first = await service.send('dev-assistant', {
+      message: 'one', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    const second = await service.send('dev-assistant', {
+      message: 'two', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    expect(second.task).toMatchObject({ id: 'w-02', state: 'queued', queued: true })
+    // The queued task must not steer the turn in progress: it is the next turn.
+    expect(platform.prompts.at(-1)!.mode).toBe('queue')
+    emit(platform, first.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    emit(platform, first.sessionId, 'turn/end', { reason: { kind: 'error', error: { code: 'BOOM' } } })
+    await tick()
+    const tasks = await service.tasks('dev-assistant', 'REQ-1')
+    expect(tasks.map((task: any) => [task.id, task.state, task.reason])).toEqual([
+      ['w-01', 'failed', 'BOOM'],
+      ['w-02', 'in_progress', undefined],
+    ])
+  })
+
+  it('amends the running item when the delivery answers its question', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    const task = await service.send('dev-assistant', {
+      message: 'build REQ-1', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    emit(platform, task.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    // The running turn asks a question, which lands in the PM's own Session.
+    const question = await service.send('pm-assistant', {
+      message: 'which environment?', from: 'dev-assistant', fromSession: task.sessionId, conversationId: 'REQ-1',
+    })
+    const answer = await service.send('dev-assistant', {
+      message: 'M1', from: 'pm-assistant', fromSession: question.sessionId, conversationId: 'REQ-1',
+    })
+    expect(answer.task).toMatchObject({ id: 'w-01', intent: 'amend', state: 'in_progress' })
+    const tasks = await service.tasks('dev-assistant', 'REQ-1')
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0].amendments).toEqual([{ at: expect.any(String), text: 'M1' }])
+    // An amendment goes into the running turn; it is not queued behind it.
+    expect(platform.prompts.at(-1)!.mode).toBe('steer')
+  })
+
+  it('refuses an explicit amendment when the anchor is ambiguous', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.send('dev-assistant', { message: 'one', from: 'pm-assistant', conversationId: 'REQ-1' })
+    await service.send('dev-assistant', { message: 'two', from: 'pm-assistant', conversationId: 'REQ-1' })
+    await expect(service.send('dev-assistant', {
+      message: 'more', from: 'pm-assistant', conversationId: 'REQ-1', mode: 'amend',
+    })).rejects.toThrow(/task_id/)
+    // Naming the item resolves the ambiguity.
+    const named = await service.send('dev-assistant', {
+      message: 'more', from: 'pm-assistant', conversationId: 'REQ-1', mode: 'amend', taskId: 'w-02',
+    })
+    expect(named.task).toMatchObject({ id: 'w-02', intent: 'amend' })
+  })
+
+  it('assigns instead of amending when the send is explicitly new', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    const task = await service.send('dev-assistant', {
+      message: 'build REQ-1', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    emit(platform, task.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    await service.send('pm-assistant', {
+      message: 'which environment?', from: 'dev-assistant', fromSession: task.sessionId, conversationId: 'REQ-1',
+    })
+    const fresh = await service.send('dev-assistant', {
+      message: 'also do this', from: 'pm-assistant', conversationId: 'REQ-1', mode: 'new',
+    })
+    expect(fresh.task).toMatchObject({ id: 'w-02', intent: 'assign', queued: true })
+    expect(await service.tasks('dev-assistant', 'REQ-1')).toHaveLength(2)
+  })
+
+  it('cancels a work item without delivering anything', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.send('dev-assistant', { message: 'one', from: 'pm-assistant', conversationId: 'REQ-1' })
+    const prompts = platform.prompts.length
+    const cancelled = await service.send('dev-assistant', {
+      message: 'never mind', from: 'pm-assistant', conversationId: 'REQ-1', mode: 'cancel',
+    })
+    expect(cancelled).toMatchObject({
+      accepted: false, conversationId: 'REQ-1', task: { id: 'w-01', state: 'cancelled', intent: 'cancel' },
+    })
+    expect(platform.prompts).toHaveLength(prompts)
+    expect((await service.tasks('dev-assistant', 'REQ-1'))[0])
+      .toMatchObject({ state: 'cancelled', endedAt: expect.any(String) })
+  })
+
+  it('stops a work item whose turn died with the previous process', async () => {
+    const first = makeCtx()
+    await applyPlatform(first.ctx, { home, humans: SEED_HUMANS })
+    const sent = await first.provided.get('digitalHumans').send('dev-assistant', {
+      message: 'build REQ-1', from: 'pm-assistant', conversationId: 'REQ-1',
+    })
+    emit(first, sent.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    // A restart: the new Host knows nothing about that turn, so nothing will end it.
+    const second = makeCtx()
+    await applyPlatform(second.ctx, { home, humans: SEED_HUMANS })
+    const tasks = await second.provided.get('digitalHumans').tasks('dev-assistant', 'REQ-1')
+    expect(tasks[0]).toMatchObject({ id: 'w-01', state: 'stopped', reason: 'restart' })
+  })
+})

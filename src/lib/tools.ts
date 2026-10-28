@@ -197,7 +197,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       + 'then read it with digital_human_messages, or poll with digital_human_status. '
       + 'Omit the address to reply in the thread this Session already shares with the peer — the '
       + 'transport sends it back to the Session that asked. Pass session_id to choose a Session, '
-      + 'or conversation_id to open a new thread.',
+      + 'or conversation_id to open a new thread. '
+      + 'Every send is also a work item: a busy peer queues it, and a reply to its running turn '
+      + 'amends the item already open. The detail says which it became.',
     parameters: {
       to: { type: 'string', required: true, description: 'Target digital human id or display name.' },
       message: { type: 'string', required: true, description: 'Message body. State the task, the acceptance criteria, and how to report back.' },
@@ -214,6 +216,22 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         type: 'number',
         description: `Wait up to this many seconds for the target to finish its turn, at most ${WAIT_MAX_SECONDS}. Defaults to 0 (return as soon as the message is accepted).`,
       },
+      mode: {
+        type: 'string',
+        enum: ['new', 'amend', 'cancel'],
+        description:
+          'What this send means for the work item. "new" assigns a new item even when the peer is busy; '
+          + '"amend" appends to the one open item of the conversation; "cancel" retires it and delivers nothing. '
+          + 'Omit it to let the transport decide: busy queues a new item, a reply to the running turn amends it.',
+      },
+      task_id: {
+        type: 'string',
+        description: 'The work item to amend or cancel. Required when the conversation has more than one open item.',
+      },
+      note: {
+        type: 'string',
+        description: 'One line recorded on a new work item, visible in digital_human_status.',
+      },
     },
     output: {
       schema: {
@@ -226,6 +244,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           sessionId: { type: 'string', required: true },
           accepted: { type: 'boolean', required: true },
           finished: { type: 'boolean', required: true },
+          taskId: { type: 'string' },
+          taskState: { type: 'string' },
+          taskIntent: { type: 'string' },
         },
       },
       render: (_args, value) => renderText(value),
@@ -253,13 +274,33 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           + 'by the <dsh_peer_source> block of the message being answered.',
         )
       }
+      const mode = args.mode === 'new' || args.mode === 'amend' || args.mode === 'cancel' ? args.mode : undefined
+      const note = typeof args.note === 'string' && args.note.trim() ? args.note.trim() : undefined
       const delivered = await service.send(peer.id, {
         conversationId: address.conversationId,
         sessionId: address.sessionId,
         message: args.message,
         from: humanId,
         fromSession,
+        ...(mode ? { mode } : {}),
+        ...(typeof args.task_id === 'string' && args.task_id.trim() ? { taskId: args.task_id.trim() } : {}),
+        ...(note ? { note } : {}),
       })
+      const receipt = delivered.task
+      // A cancellation retires the item; there is nothing to route or to wait for.
+      if (receipt?.intent === 'cancel') {
+        return {
+          detail: `Cancelled work item ${receipt.id} for ${peer.name} (${peer.id}); nothing was delivered.`,
+          to: peer.id,
+          conversationId: delivered.conversationId,
+          sessionId: delivered.sessionId ?? '',
+          accepted: false,
+          finished: false,
+          taskId: receipt.id,
+          taskState: receipt.state,
+          taskIntent: receipt.intent,
+        }
+      }
       // An outbound edge lets this Session find the thread again. The peer's name index
       // is not touched: neither side has to rewrite a label to keep routing true.
       if (fromSession && delivered.sessionId) {
@@ -273,7 +314,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       }
       const wait = Math.min(Math.max(Number(args.wait_seconds) || 0, 0), WAIT_MAX_SECONDS)
       let finished = false
-      if (wait > 0) {
+      // A queued item runs after the turn in front of it, so waiting here could only
+      // report that turn — never the reply to this one.
+      if (wait > 0 && receipt?.queued !== true) {
         const deadline = Date.now() + wait * 1000
         for (;;) {
           const state = await service.status(peer.id, delivered.sessionId ?? address.conversationId)
@@ -285,23 +328,32 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           await new Promise((resolve) => setTimeout(resolve, 2000))
         }
       }
+      const taskLine = receipt
+        ? receipt.intent === 'amend'
+          ? ` Delivered as an amendment to ${receipt.id}.`
+          : receipt.queued
+            ? ` Queued as ${receipt.id} behind the turn in progress.`
+            : ` Assigned as ${receipt.id}.`
+        : ''
       return {
         detail: (finished
           ? `Delivered to ${peer.name} (${peer.id}) and its turn finished. Read the reply with digital_human_messages.`
           : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`)
+          + taskLine
           + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`,
         to: peer.id,
         conversationId: delivered.conversationId,
         sessionId: delivered.sessionId,
         accepted: delivered.accepted,
         finished,
+        ...(receipt ? { taskId: receipt.id, taskState: receipt.state, taskIntent: receipt.intent } : {}),
       }
     },
   }
 
   const status = {
     name: 'digital_human_status',
-    description: 'Report whether another digital human is still working on a conversation.',
+    description: 'Report whether another digital human is still working on a conversation, and the latest work item of it: its state, reason, end time, and note.',
     parameters: {
       to: { type: 'string', required: true, description: 'Target digital human id or display name.' },
       conversation_id: CONVERSATION_PARAM,
@@ -316,6 +368,11 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           conversationId: { type: 'string', required: true },
           exists: { type: 'boolean', required: true },
           isGenerating: { type: 'boolean', required: true },
+          taskId: { type: 'string' },
+          state: { type: 'string' },
+          reason: { type: 'string' },
+          endedAt: { type: 'string' },
+          note: { type: 'string' },
         },
       },
       render: (_args, value) => renderText(value),
@@ -327,14 +384,33 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         exec,
       })
       const state = await service.status(peer.id, address.sessionId ?? address.conversationId)
+      // The turn says whether someone is working; the ledger says what came of the
+      // work. A failure is only visible there, long after the turn is gone.
+      const conversation = state.conversationId ?? address.conversationId ?? address.sessionId
+      const tasks = await service.tasks(peer.id, conversation)
+      const latest = tasks[tasks.length - 1]
+      const taskLine = latest
+        ? ` Last work item ${latest.id}: ${latest.state}${latest.reason ? ` (${latest.reason})` : ''}`
+          + `${latest.endedAt ? `, ended ${latest.endedAt}` : ''}${latest.note ? `. Note: ${latest.note}` : ''}.`
+        : ''
       return {
-        detail: state.exists
+        detail: (state.exists
           ? `${peer.name} (${peer.id}) ${state.isGenerating ? 'is still working' : 'is idle'} on conversation "${state.conversationId}".`
-          : `${peer.name} (${peer.id}) has no conversation "${state.conversationId}" yet.`,
+          : `${peer.name} (${peer.id}) has no conversation "${state.conversationId}" yet.`)
+          + taskLine,
         to: peer.id,
         conversationId: state.conversationId,
         exists: state.exists,
         isGenerating: state.isGenerating,
+        ...(latest
+          ? {
+            taskId: latest.id,
+            state: latest.state,
+            ...(latest.reason ? { reason: latest.reason } : {}),
+            ...(latest.endedAt ? { endedAt: latest.endedAt } : {}),
+            ...(latest.note ? { note: latest.note } : {}),
+          }
+          : {}),
       }
     },
   }
