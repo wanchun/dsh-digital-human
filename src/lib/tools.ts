@@ -15,6 +15,9 @@
 
 import { requireConversation } from './chat.js'
 import { buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
+import { presetIdOf } from './presets.js'
+import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
+import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
 
 /** Longest a `send` call waits for the peer's turn to finish. */
@@ -39,6 +42,42 @@ async function resolvePeer(service, self, reference) {
     throw new Error(`${self.id} may only message ${peers.join(', ')}; ${peer.id} is not a peer`)
   }
   return peer
+}
+
+/**
+ * The record a usage call names.
+ *
+ * Omitted means the caller itself, which is the common case and needs no id in the
+ * prompt. Unlike a message, a reading may name any record the registry knows: it
+ * writes nothing, and the caller can already see the roster.
+ */
+async function usageTarget(service, self, reference) {
+  const wanted = String(reference ?? '').trim()
+  if (!wanted) return self
+  const found = await service.resolve(wanted)
+  if (!found) throw new Error(`unknown digital human: ${JSON.stringify(reference)}`)
+  return found
+}
+
+/**
+ * Conversation names by Session id, for labelling the report.
+ *
+ * A missing name is only a plainer line: the measurement itself never depends on
+ * the chat index, so an unreadable one must not turn a report into an error.
+ */
+async function threadNames(service, humanId) {
+  const names = new Map<string, string>()
+  try {
+    const found = await service.chat?.addresses?.(humanId)
+    for (const entry of found ?? []) {
+      if (typeof entry?.sessionId === 'string' && typeof entry?.conversationId === 'string') {
+        names.set(entry.sessionId, entry.conversationId)
+      }
+    }
+  } catch {
+    // The report still measures every session; only its labels stay ids.
+  }
+  return names
 }
 
 /**
@@ -550,6 +589,107 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
   }
 
   /**
+   * Aggregate token usage across one digital human's Sessions.
+   *
+   * The reading replays durable logs, so it can be asked at any time and costs no
+   * model call. Nothing is written or cached: a saved usage table would be a second
+   * truth that drifts from the logs it was derived from.
+   */
+  const usage = {
+    name: 'digital_human_usage',
+    description:
+      'Report token usage for one digital human over a time window: the total and one line per session. '
+      + 'Every figure replays the durable session log; no model is called and nothing is written. '
+      + 'Defaults to you and to the last 7 days.',
+    parameters: {
+      days: { type: 'number', description: 'Days back to include. Defaults to 7, at most 365.' },
+      since: {
+        type: 'string',
+        description: 'Start of the window as an ISO 8601 date or timestamp, for example 2026-10-01. Overrides days.',
+      },
+      to: { type: 'string', description: 'Digital human id or display name. Defaults to you.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          detail: { type: 'string', required: true },
+          humanId: { type: 'string', required: true },
+          since: { type: 'string', required: true },
+          until: { type: 'string', required: true },
+          measured: { type: 'boolean', required: true },
+          sessions: { type: 'number', required: true },
+          totalTokens: { type: 'number', required: true },
+        },
+      },
+      render: (_args, value) => renderText(value),
+    },
+    async execute(args) {
+      const target = await usageTarget(service, await self(), args.to)
+      const window = usageWindow(args)
+      const since = new Date(window.since).toISOString()
+      const until = new Date(window.until).toISOString()
+      // One shape for every answer that cannot measure: the caller still learns the
+      // record and the window, and no tool call ever fails over a missing service.
+      const unavailable = (detail: string) => ({
+        detail, humanId: target.id, since, until, measured: false, sessions: 0, totalTokens: 0,
+      })
+      // A disabled record runs no Session, so there is nothing current to report;
+      // saying so is the whole answer, and no measurement is attempted.
+      if (target.enabled === false) {
+        return unavailable(`Usage for ${target.name} (${target.id}) is not reported: the record is disabled.`)
+      }
+      const meter = ctx.get?.('tokenMeter')
+      if (typeof meter?.measure !== 'function') {
+        return unavailable('Usage is unavailable in this Host: the token meter is not mounted, so no session can be measured.')
+      }
+      const registry = ctx.get?.('sessions')
+      if (typeof registry?.list !== 'function') {
+        return unavailable('Usage is unavailable in this Host: the session registry is not mounted, so no session can be listed.')
+      }
+      let listed
+      try {
+        listed = (await registry.list()) ?? []
+      } catch (error) {
+        return unavailable(`Usage is unavailable in this Host: the session registry could not be read (${error.message}).`)
+      }
+      // A digital human's Sessions are the ones its generated preset composed, which
+      // is the only mark a Session carries about whose work it holds.
+      const watched = presetIdOf(target.id)
+      const threads = await threadNames(service, target.id)
+      const rows: UsageRow[] = []
+      const skipped: string[] = []
+      for (const session of listed) {
+        if (session?.header?.agentPreset !== watched) continue
+        const sessionId = session.header.id
+        try {
+          // The window decides which Sessions to read, not which events. A Session
+          // that worked inside it is reported in full, and the note under the total
+          // says so.
+          const at = lastActivityOf(session)
+          if (at !== undefined && (at < window.since || at > window.until)) continue
+          rows.push({ sessionId, thread: threads.get(sessionId), tokens: meter.measure(session).totalTokens })
+        } catch {
+          // One unreadable log must not hide the others: name it and keep counting.
+          skipped.push(sessionId)
+        }
+      }
+      // Biggest first, so the line that matters is the one a person reads first.
+      rows.sort((a, b) => b.tokens - a.tokens || a.sessionId.localeCompare(b.sessionId))
+      return {
+        detail: renderUsageReport({ name: target.name, id: target.id, window, rows, skipped }),
+        humanId: target.id,
+        since,
+        until,
+        measured: true,
+        sessions: rows.length,
+        totalTokens: rows.reduce((sum, row) => sum + row.tokens, 0),
+      }
+    },
+  }
+
+  /**
    * Let a front-of-house record name its own conversation.
    *
    * Only it knows both facts a title needs — which channel the person came from and
@@ -727,7 +867,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     },
   }
 
-  const tools: any[] = [send, status, stop, messages, conversations, roster]
+  const tools: any[] = [send, status, stop, messages, conversations, roster, usage]
   // A digital human with no bot speaks to its peers only: the chat tools land in a
   // Session, while these two can only reach an IM contact. The title tool is not one
   // of them: naming a Session has nothing to do with an IM bot.

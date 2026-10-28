@@ -141,6 +141,7 @@ pm-assistant-202610131954.dh.tar.gz
 | `digital_human_messages` | 读同伴回复 | 预设内 |
 | `digital_human_conversations` | 列出与同伴的两种地址 | 预设内 |
 | `digital_human_list` | 列出所有数字人 | 预设内 |
+| `digital_human_usage` | 按时间窗汇总 token（可选 `to`） | 预设内 |
 | `notify_bot` | 给人发 IM（`to` 必填：已登记目标或原始 chatId） | 预设内 |
 | `list_bot_targets` | 列出可投递目标 | 预设内 |
 | `set_session_title` | 给自己的会话改名（不依赖 IM bot） | 预设内 |
@@ -240,6 +241,7 @@ node tools/migrate.mjs
 6. 技能空间只收文本 —— 二进制资源要等 zip 方案
 7. 未绑定 IM bot 的数字人没有 `notify_bot` / `list_bot_targets` —— 它只能在自己的会话里回复同伴。
    `notify_bot` 给未登记联系人发原始 chatId 一直可用；IM 插件暴露 `createTarget` 后，同一次发送会顺手登记为 `auto-<chatId 后 8 位>`
+8. `digital_human_usage` 只算本进程还活着的会话 —— 冷存的历史会话要等重新载入才计入
 
 ## 参考借鉴 Halo
 

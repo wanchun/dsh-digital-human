@@ -142,6 +142,7 @@ pm-assistant-202610131954.dh.tar.gz
 | `digital_human_messages` | Read the peer's replies | preset |
 | `digital_human_conversations` | List both address forms per peer | preset |
 | `digital_human_list` | List every digital human | preset |
+| `digital_human_usage` | Token usage over a window, optionally for another record | preset |
 | `notify_bot` | Send IM to a person or group (target names only, never chat ids) | preset |
 | `list_bot_targets` | List the targets that bot can reach | preset |
 | `memory_status` / `memory_compact` | Inspect / compact memory | preset |
@@ -226,6 +227,8 @@ zero runtime dependencies (node built-ins only)
 5. A session cannot change its preset or its directory — changing either in the
    record forces a new session, and the plugin logs why
 6. The skill space holds text only; binary resources wait for a zip-based bundle
+7. `digital_human_usage` counts only Sessions this process still holds live — cold
+   history counts after it is reloaded
 
 ## Borrowed from Halo
 
