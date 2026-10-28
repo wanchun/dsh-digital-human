@@ -1,12 +1,13 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apply as applyPlatform } from '../../src/index'
 import { HumanStore } from '../../src/lib/store'
 import { apply as applyToolsEntry } from '../../src/tools'
 import { presetIdOf } from '../../src/lib/presets'
+import { COMPACTION_THRESHOLD_BYTES, buildSnapshot, memoryPaths } from '../../src/lib/memory'
 import { SEED_HUMANS } from '../fixtures/seed.mjs'
 import { readBundle } from '../../src/lib/bundle'
 
@@ -951,5 +952,51 @@ describe('the work-item ledger', () => {
     await applyPlatform(second.ctx, { home, humans: SEED_HUMANS })
     const tasks = await second.provided.get('digitalHumans').tasks('dev-assistant', 'REQ-1')
     expect(tasks[0]).toMatchObject({ id: 'w-01', state: 'stopped', reason: 'restart' })
+  })
+})
+describe('the memory history archive on turn end', () => {
+  /** Let the fire-and-forget writes settle. */
+  const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms))
+  const eventOf = (platform: any) => platform.listeners.find((entry: any) => entry.event === 'session/event')!.handler
+  const emit = (platform: any, sessionId: string, type: string, data: any) => eventOf(platform)({ id: sessionId }, { type, data })
+
+  /** Write a memory file whose working block alone is over the file budget. */
+  const writeMemory = async (service: any, humanId: string, entries: number) => {
+    const paths = memoryPaths(service.store, humanId)
+    await mkdir(dirname(paths.file), { recursive: true })
+    const lines = ['# now', `## State | big\n${'- x\n'.repeat(40000)}`, '', '# History', '']
+    for (let at = 0; at < entries; at += 1) lines.push(`## 2026-10-01-1200 | entry ${at}`, '')
+    await writeFile(paths.file, lines.join('\n'), 'utf8')
+    return paths
+  }
+
+  it('archives the oldest timeline entries when a turn ends over the budget', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    const sent = await service.send('dev-assistant', { message: 'work', from: 'pm-assistant', conversationId: 'REQ-1' })
+    const paths = await writeMemory(service, 'dev-assistant', 61)
+    expect(buildSnapshot(paths).sizeBytes).toBeGreaterThan(COMPACTION_THRESHOLD_BYTES)
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    const after = buildSnapshot(paths)
+    expect(after.historyEntries).toBe(60)
+    expect(after.archiveFiles).toHaveLength(1)
+    // The working block is never moved automatically; only the timeline is.
+    expect(after.nowSection).toContain('## State | big')
+  })
+
+  it('leaves a record that keeps no memory alone', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'no-mem', name: '无记忆', memory: false })
+    const sent = await service.send('no-mem', { message: 'work', from: 'pm-assistant', conversationId: 'REQ-1' })
+    const paths = await writeMemory(service, 'no-mem', 61)
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    const after = buildSnapshot(paths)
+    expect(after.historyEntries).toBe(61)
+    expect(after.archiveFiles).toEqual([])
   })
 })

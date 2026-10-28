@@ -237,6 +237,45 @@ describe('the chat tools', () => {
     expect(service.calls.find((entry) => entry.method === 'send')!.args[0]).toBe('pm')
   })
 
+  it('expands an array of targets into one work item each, with its own receipt', async () => {
+    const qa = { id: 'qa', name: '测试助手', enabled: true, im: { botId: '', targetId: '' } }
+    const service = serviceStub({
+      resolve: async (reference: string) => {
+        service.calls.push({ method: 'resolve', args: [reference] })
+        return [people.pm, people.dev, qa].find((entry) => entry.id === reference || entry.name === reference)
+      },
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return {
+          sessionId: `session-${id}`,
+          conversationId: options.conversationId,
+          accepted: true,
+          task: { id: `w-${id}`, state: 'queued', intent: 'assign', queued: false },
+        }
+      },
+    })
+    // dev declares no peers, so both targets are reachable.
+    const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
+    const result = await send.execute({ to: ['pm', 'qa'], message: 'do it', conversation_id: 'REQ-1' })
+    expect(service.calls.filter((entry) => entry.method === 'send').map((entry) => entry.args[0]))
+      .toEqual(['pm', 'qa'])
+    // Two targets, two receipts: each carries the Session and the work item of one peer.
+    expect(result.results).toEqual([
+      expect.objectContaining({ to: 'pm', conversationId: 'REQ-1', sessionId: 'session-pm', taskId: 'w-pm', accepted: true }),
+      expect.objectContaining({ to: 'qa', conversationId: 'REQ-1', sessionId: 'session-qa', taskId: 'w-qa', accepted: true }),
+    ])
+    expect(result.detail).toContain('w-pm')
+    expect(result.detail).toContain('w-qa')
+  })
+
+  it('refuses the whole array when one target is unknown, delivering nothing', async () => {
+    const service = serviceStub()
+    const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
+    await expect(send.execute({ to: ['pm', 'ghost'], message: 'x', conversation_id: 'main' }))
+      .rejects.toThrow(/unknown digital human/)
+    expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
+  })
+
   it('resolves status, messages and stop through the edge too', async () => {
     const service = serviceStub({
       threadTarget: async () => ({ sessionId: 'session-pm-work', conversationId: 'REQ-1', via: 'inbound' }),
@@ -667,6 +706,21 @@ describe('the memory tools', () => {
     const { ensureMemory, memoryPaths } = await import('../../src/lib/memory')
     ensureMemory(memoryPaths(service.store, 'pm').file)
     expect((await compact.execute({})).detail).toContain('Archived to')
+  })
+
+  it('archives only the timeline when asked, keeping `# now`', async () => {
+    const service = serviceStub()
+    const { ensureMemory, memoryPaths } = await import('../../src/lib/memory')
+    const { readFileSync, writeFileSync } = await import('node:fs')
+    const paths = memoryPaths(service.store, 'pm')
+    ensureMemory(paths.file)
+    writeFileSync(paths.file, '# now\n## State | x\n\n# History\n\n## 2026-10-01-1200 | old\nbody\n', 'utf8')
+    const result = await toolOf(build(service), 'memory_compact').execute({ scope: 'history' })
+    expect(result.detail).toContain('Archived')
+    const text = readFileSync(paths.file, 'utf8')
+    // The daily path: the timeline is gone, the working block is untouched.
+    expect(text).toContain('## State | x')
+    expect(text).not.toContain('old')
   })
 })
 

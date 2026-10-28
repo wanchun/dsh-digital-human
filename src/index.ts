@@ -19,6 +19,7 @@ import { dirname } from 'node:path'
 
 import { HumanStore, defaultHome } from './lib/store.js'
 import { DEFAULT_CONVERSATION, HumanChat, requireConversation } from './lib/chat.js'
+import { archiveHistoryOnTurnEnd, memoryPaths } from './lib/memory.js'
 import { HumanLedger } from './lib/ledger.js'
 import { buildPresetDefinition, presetIdOf, resolveConfigValues } from './lib/presets.js'
 import { buildRegistryTool } from './lib/tools.js'
@@ -180,6 +181,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   /** human id -> the per-endpoint outcome of its last alignment. */
   const alignmentByHuman = new Map<string, ImSyncResult[]>()
 
+  /** Records that keep durable memory, so a turn end knows whose timeline to reclaim. */
+  const memoryEnabled = new Set<string>()
+
   /**
    * Whether an alignment is worth another attempt.
    *
@@ -266,7 +270,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // Cleared with the others: a stale outcome would report a bot as aligned after
     // its binding changed or the record was removed.
     alignmentByHuman.clear()
+    memoryEnabled.clear()
     const humans = await store.list(seed)
+    for (const human of humans) if (human.memory !== false) memoryEnabled.add(human.id)
     defaultWorkspace = await ensureDefaultWorkspace(ctx, { home, log })
     workspaceIdByPath.clear()
     for (const item of await listWorkspaces(ctx)) {
@@ -428,6 +434,23 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       } catch (error) {
         log(`work-item sweep failed for ${human.id}: ${error.message}`)
       }
+    }
+  }
+
+  /**
+   * Reclaim the timeline of a record whose memory outgrew the file budget.
+   *
+   * Runs on the Host's `turn/end`, the one boundary after the model has written its
+   * memory. Only `# History` moves: dropping working memory is the model's decision,
+   * so `# now` is left for `memory_compact` to handle.
+   */
+  function reclaimHistory(humanId: string): void {
+    if (!memoryEnabled.has(humanId)) return
+    try {
+      const archived = archiveHistoryOnTurnEnd(memoryPaths(store, humanId))
+      if (archived) log(`archived ${archived.moved} memory history entries of ${humanId} to ${archived.archive}`)
+    } catch (error) {
+      log(`memory history archive failed for ${humanId}: ${error.message}`)
     }
   }
 
@@ -983,6 +1006,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       // Only this turn's own item is closed; the queue behind it is untouched.
       ledger.end(owner.humanId, { sessionId, reason: event.data?.reason })
         .catch((error) => log(`work item end failed for ${sessionId}: ${error.message}`))
+      // The same boundary reclaims the timeline, so memory maintenance shares the one
+      // subscription instead of adding a timer of its own.
+      reclaimHistory(owner.humanId)
       return
     }
     // Only the assistant side is mirrored. An inbound message is already written
