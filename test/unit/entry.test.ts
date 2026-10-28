@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apply as applyPlatform } from '../../src/index'
 import { HumanStore } from '../../src/lib/store'
+import { buildHumanTools } from '../../src/lib/tools'
 import { apply as applyToolsEntry } from '../../src/tools'
 import { presetIdOf } from '../../src/lib/presets'
 import { COMPACTION_THRESHOLD_BYTES, buildSnapshot, memoryPaths } from '../../src/lib/memory'
@@ -954,6 +955,232 @@ describe('the work-item ledger', () => {
     expect(tasks[0]).toMatchObject({ id: 'w-01', state: 'stopped', reason: 'restart' })
   })
 })
+describe('escalation to a human', () => {
+  /** Let the fire-and-forget ledger writes settle. */
+  const tick = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms))
+  const eventOf = (platform: any) => platform.listeners.find((entry: any) => entry.event === 'session/event')!.handler
+  const emit = (platform: any, sessionId: string, type: string, data: any) => eventOf(platform)({ id: sessionId }, { type, data })
+
+  /** A record that can escalate: a bound bot and a claimed owner are both required. */
+  const boundHuman = (patch: Record<string, unknown> = {}) => ({
+    id: 'dev-assistant',
+    name: '开发助手',
+    enabled: true,
+    systemPrompt: 'work',
+    im: { botId: 'wecom_1', targetId: '', owner: 'wohR_boss' },
+    memory: false,
+    ...patch,
+  })
+
+  /** An IM service that records each send, so the escalation is observed at its exit. */
+  const imStub = () => {
+    const sent: any[][] = []
+    return { sent, send: async (...args: any[]) => { sent.push(args) } }
+  }
+
+  /** Assign work, let a turn own it, and end that turn with one reason. */
+  const runTurn = async (platform: any, service: any, conversation: string, reason: any, options: any = {}) => {
+    const sent = await service.send('dev-assistant', {
+      message: 'work', from: 'pm-assistant', conversationId: conversation, ...options,
+    })
+    emit(platform, sent.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    emit(platform, sent.sessionId, 'turn/end', { reason })
+    await tick()
+    return sent
+  }
+
+  it('direct-messages the owner when a work item fails', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
+    expect(im.sent).toHaveLength(1)
+    const [botId, target, text, options] = im.sent[0]
+    expect(botId).toBe('wecom_1')
+    // The owner is a raw chat id: the plugin never invents a target id for it.
+    expect(target).toEqual({ kind: 'user', route: { chatId: 'wohR_boss' } })
+    // Only the three facts: which item and thread, the state, and one reason line.
+    expect(text.split('\n')).toHaveLength(1)
+    expect(text).toContain('w-01')
+    expect(text).toContain('REQ-1')
+    expect(text).toContain('failed')
+    expect(text).toContain('BOOM')
+    expect(options).toEqual({ format: 'plain' })
+  })
+
+  it('blocks an overdue item when the ledger is read, and escalates the timeout', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    const past = new Date(Date.now() - 60_000).toISOString()
+    await service.send('dev-assistant', {
+      message: 'work', from: 'pm-assistant', conversationId: 'REQ-1', deadline: past,
+    })
+    expect(im.sent).toEqual([])
+    const tasks = await service.tasks('dev-assistant', 'REQ-1')
+    expect(tasks[0]).toMatchObject({ id: 'w-01', state: 'blocked', reason: 'timeout', deadline: past })
+    expect(im.sent).toHaveLength(1)
+    const text = im.sent[0][2]
+    expect(text).toContain('w-01')
+    expect(text).toContain('blocked')
+    expect(text).toContain('timeout')
+  })
+
+  it('never pushes a done, cancelled or stopped item', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    await runTurn(platform, service, 'A', { kind: 'completed' })
+    await runTurn(platform, service, 'B', { kind: 'aborted' })
+    await service.send('dev-assistant', {
+      message: 'queued', from: 'pm-assistant', conversationId: 'C',
+    })
+    await service.send('dev-assistant', {
+      message: 'never mind', from: 'pm-assistant', conversationId: 'C', mode: 'cancel',
+    })
+    await tick()
+    expect(im.sent).toEqual([])
+  })
+
+  it('escalates one item at most once, however often the ledger is read', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
+    await service.tasks('dev-assistant', 'REQ-1')
+    await service.tasks('dev-assistant', 'REQ-1')
+    await tick()
+    expect(im.sent).toHaveLength(1)
+    expect((await service.tasks('dev-assistant', 'REQ-1'))[0].escalatedAt).toEqual(expect.any(String))
+  })
+
+  it('merges items that fail together into one message', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    const past = new Date(Date.now() - 60_000).toISOString()
+    await service.send('dev-assistant', {
+      message: 'one', from: 'pm-assistant', conversationId: 'REQ-1', deadline: past,
+    })
+    await service.send('dev-assistant', {
+      message: 'two', from: 'pm-assistant', conversationId: 'REQ-1', deadline: past,
+    })
+    const tasks = await service.tasks('dev-assistant', 'REQ-1')
+    expect(tasks.map((task: any) => task.state)).toEqual(['blocked', 'blocked'])
+    expect(im.sent).toHaveLength(1)
+    const lines = im.sent[0][2].split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain('w-01')
+    expect(lines[1]).toContain('w-02')
+  })
+
+  it('folds a second escalation into the one sent within five minutes', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
+    expect(im.sent).toHaveLength(1)
+    // The next failure lands inside the window: the owner is told once.
+    await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'AGAIN' } })
+    const tasks = await service.tasks('dev-assistant', 'REQ-1')
+    expect(tasks.map((task: any) => task.state)).toEqual(['failed', 'failed'])
+    expect(tasks[1].escalatedAt).toEqual(expect.any(String))
+    expect(im.sent).toHaveLength(1)
+  })
+
+  it('escalates a work item whose delivery never arrived', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    platform.ctx.sessionController.prompt = async () => { throw new Error('socket closed') }
+    await expect(service.send('dev-assistant', {
+      message: 'work', from: 'pm-assistant', conversationId: 'REQ-1',
+    })).rejects.toThrow(/socket closed/)
+    // The failure is reported to the caller, and its owner still hears about it.
+    expect(im.sent).toHaveLength(1)
+    expect(im.sent[0][2]).toContain('undelivered')
+    expect((await service.tasks('dev-assistant', 'REQ-1'))[0])
+      .toMatchObject({ state: 'failed', reason: 'undelivered', escalatedAt: expect.any(String) })
+  })
+
+  it('stays silent and logs when there is no bot or no owner', async () => {
+    const cases = [
+      { label: 'no bot', human: boundHuman({ im: { botId: '', targetId: '', owner: 'wohR_boss' } }) },
+      { label: 'no owner', human: boundHuman({ im: { botId: 'wecom_1', targetId: '' } }) },
+    ]
+    for (const entry of cases) {
+      const im = imStub()
+      const platform = makeCtx({ dshIm: im })
+      const warn = vi.fn()
+      platform.ctx.logger = { warn, info: () => {} }
+      await applyPlatform(platform.ctx, { home: join(home, entry.label.replace(/ /g, '-')), humans: [entry.human] })
+      const service = platform.provided.get('digitalHumans')
+      await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
+      expect(im.sent).toEqual([])
+      expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('escalat'))).toBe(true)
+    }
+  })
+
+  it('takes the deadline from the record, the plugin config, or thirty minutes', async () => {
+    const cases = [
+      { label: 'record', human: boundHuman({ escalationDeadlineMinutes: 5 }), config: {}, want: 5 },
+      { label: 'plugin', human: boundHuman(), config: { escalationDeadlineMinutes: 12 }, want: 12 },
+      { label: 'default', human: boundHuman(), config: {}, want: 30 },
+    ]
+    for (const entry of cases) {
+      const platform = makeCtx()
+      await applyPlatform(platform.ctx, {
+        home: join(home, entry.label), humans: [entry.human], ...entry.config,
+      })
+      const service = platform.provided.get('digitalHumans')
+      await service.send('dev-assistant', {
+        message: 'work', from: 'pm-assistant', conversationId: 'REQ-1',
+      })
+      const [task] = await service.tasks('dev-assistant', 'REQ-1')
+      expect(task.id).toBe('w-01')
+      expect((Date.parse(task.deadline) - Date.parse(task.createdAt)) / 60_000).toBeCloseTo(entry.want, 5)
+    }
+  })
+
+  it('settles the ledger when digital_human_status reads it', async () => {
+    // The tool is the query a peer actually makes, so the timeout has to be visible
+    // through the tool, not only through the service underneath it.
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    const pm = { id: 'pm-assistant', name: '研发PM助手', enabled: true, systemPrompt: '', memory: false }
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman(), pm] })
+    const service = platform.provided.get('digitalHumans')
+    const past = new Date(Date.now() - 60_000).toISOString()
+    await service.send('dev-assistant', {
+      message: 'work', from: 'pm-assistant', conversationId: 'REQ-1', deadline: past,
+    })
+    const tools = buildHumanTools({ ctx: platform.ctx, service, humanId: 'pm-assistant', memory: false, im: false })
+    const status = tools.find((tool: any) => tool.name === 'digital_human_status')!
+    const answer = await status.execute({ to: 'dev-assistant', conversation_id: 'REQ-1' })
+    expect(answer).toMatchObject({ taskId: 'w-01', state: 'blocked', reason: 'timeout' })
+    expect(im.sent).toHaveLength(1)
+  })
+
+  it('stays silent when the IM service is absent', async () => {
+    const platform = makeCtx()
+    const warn = vi.fn()
+    platform.ctx.logger = { warn, info: () => {} }
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    await expect(runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } }))
+      .resolves.toBeDefined()
+    expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('IM service'))).toBe(true)
+  })
+})
+
 describe('the memory history archive on turn end', () => {
   /** Let the fire-and-forget writes settle. */
   const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms))

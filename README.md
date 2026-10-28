@@ -208,7 +208,10 @@ node tools/migrate.mjs
 ### 插件配置项
 
 `home` · `seed` · `basePreset` · `toolsPluginName` · `permissionPreset` ·
-`platformVariables` · `alignRetryMs` · `alignRetryMax`
+`platformVariables` · `alignRetryMs` · `alignRetryMax` · `escalationDeadlineMinutes`
+
+`escalationDeadlineMinutes` 默认 **30**：工作项超过这个时长还是未终态，查询或回合结束时就地判为
+`blocked(timeout)`，并私聊该数字人的 owner。单个记录可用同名配置字段覆盖。
 
 `seed` 默认 **false**：全新安装从**空注册表**开始，数字人由你在页面上配，或导入一个包。
 插件不替谁决定业务人设。
@@ -242,7 +245,8 @@ node tools/migrate.mjs
 5. 会话改不了预设或目录 —— 记录改了这两样，那条会话只能重开（插件会写日志说明）
 6. 技能空间只收文本 —— 二进制资源要等 zip 方案
 7. 未绑定 IM bot 的数字人没有 `notify_bot` / `list_bot_targets` —— 它只能在自己的会话里回复同伴。
-   `notify_bot` 给未登记联系人发原始 chatId 一直可用；IM 插件暴露 `createTarget` 后，同一次发送会顺手登记为 `auto-<chatId 后 8 位>`
+   `notify_bot` 给未登记联系人发原始 chatId 一直可用；IM 插件暴露 `createTarget` 后，同一次发送会顺手登记为 `auto-<chatId 后 8 位>`。
+   工作项的自动升级同样没有替代出口：未绑 bot、没有 owner 或 IM 服务缺失时，只写一行日志，不推送
 8. `digital_human_usage` 只算本进程还活着的会话 —— 冷存的历史会话要等重新载入才计入
 
 ## 参考借鉴 Halo

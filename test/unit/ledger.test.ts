@@ -144,6 +144,65 @@ describe('the work-item ledger', () => {
     expect(listed.find((task) => task.id === 'w-02')!.state).toBe('in_progress')
   })
 
+  it('keeps the deadline an assignment carries', async () => {
+    const deadline = '2026-11-01T00:00:00.000Z'
+    const task = await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1', deadline })
+    expect(task.deadline).toBe(deadline)
+    expect((await ledger.list('dev'))[0].deadline).toBe(deadline)
+  })
+
+  it('refuses an assignment whose deadline is not a timestamp', async () => {
+    await expect(ledger.assign('dev', { from: 'pm', conversation: 'REQ-1', deadline: 'soon' }))
+      .rejects.toThrow(/deadline/)
+  })
+
+  it('blocks an open item past its deadline, once', async () => {
+    const now = new Date('2026-10-28T12:00:00.000Z')
+    await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1', deadline: '2026-10-28T11:00:00.000Z' })
+    await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1', deadline: '2026-10-28T13:00:00.000Z' })
+    const blocked = await ledger.timeout('dev', { now, fallbackMinutes: 30 })
+    expect(blocked).toEqual([
+      expect.objectContaining({ id: 'w-01', state: 'blocked', reason: 'timeout', endedAt: now.toISOString() }),
+    ])
+    // The item that is not overdue keeps its state, and a second pass changes nothing.
+    expect((await ledger.list('dev')).map((task) => [task.id, task.state]))
+      .toEqual([['w-01', 'blocked'], ['w-02', 'queued']])
+    expect(await ledger.timeout('dev', { now, fallbackMinutes: 30 })).toEqual([])
+  })
+
+  it('times out a row that carries no deadline using the fallback', async () => {
+    // A ledger written before deadlines existed still has to settle: otherwise its
+    // queued items stay open forever.
+    await store.ensureDir(store.dir('dev'))
+    writeFileSync(store.taskPath('dev'), `${JSON.stringify({
+      id: 'w-01', from: 'pm', to: 'dev', conversation: 'REQ-1', state: 'in_progress',
+      createdAt: '2026-10-28T10:00:00.000Z', owner: 'session-1',
+    })}\n`)
+    const now = new Date('2026-10-28T10:31:00.000Z')
+    expect(await ledger.timeout('dev', { now, fallbackMinutes: 30 }))
+      .toEqual([expect.objectContaining({ id: 'w-01', state: 'blocked', reason: 'timeout' })])
+    // Just inside the fallback window nothing happens.
+    await store.ensureDir(store.dir('dev2'))
+    writeFileSync(store.taskPath('dev2'), `${JSON.stringify({
+      id: 'w-01', from: 'pm', to: 'dev2', conversation: 'REQ-1', state: 'queued',
+      createdAt: '2026-10-28T10:00:00.000Z',
+    })}\n`)
+    expect(await ledger.timeout('dev2', { now: new Date('2026-10-28T10:29:59.000Z'), fallbackMinutes: 30 }))
+      .toEqual([])
+  })
+
+  it('claims escalation for each item at most once', async () => {
+    await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1' })
+    await ledger.assign('dev', { from: 'pm', conversation: 'REQ-2' })
+    const at = '2026-10-28T12:00:00.000Z'
+    expect(await ledger.claim('dev', { taskIds: ['w-01', 'w-99'], at }))
+      .toEqual([expect.objectContaining({ id: 'w-01', escalatedAt: at })])
+    // A task already claimed, and an unknown id, claim nothing.
+    expect(await ledger.claim('dev', { taskIds: ['w-01', 'w-02'], at })).toHaveLength(1)
+    expect((await ledger.list('dev')).map((task) => [task.id, task.escalatedAt]))
+      .toEqual([['w-01', at], ['w-02', at]])
+  })
+
   it('skips a malformed line instead of losing the ledger', async () => {
     await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1' })
     writeFileSync(store.taskPath('dev'), `not json\n${readFileSync(store.taskPath('dev'), 'utf8')}`)

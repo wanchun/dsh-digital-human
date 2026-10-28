@@ -41,6 +41,13 @@ export interface TaskRow {
   reason?: string
   note?: string
   amendments?: TaskAmendment[]
+  /**
+   * When this item was escalated to its owner.
+   *
+   * Claiming writes this field before the message goes out, so a query that runs at
+   * the same moment cannot escalate the same item twice.
+   */
+  escalatedAt?: string
 }
 
 /** What an assignment needs. The ledger fills the id, the state and the timestamps. */
@@ -48,6 +55,8 @@ export interface AssignInput {
   from: string
   conversation: string
   note?: string
+  /** When the handover is due. ISO 8601; the caller supplies the default. */
+  deadline?: string
 }
 
 /** How one turn ending becomes a work-item state. */
@@ -135,7 +144,7 @@ export class HumanLedger {
   }
 
   /** Append one assignment. It starts queued; a turn promotes it. */
-  assign(humanId: string, { from, conversation, note }: AssignInput): Promise<TaskRow> {
+  assign(humanId: string, { from, conversation, note, deadline }: AssignInput): Promise<TaskRow> {
     return this.#serial(humanId, async () => {
       const rows = await this.list(humanId)
       const row: TaskRow = {
@@ -146,6 +155,7 @@ export class HumanLedger {
         state: 'queued',
         createdAt: new Date().toISOString(),
         ...(note === undefined ? {} : { note }),
+        ...(deadline === undefined ? {} : { deadline: deadlineValue(deadline) }),
       }
       await this.#append(humanId, row)
       return row
@@ -262,6 +272,62 @@ export class HumanLedger {
     })
   }
 
+  /**
+   * Block every open item whose deadline has passed.
+   *
+   * There is no timer: the check runs when someone reads the ledger or a turn ends,
+   * which is exactly when the answer matters. Running it twice is harmless, because
+   * only open items are considered.
+   *
+   * A row written before deadlines existed carries none, so its creation time plus
+   * the fallback window is used — a timeout with no fallback would leave those rows
+   * open forever.
+   */
+  timeout(humanId: string, { now, fallbackMinutes }: {
+    now: Date
+    fallbackMinutes: number
+  }): Promise<TaskRow[]> {
+    return this.#serial(humanId, async () => {
+      const blocked: TaskRow[] = []
+      for (const task of await this.list(humanId)) {
+        if (!isOpen(task)) continue
+        const due = dueAt(task, fallbackMinutes)
+        if (!Number.isFinite(due) || due > now.getTime()) continue
+        const row: TaskRow = {
+          ...task,
+          state: 'blocked',
+          endedAt: now.toISOString(),
+          reason: 'timeout',
+        }
+        await this.#append(humanId, row)
+        blocked.push(row)
+      }
+      return blocked
+    })
+  }
+
+  /**
+   * Claim the items one escalation covers, at most once each.
+   *
+   * The claim is written before the message is sent. A repeated message reaches the
+   * owner and teaches them to ignore the channel, while a message that fails to send
+   * is only one lost notification. Items already claimed are left alone, so the
+   * return value says exactly what this call took responsibility for.
+   */
+  claim(humanId: string, { taskIds, at }: { taskIds: string[]; at: string }): Promise<TaskRow[]> {
+    return this.#serial(humanId, async () => {
+      const wanted = new Set(taskIds)
+      const claimed: TaskRow[] = []
+      for (const task of await this.list(humanId)) {
+        if (!wanted.has(task.id) || task.escalatedAt !== undefined) continue
+        const row: TaskRow = { ...task, escalatedAt: at }
+        await this.#append(humanId, row)
+        claimed.push(row)
+      }
+      return claimed
+    })
+  }
+
   /** Settle an item whose delivery never reached its Session. */
   fail(humanId: string, { taskId, reason }: { taskId: string; reason: string }): Promise<TaskRow | undefined> {
     return this.#serial(humanId, async () => {
@@ -302,6 +368,27 @@ export class HumanLedger {
     await this.#store.ensureDir(this.#store.dir(humanId))
     await appendFile(this.#store.taskPath(humanId), `${JSON.stringify(row)}\n`, 'utf8')
   }
+}
+
+/** Validate one deadline, failing loud rather than scheduling on a value no clock can read. */
+function deadlineValue(deadline: string): string {
+  if (!Number.isFinite(Date.parse(deadline))) {
+    throw new Error(`deadline must be an ISO 8601 timestamp: ${JSON.stringify(deadline)}`)
+  }
+  return deadline
+}
+
+/**
+ * The moment one item is due.
+ *
+ * A row's own deadline wins. A row with none predates the field, so its creation
+ * time plus the configured window is the only honest answer.
+ */
+function dueAt(task: TaskRow, fallbackMinutes: number): number {
+  const own = task.deadline === undefined ? Number.NaN : Date.parse(task.deadline)
+  if (Number.isFinite(own)) return own
+  const created = Date.parse(task.createdAt)
+  return Number.isFinite(created) ? created + fallbackMinutes * 60_000 : Number.NaN
 }
 
 /** The next free id for one ledger. Ids are stable labels, so they never shrink. */

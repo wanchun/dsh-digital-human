@@ -21,6 +21,10 @@ import { HumanStore, defaultHome } from './lib/store.js'
 import { DEFAULT_CONVERSATION, HumanChat, requireConversation } from './lib/chat.js'
 import { archiveHistoryOnTurnEnd, memoryPaths } from './lib/memory.js'
 import { HumanLedger } from './lib/ledger.js'
+import type { TaskRow } from './lib/ledger.js'
+import {
+  DEFAULT_DEADLINE_MINUTES, deadlineIn, escalates, escalationText, foldedInto,
+} from './lib/escalation.js'
 import { buildPresetDefinition, presetIdOf, resolveConfigValues } from './lib/presets.js'
 import { buildRegistryTool } from './lib/tools.js'
 import { listLibrary, removeSkill, writeSkill } from './lib/skills.js'
@@ -145,6 +149,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // The retry window is configurable so a deployment — or a test — can shorten it.
   const alignRetryMs = positiveSetting(config, 'alignRetryMs', ALIGN_RETRY_MS_DEFAULT)
   const alignRetryMax = positiveSetting(config, 'alignRetryMax', ALIGN_RETRY_MAX_DEFAULT)
+  // How long a handover may run before its owner hears about it. A record may carry
+  // its own value; this is the fallback every record inherits.
+  const deadlineMinutes = positiveSetting(config, 'escalationDeadlineMinutes', DEFAULT_DEADLINE_MINUTES)
   // Empty unless the caller supplies examples. A fresh install grows no digital
   // humans: they are configured in the page or imported as a bundle.
   const seed: Human[] = Array.isArray(config.humans) ? config.humans : []
@@ -438,6 +445,110 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   }
 
   /**
+   * Minutes one record allows before escalation: its own value, else the platform's.
+   *
+   * A zero or malformed record value would mean "escalate immediately" or "never",
+   * neither of which an operator asked for, so it falls back like an absent one.
+   */
+  function deadlineMinutesOf(human: Human): number {
+    const own = Number(human.escalationDeadlineMinutes)
+    return Number.isFinite(own) && own > 0 ? own : deadlineMinutes
+  }
+
+  /**
+   * Tell one record's owner about every work item that stopped.
+   *
+   * The ledger is the source of truth: any failed or blocked item that has not been
+   * claimed yet is escalated, so a send missed by a crash is retried by the next
+   * query or turn ending. Claiming happens before sending — a person told twice
+   * stops trusting the channel, while an unsent message is only a lost notification.
+   */
+  async function escalateStopped(human: Human, conversation?: string): Promise<void> {
+    const rows = await ledger.list(human.id)
+    const pending = rows.filter((task) => escalates(task.state)
+      && task.escalatedAt === undefined
+      && (conversation === undefined || task.conversation === conversation))
+    if (pending.length === 0) return
+    // One message per thread: a burst of failures from one handover is one event.
+    const threads = new Map<string, TaskRow[]>()
+    for (const task of pending) {
+      const items = threads.get(task.conversation) ?? []
+      items.push(task)
+      threads.set(task.conversation, items)
+    }
+    const dshIm = ctx.get?.('dshIm')
+    for (const [thread, items] of threads) {
+      const lastAt = rows
+        .filter((task) => task.conversation === thread && task.escalatedAt !== undefined)
+        .map((task) => task.escalatedAt!)
+        .sort()
+        .at(-1)
+      const now = new Date()
+      const claimed = await ledger.claim(human.id, {
+        taskIds: items.map((task) => task.id),
+        at: now.toISOString(),
+      })
+      if (claimed.length === 0) continue
+      const ids = claimed.map((task) => task.id).join(', ')
+      if (foldedInto(lastAt, now)) {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} folded into the message sent at ${lastAt}`)
+        continue
+      }
+      // No exit, no alternative channel: say why once and keep the ledger settled.
+      const botId = String(human.im?.botId ?? '').trim()
+      if (!botId) {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: no IM bot is bound`)
+        continue
+      }
+      const owner = String(human.im?.owner ?? '').trim()
+      if (!owner) {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: it has no owner`)
+        continue
+      }
+      if (typeof dshIm?.send !== 'function') {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: the IM service is absent`)
+        continue
+      }
+      try {
+        await dshIm.send(
+          botId,
+          { kind: 'user', route: { chatId: owner } },
+          escalationText(claimed),
+          { format: 'plain' },
+        )
+        log(`escalated ${ids} in "${thread}" to ${owner} through ${botId}`)
+      } catch (error) {
+        log(`escalation of ${ids} in "${thread}" could not be sent: ${error.message}`)
+      }
+    }
+  }
+
+  /**
+   * Settle the ledger before anyone reads it.
+   *
+   * The plugin runs no timer. A timeout is noticed exactly when it is about to
+   * matter — a status or task query, or a turn ending — so this is the whole clock.
+   */
+  async function settleWork(human: Human, conversation?: string): Promise<void> {
+    await ledger.timeout(human.id, { now: new Date(), fallbackMinutes: deadlineMinutesOf(human) })
+    await escalateStopped(human, conversation)
+  }
+
+  /**
+   * Close the item one turn owned, then settle everything the ledger can now see.
+   *
+   * The turn's own item is closed first, because a timeout must not race the result
+   * the turn just produced. A turn ending is also the moment an unrelated overdue
+   * item is noticed, whether or not this turn stopped anything.
+   */
+  async function settleTurn(humanId: string, sessionId: string, reason?: unknown): Promise<void> {
+    await ledger.end(humanId, { sessionId, reason })
+    const human = await store.get(humanId, seed)
+    if (!human) return
+    await settleWork(human)
+  }
+
+  /**
    * Reclaim the timeline of a record whose memory outgrew the file budget.
    *
    * Runs on the Host's `turn/end`, the one boundary after the model has written its
@@ -507,7 +618,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
      */
     async send(
       idOrName: string,
-      { conversationId, sessionId, message, from, fromSession, mode, taskId, note }: {
+      { conversationId, sessionId, message, from, fromSession, mode, taskId, note, deadline }: {
         conversationId?: string
         sessionId?: string
         message?: string
@@ -516,6 +627,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         mode?: 'new' | 'amend' | 'cancel'
         taskId?: string
         note?: string
+        /** Explicit due time. Omitted means the record's escalation window. */
+        deadline?: string
       },
     ) {
       const human = await service.require(idOrName)
@@ -560,6 +673,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         from,
         conversation,
         ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {}),
+        // Every item carries a deadline: an escalation with no due time would wait
+        // for a person to notice, which is the failure mode this field removes.
+        deadline: typeof deadline === 'string' && deadline.trim()
+          ? deadline.trim()
+          : deadlineIn(new Date(), deadlineMinutesOf(human)),
       })
       try {
         // A queued task must not steer the running turn: it is the next turn, not
@@ -571,12 +689,20 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         // it queued forever.
         await ledger.fail(human.id, { taskId: assigned.id, reason: 'undelivered' })
           .catch((failure) => log(`work item ${assigned.id} could not be marked failed: ${failure.message}`))
+        // The work never arrived, so its owner may need to act. Failure of the
+        // escalation itself must not replace the delivery error the caller expects.
+        await escalateStopped(human, conversation)
+          .catch((failure) => log(`escalation of ${assigned.id} failed: ${failure.message}`))
         throw error
       }
     },
     /** The work items of one conversation, oldest first. */
     async tasks(idOrName, conversationId) {
       const human = await service.require(idOrName)
+      // Reading the ledger is one of the two moments a timeout is noticed. A settle
+      // failure must not hide the rows, so it is reported and the read continues.
+      await settleWork(human, conversationId)
+        .catch((error) => log(`work-item settle failed for ${human.id}: ${error.message}`))
       const rows = await ledger.list(human.id)
       return conversationId === undefined ? rows : rows.filter((task) => task.conversation === conversationId)
     },
@@ -1004,7 +1130,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     }
     if (kind === 'turn/end') {
       // Only this turn's own item is closed; the queue behind it is untouched.
-      ledger.end(owner.humanId, { sessionId, reason: event.data?.reason })
+      settleTurn(owner.humanId, sessionId, event.data?.reason)
         .catch((error) => log(`work item end failed for ${sessionId}: ${error.message}`))
       // The same boundary reclaims the timeline, so memory maintenance shares the one
       // subscription instead of adding a timer of its own.

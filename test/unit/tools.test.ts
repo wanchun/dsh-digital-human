@@ -177,6 +177,17 @@ describe('the chat tools', () => {
       .every((entry) => entry.args[1].fromSession === undefined)).toBe(true)
   })
 
+  it('passes an explicit deadline through to the assignment', async () => {
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    const deadline = '2026-11-01T00:00:00.000Z'
+    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1]).toMatchObject({ deadline })
+    // A blank value is "no deadline", not a deadline of empty string.
+    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline: '  ' })
+    expect(service.calls.filter((entry) => entry.method === 'send')[1].args[1].deadline).toBeUndefined()
+  })
+
   it('passes a Session address through as the address', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
