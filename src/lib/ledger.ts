@@ -69,6 +69,10 @@ export function endStateOf(reason: any): { state: TaskState; reason: string } {
     return { state: 'failed', reason: typeof code === 'string' && code ? code : 'error' }
   }
   if (kind === 'aborted') return { state: 'stopped', reason: 'aborted' }
+  // The Host stopped the turn from outside — a restart, or a fork took it over. The
+  // work did not finish, so reporting it as done would be a lie.
+  if (kind === 'interrupted') return { state: 'stopped', reason: 'restart' }
+  if (kind === 'forked') return { state: 'stopped', reason: 'forked' }
   if (kind === 'blocked') return { state: 'blocked', reason: 'blocked' }
   // A Host that names no reason still ended the turn, so the work is over.
   return { state: 'done', reason: 'completed' }
@@ -143,6 +147,11 @@ export class HumanLedger {
     return tasks.filter((task) => isOpen(task) && (conversation === undefined || task.conversation === conversation))
   }
 
+  /** The open items of one conversation, in creation order. */
+  async #openIn(humanId: string, conversation: string): Promise<TaskRow[]> {
+    return (await this.list(humanId)).filter((task) => isOpen(task) && task.conversation === conversation)
+  }
+
   /** Append one assignment. It starts queued; a turn promotes it. */
   assign(humanId: string, { from, conversation, note, deadline }: AssignInput): Promise<TaskRow> {
     return this.#serial(humanId, async () => {
@@ -178,7 +187,7 @@ export class HumanLedger {
     const body = String(text ?? '').trim()
     if (!body) return Promise.reject(new Error('an amendment must not be empty'))
     return this.#serial(humanId, async () => {
-      const open = (await this.list(humanId)).filter((task) => isOpen(task) && task.conversation === conversation)
+      const open = await this.#openIn(humanId, conversation)
       const target = anchor(open, conversation, taskId)
       const row: TaskRow = {
         ...target,
@@ -195,7 +204,7 @@ export class HumanLedger {
     taskId?: string
   }): Promise<TaskRow> {
     return this.#serial(humanId, async () => {
-      const open = (await this.list(humanId)).filter((task) => isOpen(task) && task.conversation === conversation)
+      const open = await this.#openIn(humanId, conversation)
       const target = anchor(open, conversation, taskId)
       const row: TaskRow = {
         ...target,
@@ -219,7 +228,7 @@ export class HumanLedger {
     sessionId: string
   }): Promise<TaskRow | undefined> {
     return this.#serial(humanId, async () => {
-      const open = (await this.list(humanId)).filter((task) => isOpen(task) && task.conversation === conversation)
+      const open = await this.#openIn(humanId, conversation)
       const running = open.find((task) => task.state === 'in_progress')
       if (running) {
         if (running.owner === undefined) {
@@ -282,10 +291,18 @@ export class HumanLedger {
    * A row written before deadlines existed carries none, so its creation time plus
    * the fallback window is used — a timeout with no fallback would leave those rows
    * open forever.
+   *
+   * An `in_progress` item is only timed out once its conversation is idle. A turn
+   * that is still running owns that item, and its own end is the authority on how
+   * the work ended: closing the item behind its back would leave `turn/end` with
+   * nothing to close and report as blocked work that is still being done. A queued
+   * item is not being worked on, so a missed deadline is news whether or not the
+   * turn in front of it is still running.
    */
-  timeout(humanId: string, { now, fallbackMinutes }: {
+  timeout(humanId: string, { now, fallbackMinutes, isIdle }: {
     now: Date
     fallbackMinutes: number
+    isIdle: (conversation: string) => Promise<boolean>
   }): Promise<TaskRow[]> {
     return this.#serial(humanId, async () => {
       const blocked: TaskRow[] = []
@@ -293,6 +310,7 @@ export class HumanLedger {
         if (!isOpen(task)) continue
         const due = dueAt(task, fallbackMinutes)
         if (!Number.isFinite(due) || due > now.getTime()) continue
+        if (task.state === 'in_progress' && !(await isIdle(task.conversation))) continue
         const row: TaskRow = {
           ...task,
           state: 'blocked',

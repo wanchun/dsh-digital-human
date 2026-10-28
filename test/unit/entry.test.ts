@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1029,6 +1029,28 @@ describe('escalation to a human', () => {
     expect(text).toContain('timeout')
   })
 
+  it('leaves work that is still running alone, however overdue it is', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    const past = new Date(Date.now() - 60_000).toISOString()
+    const sent = await service.send('dev-assistant', {
+      message: 'work', from: 'pm-assistant', conversationId: 'REQ-1', deadline: past,
+    })
+    emit(platform, sent.sessionId, 'turn/start', { turn: 1 })
+    await tick()
+    // The deadline has passed, but its turn is still working: that turn owns the item,
+    // and blocking it here is what makes the later turn/end find nothing to close.
+    expect(await service.tasks('dev-assistant', 'REQ-1'))
+      .toEqual([expect.objectContaining({ id: 'w-01', state: 'in_progress' })])
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    expect((await service.tasks('dev-assistant', 'REQ-1'))[0])
+      .toMatchObject({ id: 'w-01', state: 'done', reason: 'completed' })
+    expect(im.sent).toEqual([])
+  })
+
   it('never pushes a done, cancelled or stopped item', async () => {
     const im = imStub()
     const platform = makeCtx({ dshIm: im })
@@ -1091,8 +1113,40 @@ describe('escalation to a human', () => {
     await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'AGAIN' } })
     const tasks = await service.tasks('dev-assistant', 'REQ-1')
     expect(tasks.map((task: any) => task.state)).toEqual(['failed', 'failed'])
-    expect(tasks[1].escalatedAt).toEqual(expect.any(String))
+    // Folded, not sent: the claim waits too, so a later settle can still deliver it.
+    expect(tasks[1].escalatedAt).toBeUndefined()
     expect(im.sent).toHaveLength(1)
+  })
+
+  it('leaves an escalation folded inside the window unclaimed, and sends it later', async () => {
+    const im = imStub()
+    const platform = makeCtx({ dshIm: im })
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'BOOM' } })
+    expect(im.sent).toHaveLength(1)
+    // A second failure inside five minutes is folded: the owner hears it once.
+    await runTurn(platform, service, 'REQ-1', { kind: 'error', error: { code: 'AGAIN' } })
+    const folded = await service.tasks('dev-assistant', 'REQ-1')
+    expect(folded.map((task: any) => task.state)).toEqual(['failed', 'failed'])
+    // Folded is not sent, so it must not be claimed: a claim here loses the item forever.
+    expect(folded[1].escalatedAt).toBeUndefined()
+    expect(im.sent).toHaveLength(1)
+    // Once the window has passed the next settle sends it, and the older item stays quiet.
+    const old = new Date(Date.now() - 6 * 60_000).toISOString()
+    await appendFile(
+      new HumanStore(home).taskPath('dev-assistant'),
+      JSON.stringify({ ...folded[0], escalatedAt: old }) + '\n',
+    )
+    const sent = await service.tasks('dev-assistant', 'REQ-1')
+    expect(sent[1].escalatedAt).toEqual(expect.any(String))
+    expect(im.sent).toHaveLength(2)
+    expect(im.sent[1][2]).toContain('w-02')
+    expect(im.sent[1][2]).not.toContain('w-01')
+    // The ledger is append-only; reading it must not have grown a second row.
+    const lines = (await readFile(new HumanStore(home).taskPath('dev-assistant'), 'utf8'))
+      .split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    expect(lines.filter((row) => row.id === 'w-02' && row.escalatedAt !== undefined)).toHaveLength(1)
   })
 
   it('escalates a work item whose delivery never arrived', async () => {
@@ -1146,7 +1200,9 @@ describe('escalation to a human', () => {
       })
       const [task] = await service.tasks('dev-assistant', 'REQ-1')
       expect(task.id).toBe('w-01')
-      expect((Date.parse(task.deadline) - Date.parse(task.createdAt)) / 60_000).toBeCloseTo(entry.want, 5)
+      // Milli-second resolution: the deadline and createdAt come from two clock reads,
+      // so demanding sub-millisecond equality only made this assertion flaky.
+      expect((Date.parse(task.deadline) - Date.parse(task.createdAt)) / 60_000).toBeCloseTo(entry.want, 3)
     }
   })
 

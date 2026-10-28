@@ -261,7 +261,7 @@ describe('the `# now` injection budget', () => {
     expect(Buffer.byteLength(block, 'utf8')).toBeLessThanOrEqual(NOW_BUDGET_BYTES)
   })
 
-  it('keeps the leading `##` sections that fit and reports the sections it dropped', () => {
+  it('keeps the leading sections and the newest one, and reports the middle it dropped', () => {
     write([
       '# now',
       ...paddedSection('## State | big', 6000),
@@ -270,9 +270,22 @@ describe('the `# now` injection budget', () => {
     ].join('\n'))
     const block = fencedBlock(renderMemoryContext(paths()))
     expect(block).toContain('## State | big')
-    expect(block).toContain('## Patterns')
-    expect(block).not.toContain('## Errors')
+    // The newest section is the one the current task is anchored on, so it stays.
+    expect(block).toContain('## Errors')
+    expect(block).not.toContain('## Patterns')
     expect(block).toMatch(/1 section/)
+    expect(block).toMatch(/omitted/)
+    expect(Buffer.byteLength(block, 'utf8')).toBeLessThanOrEqual(NOW_BUDGET_BYTES)
+  })
+
+  it('cuts the newest section itself down to its head and tail when it will not fit', () => {
+    const newest = paddedSection('## Current | ship', 20000)
+    write(['# now', '## State | small', ...newest].join('\n'))
+    const block = fencedBlock(renderMemoryContext(paths()))
+    expect(block).toContain('## State | small')
+    expect(block).toContain('## Current | ship')
+    // The tail of the newest section is the working memory 06 anchors on.
+    expect(block).toContain(newest.at(-1)!)
     expect(block).toMatch(/omitted/)
     expect(Buffer.byteLength(block, 'utf8')).toBeLessThanOrEqual(NOW_BUDGET_BYTES)
   })

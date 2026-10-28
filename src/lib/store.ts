@@ -185,14 +185,28 @@ export function normalizeHuman(input, now = new Date().toISOString()): Human {
     sessionMode: input.sessionMode === 'single' ? 'single' : 'thread',
     // A non-positive or non-numeric window would mean "escalate at once" or "never",
     // neither of which the operator asked for, so the platform default stays.
-    ...(typeof input.escalationDeadlineMinutes === 'number'
-      && Number.isFinite(input.escalationDeadlineMinutes)
-      && input.escalationDeadlineMinutes > 0
+    ...(usableMinutes(input.escalationDeadlineMinutes)
       ? { escalationDeadlineMinutes: input.escalationDeadlineMinutes }
       : {}),
     createdAt: typeof input.createdAt === 'string' ? input.createdAt : now,
     updatedAt: now,
   }
+}
+
+/** Whether a configured escalation window is one a clock can use. */
+function usableMinutes(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
+/**
+ * Minutes one record allows before escalation: its own value, else the platform's.
+ *
+ * The one place the fallback rule lives. `normalizeHuman` uses the same predicate
+ * to decide whether a configured value is stored at all, so a save and a read can
+ * never disagree about which window applies.
+ */
+export function deadlineMinutesOf(human: { escalationDeadlineMinutes?: number }, fallback: number): number {
+  return usableMinutes(human.escalationDeadlineMinutes) ? human.escalationDeadlineMinutes : fallback
 }
 
 /** Fields the config file owns. Identity and prose live in the persona file. */

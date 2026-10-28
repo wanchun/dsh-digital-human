@@ -187,6 +187,7 @@ pm-assistant-202610131954.dh.tar.gz
 │   ├── memory.md                  记忆（# now + # History）
 │   ├── sessions.json              地址 → 会话 id
 │   ├── edges.jsonl                往来边（谁问谁的记录）
+│   ├── tasks.jsonl                工作项账本（一行一次状态变化）
 │   └── conversations/<会话>.jsonl  信箱
 ├── humans.json.legacy-<时间>      迁移备份（迁移后才有）
 ├── skills/                        插件技能空间
@@ -231,8 +232,8 @@ node tools/migrate.mjs
 ### 测试
 
 ```
-单测 609 项（vitest，17 个文件）      分支覆盖率 ≥ 90%
-集成 423 项（6 个 .mjs，跑编译产物）  零运行时依赖
+单测 705 项（vitest，19 个文件）      分支覆盖率 ≥ 90%
+集成 430 项（6 个 .mjs，跑编译产物）  零运行时依赖
 零运行时依赖（只用 node 内置）
 ```
 

@@ -189,6 +189,7 @@ the record's own `configSchema`.
 ├── humans/<id>/
 │   ├── memory.md                  # now + # History
 │   ├── sessions.json              address → session id
+│   ├── tasks.jsonl                work-item ledger (one line per change)
 │   └── conversations/<addr>.jsonl mailbox
 └── workspace/                     the workspace digital humans share
 ```
@@ -216,8 +217,8 @@ one in the page, or import a bundle. The plugin does not decide anyone's persona
 ### Tests
 
 ```
-519 unit tests (vitest, 17 files)       lines 98.8%  branches 90.1%
-410 integration checks (6 .mjs suites)  statements 97.4%  functions 96.3%
+705 unit tests (vitest, 19 files)       lines 96.5%  branches 90.4%
+430 integration checks (6 .mjs suites)  statements 95.4%  functions 95.2%
 zero runtime dependencies (node built-ins only)
 ```
 
