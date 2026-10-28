@@ -25,16 +25,27 @@ const stateFor = (botId: string, sessions: Record<string, string>) => {
   return dir
 }
 
-/** A Connection stub that records every dispatched request. */
-function connectionStub(answer?: (body: any) => Response) {
-  const seen: Array<{ channel: string; url: string; body: any }> = []
+/** A Connection stub that records every dispatched request and the Peer it ran as. */
+function connectionStub(answer?: (body: any) => Response, { withPeer = true } = {}) {
+  const seen: Array<{ channel: string; url: string; body: any; peer?: unknown }> = []
+  const peers: any[] = []
   return {
     seen,
+    peers,
+    ...(withPeer
+      ? {
+        createPeer(options: any) {
+          const peer = { ...options, id: peers.length + 1 }
+          peers.push(peer)
+          return peer
+        },
+      }
+      : {}),
     createSharedFetchHandler(channel: string) {
       return {
-        async fetch(request: Request) {
+        async fetch(request: Request, peer?: unknown) {
           const body = await request.json()
-          seen.push({ channel, url: request.url, body })
+          seen.push({ channel, url: request.url, body, peer })
           if (answer) return answer(body)
           return Response.json({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: {} } })
         },
@@ -164,6 +175,24 @@ describe('syncBotToHuman', () => {
     const results = await syncBotToHuman({ get: () => connection }, { botId: '' })
     expect(results).toEqual([])
     expect(connection.seen).toEqual([])
+  })
+
+  it('dispatches as an in-process owner Peer, which the IM routes require', async () => {
+    // dispatching without a Peer leaves `peer.principal` undefined inside the IM
+    // routes, so preset and context pushes failed while the workspace push passed.
+    const connection = connectionStub()
+    await syncBotToHuman({ get: () => connection }, target)
+    expect(connection.peers).toHaveLength(1)
+    expect(connection.peers[0]).toMatchObject({ principal: { kind: 'owner' }, interactions: 'none' })
+    expect(connection.seen).toHaveLength(3)
+    for (const call of connection.seen) expect(call.peer).toBe(connection.peers[0])
+  })
+
+  it('still dispatches on a Host whose Connection cannot mint a Peer', async () => {
+    const connection = connectionStub(undefined, { withPeer: false })
+    const results = await syncBotToHuman({ get: () => connection }, target)
+    expect(results.every((entry) => entry.ok)).toBe(true)
+    expect(connection.seen.every((call) => call.peer === undefined)).toBe(true)
   })
 
   it('reports an absent connection instead of throwing', async () => {

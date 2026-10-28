@@ -223,10 +223,11 @@ function channelMount(botId: string): string | undefined {
 
 /** Call one IM endpoint and normalise its answer. */
 async function call(
-  handler: { fetch: (request: Request) => Promise<Response> },
+  handler: { fetch: (request: Request, peer?: unknown) => Promise<Response> },
   namespace: string,
   endpoint: string,
   payload: Record<string, unknown>,
+  peer?: unknown,
 ): Promise<ImSyncResult> {
   const rpcId = `digital-human-${endpoint}-${Date.now()}`
   let response: Response
@@ -240,7 +241,7 @@ async function call(
         method: namespace,
         payload: { method: endpoint, payload },
       }),
-    }))
+    }), peer)
   } catch (error) {
     return { endpoint, ok: false, reason: error?.message ?? String(error) }
   }
@@ -301,13 +302,20 @@ export async function syncBotToHuman(
   }
   const handler = connection.createSharedFetchHandler(SHARED_CHANNEL)
   const namespace = `dsh-im${mount}`
+  // The shared handler dispatches *as a Peer*, and it never defaults one: two of the
+  // three endpoints read `peer.principal` and failed with "Cannot read properties of
+  // undefined" when called without it. An in-process owner Peer is exactly the
+  // identity a binding saved from this Host has.
+  const peer = typeof connection.createPeer === 'function'
+    ? connection.createPeer({ principal: { kind: 'owner' }, interactions: 'none' })
+    : undefined
 
   const results: ImSyncResult[] = []
-  if (workspace) results.push(await call(handler, namespace, SET_WORKSPACE, { botId, workspace }))
-  if (presetId) results.push(await call(handler, namespace, SET_PRESET, { botId, agentPreset: presetId }))
+  if (workspace) results.push(await call(handler, namespace, SET_WORKSPACE, { botId, workspace }, peer))
+  if (presetId) results.push(await call(handler, namespace, SET_PRESET, { botId, agentPreset: presetId }, peer))
   // Always on: a persona that classifies callers is useless without knowing who
   // is writing, and the block is off by default.
-  results.push(await call(handler, namespace, SET_CONTEXT, { botId, config: contextConfig(owner) }))
+  results.push(await call(handler, namespace, SET_CONTEXT, { botId, config: contextConfig(owner) }, peer))
   for (const result of results) {
     log(result.ok
       ? `aligned ${botId}: ${result.endpoint}`

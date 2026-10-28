@@ -225,7 +225,10 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   async function align(record: Human): Promise<ImSyncResult[]> {
     const results = await syncBotToHuman(ctx, {
       botId: record.im?.botId,
-      workspace: record.workspace,
+      // A record without its own directory still belongs to the shared one: without
+      // this push the bot's Sessions stay in whatever workspace IM last used, which
+      // is the "我的会话不在数字人工作区" symptom.
+      workspace: record.workspace || defaultWorkspace?.path,
       presetId: presetIdOf(record.id),
       owner: record.im?.owner,
       log,
