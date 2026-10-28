@@ -105,7 +105,7 @@ describe('the chat tools', () => {
     const names = build(serviceStub()).map((tool) => tool.name)
     expect(names).toEqual([
       'digital_human_send', 'digital_human_status', 'digital_human_stop', 'digital_human_messages',
-      'digital_human_conversations', 'digital_human_list', 'notify_bot', 'list_bot_targets',
+      'digital_human_conversations', 'digital_human_list', 'digital_human_usage', 'notify_bot', 'list_bot_targets',
       'set_session_title', 'memory_status', 'memory_compact',
     ])
   })
