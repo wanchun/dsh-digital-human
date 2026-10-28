@@ -442,6 +442,18 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   }
 
   /**
+   * Whether one record keeps a single Session for every thread.
+   *
+   * A shared-session record files its ledger under one conversation whatever label a
+   * caller used, so its turn may claim the head across labels. A threaded record may
+   * not: each thread has its own queue.
+   */
+  async function isSharedSession(humanId: string): Promise<boolean> {
+    const human = await store.get(humanId, seed)
+    return human?.sessionMode === 'single'
+  }
+
+  /**
    * Stop work items no turn will ever end.
    *
    * A restart kills every running turn without a turn/end, so an in-progress item
@@ -668,9 +680,20 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       // ledger tracks work handed over between digital humans.
       if (!isPeerDelivery(from, human.id)) return chat.deliver(human, delivery)
       const busy = (await chat.status(human, sessionId ?? conversation)).isGenerating
+      // Answering a Session that asked is not handing over new work: a reply travels
+      // to the Session named by <dsh_peer_source>, and treating it as an assignment
+      // left the responder holding a queued item no turn would ever start.
+      const replying = typeof sessionId === 'string' && sessionId.trim() !== ''
       let intent: 'assign' | 'amend' | 'cancel' = 'assign'
       if (mode === 'cancel') intent = 'cancel'
       else if (mode === 'amend') intent = 'amend'
+      else if (mode !== 'new' && replying) {
+        // A reply amends the item it answers, and stays a plain message when there is
+        // nothing open to amend.
+        const open = await ledger.open(human.id, conversation)
+        if (open.length === 0) return chat.deliver(human, delivery)
+        intent = 'amend'
+      }
       else if (mode !== 'new' && busy && await answeringQuestion(human, { from, conversation })) intent = 'amend'
 
       if (intent === 'cancel') {
@@ -1159,9 +1182,13 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // The Host's turn boundaries are the only authoritative source of a work item's
     // state: a model reporting its own success is not a completion signal.
     if (kind === 'turn/start') {
-      void known().then((owner) => {
+      void known().then(async (owner) => {
         if (!owner) return undefined
-        return ledger.start(owner.humanId, { conversation: owner.conversationId, sessionId })
+        return ledger.start(owner.humanId, {
+          conversation: owner.conversationId,
+          sessionId,
+          singleThread: await isSharedSession(owner.humanId),
+        })
       }).catch((error) => log(`work item start failed for ${sessionId}: ${error.message}`))
       return
     }
@@ -1188,8 +1215,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         // turn/start for it, so the item would stay queued with nothing to close it.
         // A reply is proof the turn is real, so it claims the queue head too; the
         // call is a no-op when an item is already in progress.
-        await ledger.start(owner.humanId, { conversation: owner.conversationId, sessionId })
-          .catch((error) => log(`work item claim failed for ${sessionId}: ${error.message}`))
+        await ledger.start(owner.humanId, {
+          conversation: owner.conversationId,
+          sessionId,
+          singleThread: await isSharedSession(owner.humanId),
+        }).catch((error) => log(`work item claim failed for ${sessionId}: ${error.message}`))
         await chat.noteAssistant(sessionId, event.data?.message ?? event.data)
       }).catch((error) => log(`mailbox write failed: ${error.message}`))
     }

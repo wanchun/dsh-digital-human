@@ -990,6 +990,22 @@ describe('escalation to a human', () => {
     return sent
   }
 
+  it('treats an answer to a Session as a reply, not as new work', async () => {
+    // A peer replying to the Session that asked left a queued item behind, and no
+    // turn would ever start for it. A reply carries session_id; that is not a handover.
+    const platform = makeCtx({})
+    await applyPlatform(platform.ctx, { home, humans: [boundHuman()] })
+    const service = platform.provided.get('digitalHumans')
+    await service.send('dev-assistant', {
+      message: 'done, here is the result',
+      from: 'pm-assistant',
+      sessionId: 'session-asked',
+      fromSession: 'session-asked',
+      conversationId: 'REQ-1',
+    })
+    expect(await service.tasks('dev-assistant')).toHaveLength(0)
+  })
+
   it('recovers the work item owner when the reverse index was never primed', async () => {
     // A restarted Host whose startup read was missed used to drop turn events for the
     // Session: the item stayed queued forever. The header names the preset, so the

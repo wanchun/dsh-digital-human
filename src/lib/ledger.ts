@@ -223,12 +223,14 @@ export class HumanLedger {
    * a time, and a second event for that turn — or a turn someone else started in
    * the same Session — must not fork the ownership.
    */
-  start(humanId: string, { conversation, sessionId }: {
+  start(humanId: string, { conversation, sessionId, singleThread = false }: {
     conversation: string
     sessionId: string
+    /** The record keeps one Session for every thread, so its queue is the record's. */
+    singleThread?: boolean
   }): Promise<TaskRow | undefined> {
     return this.#serial(humanId, async () => {
-      const open = await this.#openIn(humanId, conversation)
+      const open = await this.#openInForTurn(humanId, conversation, singleThread)
       const running = open.find((task) => task.state === 'in_progress')
       if (running) {
         if (running.owner === undefined) {
@@ -244,6 +246,27 @@ export class HumanLedger {
       await this.#append(humanId, row)
       return row
     })
+  }
+
+  /**
+   * The open items a turn in this conversation may act on.
+   *
+   * Normally the named thread. A record whose open items all live in one thread — a
+   * shared-session record, filed under one conversation whatever label the caller
+   * used — matches that lone thread instead of nothing: its turn is visibly its own,
+   * and leaving the head unclaimed is how work stalled with a reply already sent.
+   */
+  async #openInForTurn(humanId: string, conversation: string, singleThread: boolean): Promise<TaskRow[]> {
+    const open = await this.#openIn(humanId, conversation)
+    if (open.length > 0) return open
+    // Only a shared-session record may match across labels: its one Session carries
+    // the whole queue, so the label the caller used cannot identify a thread. A
+    // threaded record stays strict — claiming another thread's head would close the
+    // wrong item.
+    if (!singleThread) return []
+    const all = (await this.list(humanId)).filter((task) => isOpen(task))
+    const threads = new Set(all.map((task) => task.conversation))
+    return threads.size === 1 ? all : []
   }
 
   /**
