@@ -383,6 +383,16 @@ export class HumanStore {
     return join(this.dir(id), 'edges.jsonl')
   }
 
+  /**
+   * The work-item ledger: one line per state change, never rewritten.
+   *
+   * It sits beside the conversation logs it describes, so a restart reads the same
+   * directory it wrote.
+   */
+  taskPath(id) {
+    return join(this.dir(id), 'tasks.jsonl')
+  }
+
   conversationPath(id, conversationId) {
     // Percent-encode: a Halo conversation id carries colons, which are legal in
     // the id but not a safe filename. Plain ids encode to themselves, so

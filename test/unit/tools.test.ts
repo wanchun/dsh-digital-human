@@ -72,6 +72,12 @@ function serviceStub(overrides: Record<string, unknown> = {}) {
       return undefined
     },
     noteEdge: async (id: string, edge: any) => { record('noteEdge', id, edge) },
+    // The work-item ledger. Empty by default: a record with no handed-over work has
+    // nothing for status to report.
+    tasks: async (id: string, conversationId: string) => {
+      record('tasks', id, conversationId)
+      return []
+    },
     chat: {
       conversations: async (id: string) => { record('conversations', id); return ['main', 'REQ-1'] },
       addresses: async (id: string) => {
@@ -387,6 +393,85 @@ describe('the chat tools', () => {
     const detail = (await toolOf(build(serviceStub()), 'digital_human_list').execute({})).detail
     expect(detail).toContain('pm — 研发PM助手 (you, bot wecom_1, target leader)')
     expect(detail).toContain('disabled')
+  })
+
+  it('echoes the work item a send was recorded as', async () => {
+    const service = serviceStub({
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return {
+          sessionId: 'session-1', conversationId: 'REQ-1', accepted: true,
+          task: { id: 'w-01', state: 'in_progress', intent: 'amend', queued: false },
+        }
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_send').execute({
+      to: 'dev', message: 'x', conversation_id: 'REQ-1', mode: 'amend', task_id: 'w-01', note: 'ships Monday',
+    })
+    expect(result).toMatchObject({ taskId: 'w-01', taskState: 'in_progress', taskIntent: 'amend' })
+    expect(result.detail).toContain('amendment to w-01')
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
+      .toMatchObject({ mode: 'amend', taskId: 'w-01', note: 'ships Monday' })
+  })
+
+  it('says a task was queued, and does not wait for the turn in front of it', async () => {
+    const service = serviceStub({
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return {
+          sessionId: 'session-1', conversationId: 'REQ-1', accepted: true,
+          task: { id: 'w-02', state: 'queued', intent: 'assign', queued: true },
+        }
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'x', conversation_id: 'REQ-1', wait_seconds: 30 })
+    expect(result.detail).toContain('Queued as w-02')
+    expect(result.finished).toBe(false)
+    // Waiting would only observe the turn in front of the queued item.
+    expect(service.calls.some((entry) => entry.method === 'status')).toBe(false)
+  })
+
+  it('reports a cancellation instead of a delivery', async () => {
+    const service = serviceStub({
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return {
+          sessionId: '', conversationId: 'REQ-1', accepted: false,
+          task: { id: 'w-01', state: 'cancelled', intent: 'cancel', queued: false },
+        }
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'stop', conversation_id: 'REQ-1', mode: 'cancel' })
+    expect(result).toMatchObject({ accepted: false, taskId: 'w-01', taskState: 'cancelled' })
+    expect(result.detail).toContain('Cancelled work item w-01')
+    expect(result.detail).not.toContain('Delivered')
+  })
+
+  it('reports the latest work item of a conversation beside the turn state', async () => {
+    const service = serviceStub({
+      status: async () => ({ exists: true, isGenerating: false, conversationId: 'REQ-1' }),
+      tasks: async (id: string, conversationId: string) => {
+        service.calls.push({ method: 'tasks', args: [id, conversationId] })
+        return [
+          { id: 'w-01', from: 'pm', to: 'dev', conversation: 'REQ-1', state: 'done', createdAt: '2026-01-01T00:00:00Z' },
+          {
+            id: 'w-02', from: 'pm', to: 'dev', conversation: 'REQ-1', state: 'failed',
+            createdAt: '2026-01-01T00:02:00Z', endedAt: '2026-01-01T00:03:00Z', reason: 'truncated', note: 'see the log',
+          },
+        ]
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_status')
+      .execute({ to: 'dev', conversation_id: 'REQ-1' })
+    expect(result).toMatchObject({
+      taskId: 'w-02', state: 'failed', reason: 'truncated', endedAt: '2026-01-01T00:03:00Z', note: 'see the log',
+    })
+    expect(result.detail).toContain('w-02')
+    expect(result.detail).toContain('failed')
+    expect(result.detail).toContain('see the log')
+    expect(service.calls.find((entry) => entry.method === 'tasks')!.args).toEqual(['dev', 'REQ-1'])
   })
 })
 
