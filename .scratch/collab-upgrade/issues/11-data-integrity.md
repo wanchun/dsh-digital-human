@@ -32,6 +32,8 @@ Status: resolved
 - 同一 Session 不允许被两个 conversation 名共用；发现即报错或改名，不静默覆盖。
 - 压缩后 `memory_status` 能列出刚归档的文件。
 - 各加一条单测（现有 609 项单测的入口在 `test/`）。
+## Answer
+
 ## 进度（2026-10-28）
 
 代码侧已改：
