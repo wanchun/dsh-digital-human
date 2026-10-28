@@ -72,6 +72,12 @@ function serviceStub(overrides: Record<string, unknown> = {}) {
       return undefined
     },
     noteEdge: async (id: string, edge: any) => { record('noteEdge', id, edge) },
+    // The work-item ledger. Empty by default: a record with no handed-over work has
+    // nothing for status to report.
+    tasks: async (id: string, conversationId: string) => {
+      record('tasks', id, conversationId)
+      return []
+    },
     chat: {
       conversations: async (id: string) => { record('conversations', id); return ['main', 'REQ-1'] },
       addresses: async (id: string) => {
@@ -99,7 +105,7 @@ describe('the chat tools', () => {
     const names = build(serviceStub()).map((tool) => tool.name)
     expect(names).toEqual([
       'digital_human_send', 'digital_human_status', 'digital_human_stop', 'digital_human_messages',
-      'digital_human_conversations', 'digital_human_list', 'notify_bot', 'list_bot_targets',
+      'digital_human_conversations', 'digital_human_list', 'digital_human_usage', 'notify_bot', 'list_bot_targets',
       'set_session_title', 'memory_status', 'memory_compact',
     ])
   })
@@ -171,6 +177,17 @@ describe('the chat tools', () => {
       .every((entry) => entry.args[1].fromSession === undefined)).toBe(true)
   })
 
+  it('passes an explicit deadline through to the assignment', async () => {
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    const deadline = '2026-11-01T00:00:00.000Z'
+    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1]).toMatchObject({ deadline })
+    // A blank value is "no deadline", not a deadline of empty string.
+    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline: '  ' })
+    expect(service.calls.filter((entry) => entry.method === 'send')[1].args[1].deadline).toBeUndefined()
+  })
+
   it('passes a Session address through as the address', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
@@ -229,6 +246,45 @@ describe('the chat tools', () => {
     await toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
       .execute({ to: 'pm', message: 'x', conversation_id: 'main' })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[0]).toBe('pm')
+  })
+
+  it('expands an array of targets into one work item each, with its own receipt', async () => {
+    const qa = { id: 'qa', name: '测试助手', enabled: true, im: { botId: '', targetId: '' } }
+    const service = serviceStub({
+      resolve: async (reference: string) => {
+        service.calls.push({ method: 'resolve', args: [reference] })
+        return [people.pm, people.dev, qa].find((entry) => entry.id === reference || entry.name === reference)
+      },
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return {
+          sessionId: `session-${id}`,
+          conversationId: options.conversationId,
+          accepted: true,
+          task: { id: `w-${id}`, state: 'queued', intent: 'assign', queued: false },
+        }
+      },
+    })
+    // dev declares no peers, so both targets are reachable.
+    const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
+    const result = await send.execute({ to: ['pm', 'qa'], message: 'do it', conversation_id: 'REQ-1' })
+    expect(service.calls.filter((entry) => entry.method === 'send').map((entry) => entry.args[0]))
+      .toEqual(['pm', 'qa'])
+    // Two targets, two receipts: each carries the Session and the work item of one peer.
+    expect(result.results).toEqual([
+      expect.objectContaining({ to: 'pm', conversationId: 'REQ-1', sessionId: 'session-pm', taskId: 'w-pm', accepted: true }),
+      expect.objectContaining({ to: 'qa', conversationId: 'REQ-1', sessionId: 'session-qa', taskId: 'w-qa', accepted: true }),
+    ])
+    expect(result.detail).toContain('w-pm')
+    expect(result.detail).toContain('w-qa')
+  })
+
+  it('refuses the whole array when one target is unknown, delivering nothing', async () => {
+    const service = serviceStub()
+    const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
+    await expect(send.execute({ to: ['pm', 'ghost'], message: 'x', conversation_id: 'main' }))
+      .rejects.toThrow(/unknown digital human/)
+    expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
   })
 
   it('resolves status, messages and stop through the edge too', async () => {
@@ -387,6 +443,85 @@ describe('the chat tools', () => {
     const detail = (await toolOf(build(serviceStub()), 'digital_human_list').execute({})).detail
     expect(detail).toContain('pm — 研发PM助手 (you, bot wecom_1, target leader)')
     expect(detail).toContain('disabled')
+  })
+
+  it('echoes the work item a send was recorded as', async () => {
+    const service = serviceStub({
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return {
+          sessionId: 'session-1', conversationId: 'REQ-1', accepted: true,
+          task: { id: 'w-01', state: 'in_progress', intent: 'amend', queued: false },
+        }
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_send').execute({
+      to: 'dev', message: 'x', conversation_id: 'REQ-1', mode: 'amend', task_id: 'w-01', note: 'ships Monday',
+    })
+    expect(result).toMatchObject({ taskId: 'w-01', taskState: 'in_progress', taskIntent: 'amend' })
+    expect(result.detail).toContain('amendment to w-01')
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
+      .toMatchObject({ mode: 'amend', taskId: 'w-01', note: 'ships Monday' })
+  })
+
+  it('says a task was queued, and does not wait for the turn in front of it', async () => {
+    const service = serviceStub({
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return {
+          sessionId: 'session-1', conversationId: 'REQ-1', accepted: true,
+          task: { id: 'w-02', state: 'queued', intent: 'assign', queued: true },
+        }
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'x', conversation_id: 'REQ-1', wait_seconds: 30 })
+    expect(result.detail).toContain('Queued as w-02')
+    expect(result.finished).toBe(false)
+    // Waiting would only observe the turn in front of the queued item.
+    expect(service.calls.some((entry) => entry.method === 'status')).toBe(false)
+  })
+
+  it('reports a cancellation instead of a delivery', async () => {
+    const service = serviceStub({
+      send: async (id: string, options: any) => {
+        service.calls.push({ method: 'send', args: [id, options] })
+        return {
+          sessionId: '', conversationId: 'REQ-1', accepted: false,
+          task: { id: 'w-01', state: 'cancelled', intent: 'cancel', queued: false },
+        }
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'stop', conversation_id: 'REQ-1', mode: 'cancel' })
+    expect(result).toMatchObject({ accepted: false, taskId: 'w-01', taskState: 'cancelled' })
+    expect(result.detail).toContain('Cancelled work item w-01')
+    expect(result.detail).not.toContain('Delivered')
+  })
+
+  it('reports the latest work item of a conversation beside the turn state', async () => {
+    const service = serviceStub({
+      status: async () => ({ exists: true, isGenerating: false, conversationId: 'REQ-1' }),
+      tasks: async (id: string, conversationId: string) => {
+        service.calls.push({ method: 'tasks', args: [id, conversationId] })
+        return [
+          { id: 'w-01', from: 'pm', to: 'dev', conversation: 'REQ-1', state: 'done', createdAt: '2026-01-01T00:00:00Z' },
+          {
+            id: 'w-02', from: 'pm', to: 'dev', conversation: 'REQ-1', state: 'failed',
+            createdAt: '2026-01-01T00:02:00Z', endedAt: '2026-01-01T00:03:00Z', reason: 'truncated', note: 'see the log',
+          },
+        ]
+      },
+    })
+    const result = await toolOf(build(service), 'digital_human_status')
+      .execute({ to: 'dev', conversation_id: 'REQ-1' })
+    expect(result).toMatchObject({
+      taskId: 'w-02', state: 'failed', reason: 'truncated', endedAt: '2026-01-01T00:03:00Z', note: 'see the log',
+    })
+    expect(result.detail).toContain('w-02')
+    expect(result.detail).toContain('failed')
+    expect(result.detail).toContain('see the log')
+    expect(service.calls.find((entry) => entry.method === 'tasks')!.args).toEqual(['dev', 'REQ-1'])
   })
 })
 
@@ -582,6 +717,21 @@ describe('the memory tools', () => {
     const { ensureMemory, memoryPaths } = await import('../../src/lib/memory')
     ensureMemory(memoryPaths(service.store, 'pm').file)
     expect((await compact.execute({})).detail).toContain('Archived to')
+  })
+
+  it('archives only the timeline when asked, keeping `# now`', async () => {
+    const service = serviceStub()
+    const { ensureMemory, memoryPaths } = await import('../../src/lib/memory')
+    const { readFileSync, writeFileSync } = await import('node:fs')
+    const paths = memoryPaths(service.store, 'pm')
+    ensureMemory(paths.file)
+    writeFileSync(paths.file, '# now\n## State | x\n\n# History\n\n## 2026-10-01-1200 | old\nbody\n', 'utf8')
+    const result = await toolOf(build(service), 'memory_compact').execute({ scope: 'history' })
+    expect(result.detail).toContain('Archived')
+    const text = readFileSync(paths.file, 'utf8')
+    // The daily path: the timeline is gone, the working block is untouched.
+    expect(text).toContain('## State | x')
+    expect(text).not.toContain('old')
   })
 })
 

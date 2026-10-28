@@ -119,6 +119,11 @@ function peerSource(from, fromSession, conversationId) {
   return `<dsh_peer_source from="${from}"${session} conversation="${conversationId}" />`
 }
 
+/** Order two edges by their timestamp, newest first. */
+function byNewest(a: PeerEdge, b: PeerEdge): number {
+  return a.at < b.at ? 1 : a.at > b.at ? -1 : 0
+}
+
 /** One bounded, JSON-safe mailbox record. */
 function record(kind, fields) {
   return JSON.stringify({ at: new Date().toISOString(), kind, ...fields })
@@ -297,8 +302,7 @@ export class HumanChat {
     conversationId?: string
   }) {
     const list = this.#edgesOf(humanId)
-    const newest = (a: PeerEdge, b: PeerEdge) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)
-    const pick = (predicate: (edge: PeerEdge) => boolean) => list.filter(predicate).sort(newest)[0]
+    const pick = (predicate: (edge: PeerEdge) => boolean) => list.filter(predicate).sort(byNewest)[0]
     const sameThread = (edge: PeerEdge) => conversationId === undefined || edge.conversation === conversationId
     const inbound = selfSession
       ? pick((edge) => edge.dir === 'in' && edge.selfSession === selfSession && edge.peer === peer && sameThread(edge))
@@ -319,6 +323,31 @@ export class HumanChat {
       if (typeof legacy === 'string') return { sessionId: legacy, conversationId, via: 'legacy' as const }
     }
     return null
+  }
+
+  /**
+   * The newest recorded exchange that matches a filter.
+   *
+   * Answering "is this a reply to the question that Session just asked" needs the
+   * last line in each direction, not the whole history.
+   */
+  async latestEdge(humanId, { dir, peer, conversation, peerSession }: {
+    dir: 'in' | 'out'
+    peer?: string
+    conversation?: string
+    peerSession?: string
+  }) {
+    return this.#edgesOf(humanId)
+      .filter((edge) => edge.dir === dir
+        && (peer === undefined || edge.peer === peer)
+        && (conversation === undefined || edge.conversation === conversation)
+        && (peerSession === undefined || edge.peerSession === peerSession))
+      .sort(byNewest)[0]
+  }
+
+  /** The conversation name a recorded Session was filed under, if any. */
+  async conversationOf(humanId, sessionId) {
+    return this.#conversationOf(humanId, sessionId)
   }
 
   /** Resolve the recorded Session for one conversation, without creating one. */
@@ -642,13 +671,14 @@ export class HumanChat {
    */
   async deliver(
     human: Human,
-    { conversationId, sessionId, message, from = 'user', fromSession, presetId }: {
+    { conversationId, sessionId, message, from = 'user', fromSession, presetId, deliveryMode }: {
       conversationId?: string
       sessionId?: string
       message?: string
       from?: string
       fromSession?: string
       presetId?: string
+      deliveryMode?: 'steer' | 'queue'
     } = {},
   ) {
     if (!human.enabled) throw new Error(`digital human "${human.id}" is disabled`)
@@ -698,7 +728,7 @@ export class HumanChat {
       // recipient wants now, not a request to queue behind the work in progress. A
       // shared-session record is different: its tasks are work items, so they queue
       // behind the turn instead of interrupting it.
-      mode: single ? 'queue' : 'steer',
+      mode: single ? 'queue' : deliveryMode ?? 'steer',
       // The mailbox keeps the message as written; the model also gets the two facts
       // only the transport knows: who sent it, and which Session to answer.
       content: [{ type: 'text', text: `${peerSource(from, fromSession, conversation)}\n${text}` }],

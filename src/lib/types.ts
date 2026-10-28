@@ -132,6 +132,13 @@ export interface Human {
    * the turn already running.
    */
   sessionMode?: 'thread' | 'single'
+  /**
+   * Minutes a work item handed to this record may run before it escalates.
+   *
+   * Absent means the platform decides, which defaults to 30 minutes. A shorter
+   * window belongs to a record whose work is expected back quickly.
+   */
+  escalationDeadlineMinutes?: number
 }
 
 /**

@@ -20,6 +20,7 @@
   - Halo 源码：`~/tmp/halo-src/src`，从 `/Applications/Halo-WeBank.app/.../app.asar` 的 sourcemap 还原（脚本 `/tmp/ex3.mjs`）
   - 侦察报告：`~/tmp/research/{ds-bot-mechanisms,halo-mechanisms,digital-human-baseline}.md`
 - 落地顺序见 10，四批。
+- **2026-10-28 已实施**：四批全部合入 `feat/collab-ledger`，705 项单测 + 430 项集成检查全绿；两轴 code-review 的必修项已修（超时判空闲、折叠不丢、记忆保尾、interrupted→stopped）。
 
 ## Decisions so far
 

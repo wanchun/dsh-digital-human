@@ -8,7 +8,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HumanStore } from '../build/host/lib/store.js'
-import { SEED_HUMANS } from '../build/host/lib/seed.js'
+import { SEED_HUMANS } from './fixtures/seed.mjs'
 import {
   COMPACTION_THRESHOLD_BYTES,
   buildSnapshot,

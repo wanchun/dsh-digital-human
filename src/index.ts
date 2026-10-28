@@ -17,8 +17,14 @@
 
 import { dirname } from 'node:path'
 
-import { HumanStore, defaultHome } from './lib/store.js'
-import { HumanChat } from './lib/chat.js'
+import { HumanStore, deadlineMinutesOf, defaultHome } from './lib/store.js'
+import { DEFAULT_CONVERSATION, HumanChat, requireConversation } from './lib/chat.js'
+import { archiveHistoryOnTurnEnd, memoryPaths } from './lib/memory.js'
+import { HumanLedger } from './lib/ledger.js'
+import type { TaskRow } from './lib/ledger.js'
+import {
+  DEFAULT_DEADLINE_MINUTES, deadlineIn, escalates, escalationText, foldedInto,
+} from './lib/escalation.js'
 import { buildPresetDefinition, presetIdOf, resolveConfigValues } from './lib/presets.js'
 import { buildRegistryTool } from './lib/tools.js'
 import { listLibrary, removeSkill, writeSkill } from './lib/skills.js'
@@ -143,6 +149,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // The retry window is configurable so a deployment — or a test — can shorten it.
   const alignRetryMs = positiveSetting(config, 'alignRetryMs', ALIGN_RETRY_MS_DEFAULT)
   const alignRetryMax = positiveSetting(config, 'alignRetryMax', ALIGN_RETRY_MAX_DEFAULT)
+  // How long a handover may run before its owner hears about it. A record may carry
+  // its own value; this is the fallback every record inherits.
+  const deadlineMinutes = positiveSetting(config, 'escalationDeadlineMinutes', DEFAULT_DEADLINE_MINUTES)
   // Empty unless the caller supplies examples. A fresh install grows no digital
   // humans: they are configured in the page or imported as a bundle.
   const seed: Human[] = Array.isArray(config.humans) ? config.humans : []
@@ -162,6 +171,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     defaultWorkspacePath: () => defaultWorkspace?.path,
     workspaceIdOf: (path: string) => workspaceIdByPath.get(path),
   })
+  const ledger = new HumanLedger(store, log)
 
   /** Preset disposers currently owned by this plugin. */
   const disposers: Array<() => unknown> = []
@@ -177,6 +187,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   const permissionByPreset = new Map<string, string>()
   /** human id -> the per-endpoint outcome of its last alignment. */
   const alignmentByHuman = new Map<string, ImSyncResult[]>()
+
+  /** Records that keep durable memory, so a turn end knows whose timeline to reclaim. */
+  const memoryEnabled = new Set<string>()
 
   /**
    * Whether an alignment is worth another attempt.
@@ -264,7 +277,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // Cleared with the others: a stale outcome would report a bot as aligned after
     // its binding changed or the record was removed.
     alignmentByHuman.clear()
+    memoryEnabled.clear()
     const humans = await store.list(seed)
+    for (const human of humans) if (human.memory !== false) memoryEnabled.add(human.id)
     defaultWorkspace = await ensureDefaultWorkspace(ctx, { home, log })
     workspaceIdByPath.clear()
     for (const item of await listWorkspaces(ctx)) {
@@ -362,6 +377,206 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     }
   }
 
+  /**
+   * The conversation a delivery is filed under, resolved without opening a Session.
+   *
+   * The ledger row has to exist before the prompt is issued, so the address is
+   * resolved here rather than read back from the delivery.
+   */
+  async function conversationFor(human: Human, { conversationId, sessionId }: {
+    conversationId?: string
+    sessionId?: string
+  }): Promise<string> {
+    // A shared-session record runs everything in one Session, which is filed under
+    // the default conversation whatever label the message carries.
+    if (human.sessionMode === 'single') return DEFAULT_CONVERSATION
+    if (conversationId !== undefined) return requireConversation(conversationId)
+    const known = sessionId ? await chat.conversationOf(human.id, sessionId) : undefined
+    // A Session with no recorded thread keeps its own id as the label, which is the
+    // same answer `chat.#resolve` gives; a caller naming neither address lands in
+    // `main`. The tool is the layer that refuses both addresses at once (README:
+    // "两个地址都不传 → 报错") and it resolves the address before calling here, so
+    // this stays the service-level default: raising an error here would reject the
+    // bare `service.send` calls the chat API and tests rely on. IM inbound never
+    // reaches this function — `dsh-im` delivers into its own Session.
+    return known ?? sessionId ?? DEFAULT_CONVERSATION
+  }
+
+  /** Whether a delivery hands work over from another digital human. */
+  function isPeerDelivery(from: unknown, selfId: string): from is string {
+    return typeof from === 'string' && from !== '' && from !== 'user' && from !== selfId
+  }
+
+  /**
+   * Whether a delivery answers a question the peer's running turn just asked.
+   *
+   * The transport recorded the inbound edge when the question arrived, so the
+   * Session that asked is known. A question that is still the last word on the
+   * thread is the one an answer belongs to — anything else is new work.
+   */
+  async function answeringQuestion(human: Human, { from, conversation }: {
+    from: string
+    conversation: string
+  }): Promise<boolean> {
+    const running = (await ledger.open(human.id, conversation)).find((task) => task.state === 'in_progress')
+    // The edges belong to the sender: it is the side that received the question.
+    const asked = await chat.latestEdge(from, {
+      dir: 'in',
+      peer: human.id,
+      conversation,
+      ...(running?.owner ? { peerSession: running.owner } : {}),
+    })
+    if (!asked) return false
+    const answered = await chat.latestEdge(from, { dir: 'out', peer: human.id, conversation })
+    return answered === undefined || asked.at > answered.at
+  }
+
+  /**
+   * Stop work items no turn will ever end.
+   *
+   * A restart kills every running turn without a turn/end, so an in-progress item
+   * would otherwise stay in progress forever. Run once, after the chat layer knows
+   * which Session belongs to which conversation.
+   */
+  async function sweepTasks(): Promise<void> {
+    for (const human of await store.list(seed)) {
+      try {
+        await ledger.sweep(human.id, idleIn(human))
+      } catch (error) {
+        log(`work-item sweep failed for ${human.id}: ${error.message}`)
+      }
+    }
+  }
+
+  /**
+   * Whether one conversation is between turns, as the ledger's predicates expect.
+   *
+   * A turn that is still running owns its work item: settling it behind the turn's
+   * back would leave `turn/end` with nothing to close and call running work blocked.
+   */
+  function idleIn(human: Human): (conversation: string) => Promise<boolean> {
+    return async (conversation) => !(await chat.status(human, conversation)).isGenerating
+  }
+
+  /**
+   * Tell one record's owner about every work item that stopped.
+   *
+   * The ledger is the source of truth: any failed or blocked item that has not been
+   * claimed yet is escalated, so a send missed by a crash is retried by the next
+   * query or turn ending. An item folded into a message sent moments ago is left
+   * unclaimed on purpose: it was never delivered, so a claim would lose it for good,
+   * while leaving it pending lets the first settle after the window send it. The
+   * claim still comes before sending — a person told twice stops trusting the
+   * channel, while an unsent message is only a lost notification.
+   */
+  async function escalateStopped(human: Human, conversation?: string): Promise<void> {
+    const rows = await ledger.list(human.id)
+    const pending = rows.filter((task) => escalates(task.state)
+      && task.escalatedAt === undefined
+      && (conversation === undefined || task.conversation === conversation))
+    if (pending.length === 0) return
+    // One message per thread: a burst of failures from one handover is one event.
+    const threads = new Map<string, TaskRow[]>()
+    for (const task of pending) {
+      const items = threads.get(task.conversation) ?? []
+      items.push(task)
+      threads.set(task.conversation, items)
+    }
+    const dshIm = ctx.get?.('dshIm')
+    for (const [thread, items] of threads) {
+      const lastAt = rows
+        .filter((task) => task.conversation === thread && task.escalatedAt !== undefined)
+        .map((task) => task.escalatedAt!)
+        .sort()
+        .at(-1)
+      const now = new Date()
+      const ids = items.map((task) => task.id).join(', ')
+      // Decide the fold before claiming: a folded item was not sent, so claiming it
+      // would mark it handled and no later settle would ever deliver it.
+      if (foldedInto(lastAt, now)) {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} folded into the message sent at ${lastAt}`)
+        continue
+      }
+      const claimed = await ledger.claim(human.id, {
+        taskIds: items.map((task) => task.id),
+        at: now.toISOString(),
+      })
+      if (claimed.length === 0) continue
+      // No exit, no alternative channel: say why once and keep the ledger settled.
+      const botId = String(human.im?.botId ?? '').trim()
+      if (!botId) {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: no IM bot is bound`)
+        continue
+      }
+      const owner = String(human.im?.owner ?? '').trim()
+      if (!owner) {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: it has no owner`)
+        continue
+      }
+      if (typeof dshIm?.send !== 'function') {
+        log(`escalation of ${ids} in "${thread}" for ${human.id} skipped: the IM service is absent`)
+        continue
+      }
+      try {
+        await dshIm.send(
+          botId,
+          { kind: 'user', route: { chatId: owner } },
+          escalationText(claimed),
+          { format: 'plain' },
+        )
+        log(`escalated ${ids} in "${thread}" to ${owner} through ${botId}`)
+      } catch (error) {
+        log(`escalation of ${ids} in "${thread}" could not be sent: ${error.message}`)
+      }
+    }
+  }
+
+  /**
+   * Settle the ledger before anyone reads it.
+   *
+   * The plugin runs no timer. A timeout is noticed exactly when it is about to
+   * matter — a status or task query, or a turn ending — so this is the whole clock.
+   */
+  async function settleWork(human: Human, conversation?: string): Promise<void> {
+    await ledger.timeout(human.id, {
+      now: new Date(),
+      fallbackMinutes: deadlineMinutesOf(human, deadlineMinutes),
+      isIdle: idleIn(human),
+    })
+    await escalateStopped(human, conversation)
+  }
+
+  /**
+   * Close the item one turn owned, then settle everything the ledger can now see.
+   *
+   * The turn's own item is closed first, because a timeout must not race the result
+   * the turn just produced. A turn ending is also the moment an unrelated overdue
+   * item is noticed, whether or not this turn stopped anything.
+   */
+  async function settleTurn(humanId: string, sessionId: string, reason?: unknown): Promise<void> {
+    await ledger.end(humanId, { sessionId, reason })
+    const human = await store.get(humanId, seed)
+    if (!human) return
+    await settleWork(human)
+  }
+
+  /**
+   * Reclaim the timeline of a record whose memory outgrew the file budget.
+   *
+   * Runs on the Host's `turn/end`, the one boundary after the model has written its
+   * memory. Only `# History` moves: dropping working memory is the model's decision,
+   * so `# now` is left for `memory_compact` to handle.
+   */
+  function reclaimHistory(humanId: string): void {
+    if (!memoryEnabled.has(humanId)) return
+    try {
+      const archived = archiveHistoryOnTurnEnd(memoryPaths(store, humanId))
+      if (archived) log(`archived ${archived.moved} memory history entries of ${humanId} to ${archived.archive}`)
+    } catch (error) {
+      log(`memory history archive failed for ${humanId}: ${error.message}`)
+    }
+  }
+
   let defaultWorkspace: WorkspaceView | undefined
   const service = {
     /** The Workspace a record uses when it names none. */
@@ -405,19 +620,32 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       }
       return removed
     },
-    /** Deliver a message into a digital human's conversation, like `/chat/send`. */
+    /**
+     * Deliver a message into a digital human's conversation, like `/chat/send`.
+     *
+     * A peer's delivery is also a work item, so the address decides the intent: an
+     * idle peer is assigned now, a busy one queues behind the turn in progress, and
+     * a reply into a turn that is waiting for it amends the item already open.
+     * `mode` overrides that guess, because the model sometimes knows better.
+     */
     async send(
       idOrName: string,
-      { conversationId, sessionId, message, from, fromSession }: {
+      { conversationId, sessionId, message, from, fromSession, mode, taskId, note, deadline }: {
         conversationId?: string
         sessionId?: string
         message?: string
         from?: string
         fromSession?: string
+        mode?: 'new' | 'amend' | 'cancel'
+        taskId?: string
+        note?: string
+        /** Explicit due time. Omitted means the record's escalation window. */
+        deadline?: string
       },
     ) {
       const human = await service.require(idOrName)
-      return chat.deliver(human, {
+      const conversation = await conversationFor(human, { conversationId, sessionId })
+      const delivery = {
         conversationId,
         sessionId,
         message,
@@ -425,7 +653,70 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         // The caller's own Session rides along, so the answer can come back to it.
         fromSession,
         presetId: presetIdOf(human.id),
+      }
+      // A person or a record talking to itself is a message, not a work item: the
+      // ledger tracks work handed over between digital humans.
+      if (!isPeerDelivery(from, human.id)) return chat.deliver(human, delivery)
+      const busy = (await chat.status(human, sessionId ?? conversation)).isGenerating
+      let intent: 'assign' | 'amend' | 'cancel' = 'assign'
+      if (mode === 'cancel') intent = 'cancel'
+      else if (mode === 'amend') intent = 'amend'
+      else if (mode !== 'new' && busy && await answeringQuestion(human, { from, conversation })) intent = 'amend'
+
+      if (intent === 'cancel') {
+        const cancelled = await ledger.cancel(human.id, { conversation, ...(taskId ? { taskId } : {}) })
+        return {
+          sessionId: sessionId ?? '',
+          conversationId: conversation,
+          accepted: false,
+          task: { id: cancelled.id, state: cancelled.state, intent, queued: false },
+        }
+      }
+      if (intent === 'amend') {
+        const amended = await ledger.amend(human.id, {
+          conversation,
+          text: String(message ?? ''),
+          ...(taskId ? { taskId } : {}),
+        })
+        const delivered = await chat.deliver(human, delivery)
+        return { ...delivered, task: { id: amended.id, state: amended.state, intent, queued: busy } }
+      }
+      const assigned = await ledger.assign(human.id, {
+        from,
+        conversation,
+        ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {}),
+        // Every item carries a deadline: an escalation with no due time would wait
+        // for a person to notice, which is the failure mode this field removes.
+        deadline: typeof deadline === 'string' && deadline.trim()
+          ? deadline.trim()
+          : deadlineIn(new Date(), deadlineMinutesOf(human, deadlineMinutes)),
       })
+      try {
+        // A queued task must not steer the running turn: it is the next turn, not
+        // news for this one.
+        const delivered = await chat.deliver(human, { ...delivery, deliveryMode: busy ? 'queue' : 'steer' })
+        return { ...delivered, task: { id: assigned.id, state: assigned.state, intent, queued: busy } }
+      } catch (error) {
+        // The row is already on the ledger. Say it never arrived instead of leaving
+        // it queued forever.
+        await ledger.fail(human.id, { taskId: assigned.id, reason: 'undelivered' })
+          .catch((failure) => log(`work item ${assigned.id} could not be marked failed: ${failure.message}`))
+        // The work never arrived, so its owner may need to act. Failure of the
+        // escalation itself must not replace the delivery error the caller expects.
+        await escalateStopped(human, conversation)
+          .catch((failure) => log(`escalation of ${assigned.id} failed: ${failure.message}`))
+        throw error
+      }
+    },
+    /** The work items of one conversation, oldest first. */
+    async tasks(idOrName, conversationId) {
+      const human = await service.require(idOrName)
+      // Reading the ledger is one of the two moments a timeout is noticed. A settle
+      // failure must not hide the rows, so it is reported and the read continues.
+      await settleWork(human, conversationId)
+        .catch((error) => log(`work-item settle failed for ${human.id}: ${error.message}`))
+      const rows = await ledger.list(human.id)
+      return conversationId === undefined ? rows : rows.filter((task) => task.conversation === conversationId)
     },
     /**
      * The Session a message to one peer should reach, resolved from the edges the
@@ -840,7 +1131,24 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       grantPermission(session, event.data?.agentPreset)
       return
     }
-    if (!chat.ownerOf(sessionId)) return
+    const owner = chat.ownerOf(sessionId)
+    if (!owner) return
+    // The Host's turn boundaries are the only authoritative source of a work item's
+    // state: a model reporting its own success is not a completion signal.
+    if (kind === 'turn/start') {
+      ledger.start(owner.humanId, { conversation: owner.conversationId, sessionId })
+        .catch((error) => log(`work item start failed for ${sessionId}: ${error.message}`))
+      return
+    }
+    if (kind === 'turn/end') {
+      // Only this turn's own item is closed; the queue behind it is untouched.
+      settleTurn(owner.humanId, sessionId, event.data?.reason)
+        .catch((error) => log(`work item end failed for ${sessionId}: ${error.message}`))
+      // The same boundary reclaims the timeline, so memory maintenance shares the one
+      // subscription instead of adding a timer of its own.
+      reclaimHistory(owner.humanId)
+      return
+    }
     // Only the assistant side is mirrored. An inbound message is already written
     // by `deliver`, and a `user/message` event also carries injected
     // system-reminders and runtime-context snapshots, which are not conversation.
@@ -854,6 +1162,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // settings page all mount from here, and that page is how the file gets fixed.
   try {
     await refresh()
+    // Nothing is mid-turn right after a restart, so any in-progress item is a ghost.
+    await sweepTasks()
     // A pending title plan is applied once, through the Host, so the projection the
     // list reads and the log agree on the title and its sequence.
     applyTitlePlan(home, async (sessionId, title) => {

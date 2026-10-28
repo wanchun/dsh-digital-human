@@ -14,7 +14,10 @@
  */
 
 import { requireConversation } from './chat.js'
-import { buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
+import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
+import { presetIdOf } from './presets.js'
+import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
+import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
 
 /** Longest a `send` call waits for the peer's turn to finish. */
@@ -39,6 +42,42 @@ async function resolvePeer(service, self, reference) {
     throw new Error(`${self.id} may only message ${peers.join(', ')}; ${peer.id} is not a peer`)
   }
   return peer
+}
+
+/**
+ * The record a usage call names.
+ *
+ * Omitted means the caller itself, which is the common case and needs no id in the
+ * prompt. Unlike a message, a reading may name any record the registry knows: it
+ * writes nothing, and the caller can already see the roster.
+ */
+async function usageTarget(service, self, reference) {
+  const wanted = String(reference ?? '').trim()
+  if (!wanted) return self
+  const found = await service.resolve(wanted)
+  if (!found) throw new Error(`unknown digital human: ${JSON.stringify(reference)}`)
+  return found
+}
+
+/**
+ * Conversation names by Session id, for labelling the report.
+ *
+ * A missing name is only a plainer line: the measurement itself never depends on
+ * the chat index, so an unreadable one must not turn a report into an error.
+ */
+async function threadNames(service, humanId) {
+  const names = new Map<string, string>()
+  try {
+    const found = await service.chat?.addresses?.(humanId)
+    for (const entry of found ?? []) {
+      if (typeof entry?.sessionId === 'string' && typeof entry?.conversationId === 'string') {
+        names.set(entry.sessionId, entry.conversationId)
+      }
+    }
+  } catch {
+    // The report still measures every session; only its labels stay ids.
+  }
+  return names
 }
 
 /**
@@ -197,9 +236,19 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       + 'then read it with digital_human_messages, or poll with digital_human_status. '
       + 'Omit the address to reply in the thread this Session already shares with the peer — the '
       + 'transport sends it back to the Session that asked. Pass session_id to choose a Session, '
-      + 'or conversation_id to open a new thread.',
+      + 'or conversation_id to open a new thread. '
+      + 'Every send is also a work item: a busy peer queues it, and a reply to its running turn '
+      + 'amends the item already open. The detail says which it became.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Target digital human id or display name.' },
+      to: {
+        required: true,
+        oneOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+        description: 'Target digital human id or display name, or an array of them. '
+          + 'An array assigns one independent work item per target, each with its own receipt.',
+      },
       message: { type: 'string', required: true, description: 'Message body. State the task, the acceptance criteria, and how to report back.' },
       // Required here, unlike on the reading tools: a send with no address would put
       // every subject into one shared thread.
@@ -214,6 +263,27 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         type: 'number',
         description: `Wait up to this many seconds for the target to finish its turn, at most ${WAIT_MAX_SECONDS}. Defaults to 0 (return as soon as the message is accepted).`,
       },
+      mode: {
+        type: 'string',
+        enum: ['new', 'amend', 'cancel'],
+        description:
+          'What this send means for the work item. "new" assigns a new item even when the peer is busy; '
+          + '"amend" appends to the one open item of the conversation; "cancel" retires it and delivers nothing. '
+          + 'Omit it to let the transport decide: busy queues a new item, a reply to the running turn amends it.',
+      },
+      task_id: {
+        type: 'string',
+        description: 'The work item to amend or cancel. Required when the conversation has more than one open item.',
+      },
+      note: {
+        type: 'string',
+        description: 'One line recorded on a new work item, visible in digital_human_status.',
+      },
+      deadline: {
+        type: 'string',
+        description: 'When this handover is due, as an ISO 8601 timestamp. Omit it to use the '
+          + 'record\'s escalation window (30 minutes unless configured).',
+      },
     },
     output: {
       schema: {
@@ -226,82 +296,167 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           sessionId: { type: 'string', required: true },
           accepted: { type: 'boolean', required: true },
           finished: { type: 'boolean', required: true },
+          taskId: { type: 'string' },
+          taskState: { type: 'string' },
+          taskIntent: { type: 'string' },
+          results: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                to: { type: 'string' },
+                conversationId: { type: 'string' },
+                sessionId: { type: 'string' },
+                accepted: { type: 'boolean' },
+                finished: { type: 'boolean' },
+                taskId: { type: 'string' },
+                taskState: { type: 'string' },
+                taskIntent: { type: 'string' },
+              },
+            },
+          },
         },
       },
       render: (_args, value) => renderText(value),
     },
     async execute(args, exec) {
       const me = await self()
-      const peer = await resolvePeer(service, me, args.to)
+      const targets = Array.isArray(args.to) ? args.to : [args.to]
+      if (targets.length === 0) throw new Error('a target digital human is required')
       // Its own Session travels with the message, so the reply can come back to the
       // Session that asked for the work rather than to a shared thread name.
       const fromSession = callerSession(exec)
-      // No address means "the thread this Session is already in": the edges say which
-      // Session of the peer last asked here, and a reply goes back to it.
-      const address = await addressOf(service, humanId, peer, {
-        conversationId: typeof args.conversation_id === 'string' ? args.conversation_id : undefined,
-        sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
-        exec,
-      })
-      // Nothing to address and nothing to reply to: say what is missing rather than
-      // pour the subject into the one shared `main` thread.
-      if (address.conversationId === undefined && address.sessionId === undefined) {
-        throw new Error(
-          'conversation_id or session_id is required. A digital human is reached in a named '
-          + 'conversation, and sending without one would put every requirement into the same '
-          + 'shared thread. Use this requirement\'s conversation_id, or the session_id reported '
-          + 'by the <dsh_peer_source> block of the message being answered.',
-        )
-      }
-      const delivered = await service.send(peer.id, {
-        conversationId: address.conversationId,
-        sessionId: address.sessionId,
-        message: args.message,
-        from: humanId,
-        fromSession,
-      })
-      // An outbound edge lets this Session find the thread again. The peer's name index
-      // is not touched: neither side has to rewrite a label to keep routing true.
-      if (fromSession && delivered.sessionId) {
-        await service.noteEdge?.(humanId, {
-          dir: 'out',
-          selfSession: fromSession,
-          peer: peer.id,
-          peerSession: delivered.sessionId,
-          conversation: delivered.conversationId,
+      const mode = args.mode === 'new' || args.mode === 'amend' || args.mode === 'cancel' ? args.mode : undefined
+      const note = typeof args.note === 'string' && args.note.trim() ? args.note.trim() : undefined
+      // Resolve every name and every address before delivering anything: one unknown
+      // target must not leave half the recipients holding work items and the others
+      // none. Order is kept, because the caller reads the receipts in the order it
+      // wrote the targets.
+      const addressed: Array<{ peer: any; address: any }> = []
+      for (const target of targets) {
+        const peer = await resolvePeer(service, me, target)
+        // No address means "the thread this Session is already in": the edges say which
+        // Session of the peer last asked here, and a reply goes back to it.
+        const address = await addressOf(service, humanId, peer, {
+          conversationId: typeof args.conversation_id === 'string' ? args.conversation_id : undefined,
+          sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
+          exec,
         })
+        // Nothing to address and nothing to reply to: say what is missing rather than
+        // pour the subject into the one shared `main` thread.
+        if (address.conversationId === undefined && address.sessionId === undefined) {
+          throw new Error(
+            'conversation_id or session_id is required. A digital human is reached in a named '
+            + 'conversation, and sending without one would put every requirement into the same '
+            + 'shared thread. Use this requirement\'s conversation_id, or the session_id reported '
+            + 'by the <dsh_peer_source> block of the message being answered.',
+          )
+        }
+        addressed.push({ peer, address })
       }
-      const wait = Math.min(Math.max(Number(args.wait_seconds) || 0, 0), WAIT_MAX_SECONDS)
-      let finished = false
-      if (wait > 0) {
-        const deadline = Date.now() + wait * 1000
-        for (;;) {
-          const state = await service.status(peer.id, delivered.sessionId ?? address.conversationId)
-          if (!state.isGenerating) {
-            finished = true
-            break
+
+      /** Deliver to one peer, so each target owns its receipt and its state. */
+      const deliver = async (peer, address) => {
+        const delivered = await service.send(peer.id, {
+          conversationId: address.conversationId,
+          sessionId: address.sessionId,
+          message: args.message,
+          from: humanId,
+          fromSession,
+          ...(mode ? { mode } : {}),
+          ...(typeof args.task_id === 'string' && args.task_id.trim() ? { taskId: args.task_id.trim() } : {}),
+          ...(note ? { note } : {}),
+          ...(typeof args.deadline === 'string' && args.deadline.trim() ? { deadline: args.deadline.trim() } : {}),
+        })
+        const receipt = delivered.task
+        // A cancellation retires the item; there is nothing to route or to wait for.
+        if (receipt?.intent === 'cancel') {
+          return {
+            detail: `Cancelled work item ${receipt.id} for ${peer.name} (${peer.id}); nothing was delivered.`,
+            to: peer.id,
+            conversationId: delivered.conversationId,
+            sessionId: delivered.sessionId ?? '',
+            accepted: false,
+            finished: false,
+            taskId: receipt.id,
+            taskState: receipt.state,
+            taskIntent: receipt.intent,
           }
-          if (Date.now() >= deadline) break
-          await new Promise((resolve) => setTimeout(resolve, 2000))
+        }
+        // An outbound edge lets this Session find the thread again. The peer's name index
+        // is not touched: neither side has to rewrite a label to keep routing true.
+        if (fromSession && delivered.sessionId) {
+          await service.noteEdge?.(humanId, {
+            dir: 'out',
+            selfSession: fromSession,
+            peer: peer.id,
+            peerSession: delivered.sessionId,
+            conversation: delivered.conversationId,
+          })
+        }
+        const wait = Math.min(Math.max(Number(args.wait_seconds) || 0, 0), WAIT_MAX_SECONDS)
+        let finished = false
+        // A queued item runs after the turn in front of it, so waiting here could only
+        // report that turn — never the reply to this one.
+        if (wait > 0 && receipt?.queued !== true) {
+          const deadline = Date.now() + wait * 1000
+          for (;;) {
+            const state = await service.status(peer.id, delivered.sessionId ?? address.conversationId)
+            if (!state.isGenerating) {
+              finished = true
+              break
+            }
+            if (Date.now() >= deadline) break
+            await new Promise((resolve) => setTimeout(resolve, 2000))
+          }
+        }
+        const taskLine = receipt
+          ? receipt.intent === 'amend'
+            ? ` Delivered as an amendment to ${receipt.id}.`
+            : receipt.queued
+              ? ` Queued as ${receipt.id} behind the turn in progress.`
+              : ` Assigned as ${receipt.id}.`
+          : ''
+        return {
+          detail: (finished
+            ? `Delivered to ${peer.name} (${peer.id}) and its turn finished. Read the reply with digital_human_messages.`
+            : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`)
+            + taskLine
+            + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`,
+          to: peer.id,
+          conversationId: delivered.conversationId,
+          sessionId: delivered.sessionId,
+          accepted: delivered.accepted,
+          finished,
+          ...(receipt ? { taskId: receipt.id, taskState: receipt.state, taskIntent: receipt.intent } : {}),
         }
       }
+
+      const results: any[] = []
+      for (const { peer, address } of addressed) results.push(await deliver(peer, address))
+      const single = results.length === 1
+      const first = results[0]
       return {
-        detail: (finished
-          ? `Delivered to ${peer.name} (${peer.id}) and its turn finished. Read the reply with digital_human_messages.`
-          : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`)
-          + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`,
-        to: peer.id,
-        conversationId: delivered.conversationId,
-        sessionId: delivered.sessionId,
-        accepted: delivered.accepted,
-        finished,
+        detail: results.map((entry) => entry.detail).join('\n'),
+        // One target keeps the flat receipt it always had. Several report per target
+        // in `results`, and the flat address fields say so by staying empty.
+        to: single ? first.to : results.map((entry) => entry.to).join(', '),
+        conversationId: single ? first.conversationId : '',
+        sessionId: single ? first.sessionId : '',
+        accepted: results.every((entry) => entry.accepted),
+        finished: results.every((entry) => entry.finished),
+        results,
+        ...(single && first.taskId
+          ? { taskId: first.taskId, taskState: first.taskState, taskIntent: first.taskIntent }
+          : {}),
       }
     },
   }
 
   const status = {
     name: 'digital_human_status',
-    description: 'Report whether another digital human is still working on a conversation.',
+    description: 'Report whether another digital human is still working on a conversation, and the latest work item of it: its state, reason, end time, and note.',
     parameters: {
       to: { type: 'string', required: true, description: 'Target digital human id or display name.' },
       conversation_id: CONVERSATION_PARAM,
@@ -316,6 +471,11 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           conversationId: { type: 'string', required: true },
           exists: { type: 'boolean', required: true },
           isGenerating: { type: 'boolean', required: true },
+          taskId: { type: 'string' },
+          state: { type: 'string' },
+          reason: { type: 'string' },
+          endedAt: { type: 'string' },
+          note: { type: 'string' },
         },
       },
       render: (_args, value) => renderText(value),
@@ -327,14 +487,33 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         exec,
       })
       const state = await service.status(peer.id, address.sessionId ?? address.conversationId)
+      // The turn says whether someone is working; the ledger says what came of the
+      // work. A failure is only visible there, long after the turn is gone.
+      const conversation = state.conversationId ?? address.conversationId ?? address.sessionId
+      const tasks = await service.tasks(peer.id, conversation)
+      const latest = tasks[tasks.length - 1]
+      const taskLine = latest
+        ? ` Last work item ${latest.id}: ${latest.state}${latest.reason ? ` (${latest.reason})` : ''}`
+          + `${latest.endedAt ? `, ended ${latest.endedAt}` : ''}${latest.note ? `. Note: ${latest.note}` : ''}.`
+        : ''
       return {
-        detail: state.exists
+        detail: (state.exists
           ? `${peer.name} (${peer.id}) ${state.isGenerating ? 'is still working' : 'is idle'} on conversation "${state.conversationId}".`
-          : `${peer.name} (${peer.id}) has no conversation "${state.conversationId}" yet.`,
+          : `${peer.name} (${peer.id}) has no conversation "${state.conversationId}" yet.`)
+          + taskLine,
         to: peer.id,
         conversationId: state.conversationId,
         exists: state.exists,
         isGenerating: state.isGenerating,
+        ...(latest
+          ? {
+            taskId: latest.id,
+            state: latest.state,
+            ...(latest.reason ? { reason: latest.reason } : {}),
+            ...(latest.endedAt ? { endedAt: latest.endedAt } : {}),
+            ...(latest.note ? { note: latest.note } : {}),
+          }
+          : {}),
       }
     },
   }
@@ -470,6 +649,107 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         return `- ${entry.id} — ${entry.name}${marks.length ? ` (${marks.join(', ')})` : ''}`
       })
       return { detail: `Digital humans:\n${lines.join('\n')}` }
+    },
+  }
+
+  /**
+   * Aggregate token usage across one digital human's Sessions.
+   *
+   * The reading replays durable logs, so it can be asked at any time and costs no
+   * model call. Nothing is written or cached: a saved usage table would be a second
+   * truth that drifts from the logs it was derived from.
+   */
+  const usage = {
+    name: 'digital_human_usage',
+    description:
+      'Report token usage for one digital human over a time window: the total and one line per session. '
+      + 'Every figure replays the durable session log; no model is called and nothing is written. '
+      + 'Defaults to you and to the last 7 days.',
+    parameters: {
+      days: { type: 'number', description: 'Days back to include. Defaults to 7, at most 365.' },
+      since: {
+        type: 'string',
+        description: 'Start of the window as an ISO 8601 date or timestamp, for example 2026-10-01. Overrides days.',
+      },
+      to: { type: 'string', description: 'Digital human id or display name. Defaults to you.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          detail: { type: 'string', required: true },
+          humanId: { type: 'string', required: true },
+          since: { type: 'string', required: true },
+          until: { type: 'string', required: true },
+          measured: { type: 'boolean', required: true },
+          sessions: { type: 'number', required: true },
+          totalTokens: { type: 'number', required: true },
+        },
+      },
+      render: (_args, value) => renderText(value),
+    },
+    async execute(args) {
+      const target = await usageTarget(service, await self(), args.to)
+      const window = usageWindow(args)
+      const since = new Date(window.since).toISOString()
+      const until = new Date(window.until).toISOString()
+      // One shape for every answer that cannot measure: the caller still learns the
+      // record and the window, and no tool call ever fails over a missing service.
+      const unavailable = (detail: string) => ({
+        detail, humanId: target.id, since, until, measured: false, sessions: 0, totalTokens: 0,
+      })
+      // A disabled record runs no Session, so there is nothing current to report;
+      // saying so is the whole answer, and no measurement is attempted.
+      if (target.enabled === false) {
+        return unavailable(`Usage for ${target.name} (${target.id}) is not reported: the record is disabled.`)
+      }
+      const meter = ctx.get?.('tokenMeter')
+      if (typeof meter?.measure !== 'function') {
+        return unavailable('Usage is unavailable in this Host: the token meter is not mounted, so no session can be measured.')
+      }
+      const registry = ctx.get?.('sessions')
+      if (typeof registry?.list !== 'function') {
+        return unavailable('Usage is unavailable in this Host: the session registry is not mounted, so no session can be listed.')
+      }
+      let listed
+      try {
+        listed = (await registry.list()) ?? []
+      } catch (error) {
+        return unavailable(`Usage is unavailable in this Host: the session registry could not be read (${error.message}).`)
+      }
+      // A digital human's Sessions are the ones its generated preset composed, which
+      // is the only mark a Session carries about whose work it holds.
+      const watched = presetIdOf(target.id)
+      const threads = await threadNames(service, target.id)
+      const rows: UsageRow[] = []
+      const skipped: string[] = []
+      for (const session of listed) {
+        if (session?.header?.agentPreset !== watched) continue
+        const sessionId = session.header.id
+        try {
+          // The window decides which Sessions to read, not which events. A Session
+          // that worked inside it is reported in full, and the note under the total
+          // says so.
+          const at = lastActivityOf(session)
+          if (at !== undefined && (at < window.since || at > window.until)) continue
+          rows.push({ sessionId, thread: threads.get(sessionId), tokens: meter.measure(session).totalTokens })
+        } catch {
+          // One unreadable log must not hide the others: name it and keep counting.
+          skipped.push(sessionId)
+        }
+      }
+      // Biggest first, so the line that matters is the one a person reads first.
+      rows.sort((a, b) => b.tokens - a.tokens || a.sessionId.localeCompare(b.sessionId))
+      return {
+        detail: renderUsageReport({ name: target.name, id: target.id, window, rows, skipped }),
+        humanId: target.id,
+        since,
+        until,
+        measured: true,
+        sessions: rows.length,
+        totalTokens: rows.reduce((sum, row) => sum + row.tokens, 0),
+      }
     },
   }
 
@@ -622,7 +902,8 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
   const memoryStatus = {
     name: 'memory_status',
     description:
-      'Report the structure of your own memory.md: size, headings, archives, and whether compaction is needed. '
+      'Report the structure of your own memory.md: size, headings, the bytes of each section, archives, and '
+      + 'whether compaction is needed. Sections over the 16KB `# now` injection budget are marked. '
       + 'The `# now` block is already loaded into your prompt, so use this only to check structure after editing, '
       + 'or to decide whether to compact.',
     parameters: {},
@@ -636,13 +917,30 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
   const memoryCompact = {
     name: 'memory_compact',
     description:
-      'Archive your memory.md into memory/<timestamp>.md and start a fresh one. '
-      + 'Call this only when memory_status reports that compaction is needed, then rewrite `# now` from the archive.',
-    parameters: {},
+      'Archive memory.md into memory/<timestamp>.md. With scope "all" (the default) the whole file is '
+      + 'archived and a fresh one started; with scope "history" only the `# History` entries move and '
+      + '`# now` is left in place. Use "history" when the timeline is what grew, and "all" when memory_status '
+      + 'reports that compaction is needed.',
+    parameters: {
+      scope: {
+        type: 'string',
+        enum: ['all', 'history'],
+        description: 'What to archive. Defaults to "all"; "history" keeps `# now` and moves only the timeline.',
+      },
+    },
     output: TEXT_OUTPUT,
-    async execute() {
+    async execute(args) {
       const me = await self()
-      const archived = compactMemory(memoryPaths(service.store, me.id))
+      const paths = memoryPaths(service.store, me.id)
+      if (args.scope === 'history') {
+        const archived = archiveHistory(paths, { keep: 0 })
+        return {
+          detail: archived
+            ? `Archived ${archived.moved} \`# History\` entries to ${archived.archive}; \`# now\` is unchanged.`
+            : 'There is no \`# History\` entry to archive yet.',
+        }
+      }
+      const archived = compactMemory(paths)
       return {
         detail: archived
           ? `Archived to ${archived} and started a fresh memory.md. Read the archive and rewrite \`# now\` from it.`
@@ -651,7 +949,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     },
   }
 
-  const tools: any[] = [send, status, stop, messages, conversations, roster]
+  const tools: any[] = [send, status, stop, messages, conversations, roster, usage]
   // A digital human with no bot speaks to its peers only: the chat tools land in a
   // Session, while these two can only reach an IM contact. The title tool is not one
   // of them: naming a Session has nothing to do with an IM bot.
