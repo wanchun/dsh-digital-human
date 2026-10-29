@@ -37,6 +37,18 @@ describe('the work-item ledger', () => {
     expect((await ledger.list('dev')).map((task) => task.id)).toEqual(['w-01', 'w-02'])
   })
 
+  it('never writes the same state twice, even across two ledgers', async () => {
+    // Two claim paths can both read the head as queued — a live plugin reload gives
+    // each its own write queue. The second write says nothing, so it is skipped.
+    await ledger.assign('dev', { from: 'pm', conversation: 'REQ-1' })
+    const other = new HumanLedger(store)
+    await Promise.all([
+      ledger.start('dev', { conversation: 'REQ-1', sessionId: 'session-1' }),
+      other.start('dev', { conversation: 'REQ-1', sessionId: 'session-1' }),
+    ])
+    expect(lines('dev').filter((row) => row.state === 'in_progress')).toHaveLength(1)
+  })
+
   it('claims a lone open thread when the turn names another label for it', async () => {
     // A shared-session record files everything under one conversation, but the turn
     // arrives with whichever label the Session was recorded under. With one thread

@@ -87,20 +87,24 @@ export function isOpen(task: TaskRow): boolean {
 export class HumanLedger {
   #store
   #log
-  // One read-modify-append at a time per human: two concurrent state changes would
-  // otherwise both fold the same base and each lose the other's line.
-  #writes = new Map<string, Promise<unknown>>()
 
   constructor(store: HumanStore, log: (message: string) => void = () => {}) {
     this.#store = store
     this.#log = log
   }
 
-  /** Run one ledger operation after the previous one for the same human finished. */
+  /**
+   * Run one ledger operation after the previous one for the same file finished.
+   *
+   * The queue lives at module scope and is keyed by the file, not by this instance:
+   * a live plugin reload builds a second ledger over the same registry, and two
+   * per-instance queues would let both claim the same queue head.
+   */
   #serial(humanId: string, work: () => Promise<unknown>): Promise<any> {
-    const previous = this.#writes.get(humanId) ?? Promise.resolve()
+    const key = this.#store.taskPath(humanId)
+    const previous = LEDGER_WRITES.get(key) ?? Promise.resolve()
     const next = previous.then(work, work)
-    this.#writes.set(humanId, next.catch(() => {}))
+    LEDGER_WRITES.set(key, next.catch(() => {}))
     return next
   }
 
@@ -406,9 +410,27 @@ export class HumanLedger {
   }
 
   async #append(humanId: string, row: TaskRow): Promise<void> {
+    // A state write that changes nothing is a duplicate line, and it happens: two
+    // claim paths can both decide the queue head is theirs. The fold reads the last
+    // row either way, so the line is noise — skip it rather than grow the file.
+    const latest = (await this.list(humanId)).reverse().find((task) => task.id === row.id)
+    if (latest !== undefined && sameState(latest, row)) return
     await this.#store.ensureDir(this.#store.dir(humanId))
     await appendFile(this.#store.taskPath(humanId), `${JSON.stringify(row)}\n`, 'utf8')
   }
+}
+
+/** One write queue per ledger file, shared by every instance in this process. */
+const LEDGER_WRITES = new Map<string, Promise<unknown>>()
+
+/** Whether two rows carry the same state, so writing the second says nothing new. */
+function sameState(a: TaskRow, b: TaskRow): boolean {
+  return a.state === b.state
+    && a.owner === b.owner
+    && a.reason === b.reason
+    && a.endedAt === b.endedAt
+    && a.escalatedAt === b.escalatedAt
+    && (a.amendments?.length ?? 0) === (b.amendments?.length ?? 0)
 }
 
 /** Validate one deadline, failing loud rather than scheduling on a value no clock can read. */
