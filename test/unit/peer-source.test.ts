@@ -15,11 +15,10 @@ const text = (value: string) => ({ type: 'text', text: value })
 
 describe('splitPeerSourceMessages', () => {
   it('moves the header into its own notice and leaves the body clean', () => {
-    // The delivery writes the header and the body as two parts, so the hop to a
-    // notice is a removal, not a parse of someone's prose.
+    // The delivery writes the header and the body in one part, one newline apart,
+    // so the hop to a notice is a removal, not a parse of someone's prose.
     const delivered = message([
-      text('<dsh_peer_source from="pm-assistant" session="session-9" conversation="REQ-1" />'),
-      text('please review 12345'),
+      text('<dsh_peer_source from="pm-assistant" session="session-9" conversation="REQ-1" />\nplease review 12345'),
     ])
 
     const split = splitPeerSourceMessages([delivered], { newId: () => 'notice-1' })
@@ -75,15 +74,6 @@ describe('what counts as a peer source block', () => {
     expect(splitPeerSourceMessages([notice])).toBeNull()
   })
 
-  it('splits a block that shares one part with the body', () => {
-    // The shape written before the two-part delivery, still sitting in queues and
-    // history: one newline is the seam, and the body is what follows it.
-    const legacy = message([text('<dsh_peer_source from="pm" conversation="REQ-1" />\nplease review')])
-    const split = splitPeerSourceMessages([legacy], { newId: () => 'notice-1' })
-    expect(split![1].content).toEqual([text('please review')])
-    expect(split![0].content).toEqual([text('<dsh_peer_source from="pm" conversation="REQ-1" />')])
-  })
-
   it('leaves a block with no body behind intact', () => {
     // A message with nothing left is never rewritten: an ugly body beats losing what
     // a peer sent.
@@ -93,7 +83,7 @@ describe('what counts as a peer source block', () => {
 
   it('keeps every other message in place and by identity', () => {
     const first = message([text('just words')], { id: 'first' })
-    const carried = message([text('<dsh_peer_source from="pm" conversation="c" />'), text('body')], { id: 'second' })
+    const carried = message([text('<dsh_peer_source from="pm" conversation="c" />\nbody')], { id: 'second' })
     const split = splitPeerSourceMessages([first, carried], { newId: () => 'notice-1' })
     expect(split!.map((entry: any) => entry.id)).toEqual(['first', 'notice-1', 'second'])
     expect(split![0]).toBe(first)
@@ -101,7 +91,7 @@ describe('what counts as a peer source block', () => {
 })
 describe('the folded row reads like a sentence', () => {
   const split = (header: string, nameOf?: (id: string) => string | undefined) =>
-    splitPeerSourceMessages([message([text(header), text('body')])], { nameOf, newId: () => 'notice-1' })![0].source.summary
+    splitPeerSourceMessages([message([text(`${header}\nbody`)])], { nameOf, newId: () => 'notice-1' })![0].source.summary
 
   it('names the sender as the registry knows it', () => {
     // The peer id is an address; the name is what a reader recognises.
@@ -135,7 +125,7 @@ describe('shapes it must tolerate', () => {
   })
 
   it('keeps the row readable when the block names nothing', () => {
-    const bare = message([text('<dsh_peer_source />'), text('body')])
+    const bare = message([text('<dsh_peer_source />\nbody')])
     const split = splitPeerSourceMessages([bare], { newId: () => 'notice-1' })
     expect(split![0].source.summary).toBe('来自对等会话')
   })
@@ -143,7 +133,7 @@ describe('shapes it must tolerate', () => {
   it('mints an id of its own when none is injected', () => {
     // The notice is a message the framework will append, so it needs an identity;
     // the delivered message must not be the one that changes.
-    const delivered = message([text('<dsh_peer_source from="pm" conversation="c" />'), text('body')])
+    const delivered = message([text('<dsh_peer_source from="pm" conversation="c" />\nbody')])
     const split = splitPeerSourceMessages([delivered])
     expect(split![0].id).toBeTypeOf('string')
     expect(split![0].id).not.toBe('message-1')

@@ -139,7 +139,7 @@ check('send is accepted', delivered.accepted === true)
 check('the created session carries the digital-human preset', platform.sessions[0].agentPreset === 'dh-dev-assistant', String(platform.sessions[0].agentPreset))
 // The delivery also names the conversation it arrived in, so the receiver can reply
 // on the same one instead of trusting an id it remembered.
-check('the prompt carries the message', platform.prompts[0].content[1].text === 'please review requirement 12345')
+check('the prompt carries the message', platform.prompts[0].content[0].text.endsWith('please review requirement 12345'))
 check('the prompt names the sender and the conversation it arrived in',
   platform.prompts[0].content[0].text.includes('<dsh_peer_source')
   && platform.prompts[0].content[0].text.includes('from="pm-assistant"')

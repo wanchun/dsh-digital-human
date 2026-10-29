@@ -1177,10 +1177,10 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     attempt(true)
   }
 
-  // A peer message arrives as one user message whose first part is the source block
-  // the transport wrote. Returning the batch with that block lifted out is the only
-  // way to keep it out of the rendered body — the prompt RPC cannot carry a source —
-  // and the model still reads the same text, before the same words.
+  // A peer message arrives as one user message whose text opens with the source
+  // block the transport wrote. Returning the batch with that block lifted out is the
+  // only way to keep it out of the rendered body — the prompt RPC cannot carry a
+  // source — and the model still reads the same text, before the same words.
   //
   // A failed rewrite returns the decision untouched. The inline block is readable;
   // a message lost on the way into a step is not recoverable.

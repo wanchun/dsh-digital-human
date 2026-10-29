@@ -163,6 +163,8 @@ pm-assistant-202610131954.dh.tar.gz
 - **Events**: `session/created` (apply permissions, retry alignment),
   `session/event` (mirror the mailbox, notice a preset switch), `session/disposed`
   (clean up)
+- **Global `agent/pre-step` subscription**: lifts a message's leading source block
+  into a separate notice message, so the body never renders it
 - **Services read optionally**, degrading when absent: `permissionPresets`,
   `workspaceController`, `dshIm`, `skills`, `connection`
 
@@ -217,7 +219,7 @@ one in the page, or import a bundle. The plugin does not decide anyone's persona
 ### Tests
 
 ```
-723 unit tests (vitest, 19 files)       lines 96.5%  branches 90.4%
+741 unit tests (vitest, 20 files)       lines 96.5%  branches 90.4%
 430 integration checks (6 .mjs suites)  statements 95.4%  functions 95.2%
 zero runtime dependencies (node built-ins only)
 ```

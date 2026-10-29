@@ -488,19 +488,6 @@ describe('delivery while the target is busy', () => {
 })
 
 describe('deliver', () => {
-  it('writes the source block and the body as two parts', async () => {
-    // Two parts, not one joined string: the pre-step hook can then lift the block
-    // into a notice without parsing the reader's words, and the transcript stops
-    // rendering the tag as message text.
-    const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    await chat.deliver(human(), { message: 'hello', from: 'dev', fromSession: 'session-pm-1', conversationId: 'REQ-1' })
-    expect(controller.prompted[0].content).toEqual([
-      { type: 'text', text: '<dsh_peer_source from="dev" session="session-pm-1" conversation="REQ-1" />' },
-      { type: 'text', text: 'hello' },
-    ])
-  })
-
   it('creates the session, starts a turn and records both sides', async () => {
     const controller = controllerStub()
     const { chat } = chatWith(controller)
@@ -509,9 +496,9 @@ describe('deliver', () => {
     expect(controller.prompted[0]).toMatchObject({ mode: 'steer' })
     // The model is told which conversation the message arrived in, so it can reply
     // on the same one without remembering an id from somewhere else.
-    expect(controller.prompted[0].content[0].text)
-      .toBe('<dsh_peer_source from="dev" conversation="main" />')
-    expect(controller.prompted[0].content[1].text).toBe('hello')
+    const sent = controller.prompted[0].content[0].text
+    expect(sent).toContain('<dsh_peer_source from="dev" conversation="main" />')
+    expect(sent.endsWith('hello')).toBe(true)
     const mailbox = readFileSync(store.conversationPath('pm', delivered.sessionId), 'utf8')
     expect(mailbox).toContain('"kind":"inbound"')
     expect(mailbox).toContain('"from":"dev"')
@@ -567,7 +554,7 @@ describe('deliver', () => {
     const body = 'x'.repeat(MESSAGE_MAX_CHARS)
     await chat.deliver(human(), { message: body })
     // The limit bounds the message, not the block the transport adds.
-    expect(controller.prompted[0].content[1].text).toBe(body)
+    expect(controller.prompted[0].content[0].text.endsWith(body)).toBe(true)
   })
 
   it('refuses a disabled record and an empty message', async () => {

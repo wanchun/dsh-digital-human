@@ -193,8 +193,7 @@ describe('apply (platform row)', () => {
       role: 'user',
       source: { kind: 'user', rpcId: 'rpc-1' },
       content: [
-        { type: 'text', text: '<dsh_peer_source from="pm-assistant" session="session-pm" conversation="REQ-1" />' },
-        { type: 'text', text: 'please review 12345' },
+        { type: 'text', text: '<dsh_peer_source from="pm-assistant" session="session-pm" conversation="REQ-1" />\nplease review 12345' },
       ],
     }
     const decision = await hook!.handler({ agent: {} }, async () => ({ kind: 'enter', messages: [delivered] }))
@@ -263,7 +262,7 @@ describe('the chat service', () => {
     expect(delivered.sessionId).toMatch(/^session-/)
     expect(delivered.accepted).toBe(true)
     expect(platform.sessions[0].agentPreset).toBe(presetIdOf('dev-assistant'))
-    expect(platform.prompts[0].content[1].text).toBe('please review 12345')
+    expect(platform.prompts[0].content[0].text).toContain('please review 12345')
     expect(platform.prompts[0].content[0].text).toContain('conversation="main"')
   })
 

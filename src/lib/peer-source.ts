@@ -19,6 +19,9 @@ import { randomUUID } from 'node:crypto'
 /** The open of the block this plugin writes into a peer message. */
 const TAG_OPEN = '<dsh_peer_source'
 
+/** A message that opens with that block: one self-closing tag, then its body. */
+const TAG = new RegExp(`^${TAG_OPEN}\\b[^>]*\\/>`)
+
 /** Name under which the lifted block is presented. */
 const NOTICE_KIND = 'plugin:digital-human'
 
@@ -38,6 +41,34 @@ interface Lift {
   header: string
   fields: PeerSourceFields
   content: unknown[]
+}
+
+/**
+ * The block that names the conversation a peer message arrived in.
+ *
+ * The transport knows this and the recipient does not: without the block it has to
+ * take the conversation id from somewhere else — a file it read earlier, or its own
+ * memory — and a remembered id that has since changed silently starts a second
+ * thread for the same subject, with its own context and its own history.
+ *
+ * The shape matches the IM plugin's `<dsh_im_source>`, so one convention covers
+ * every channel a digital human hears from.
+ *
+ * @param from - the sender's registry id.
+ * @param fromSession - the sender's Session id, when the delivery knows it.
+ * @param conversationId - the thread the message arrived in.
+ * @returns one self-closing tag, on its own first line once the caller adds a newline.
+ */
+export function peerSource(from: string, fromSession: string | undefined, conversationId: string): string {
+  // Every value is already constrained: the conversation id by CONVERSATION, the
+  // sender by the registry's id rule, the Session id by the Host. None can break
+  // out of its attribute.
+  //
+  // `session` is the one that matters for a reply: it names the Sender's own
+  // Session, so the reply lands in the Session that asked for the work rather than
+  // in whichever Session the conversation name happens to be bound to.
+  const session = fromSession ? ` session="${fromSession}"` : ''
+  return `${TAG_OPEN} from="${from}"${session} conversation="${conversationId}" />`
 }
 
 /**
@@ -88,19 +119,16 @@ function lift(message: any): Lift | null {
   if (!Array.isArray(content)) return null
   const first = content[0]
   if (first?.type !== 'text' || typeof first.text !== 'string') return null
-  const match = /^<dsh_peer_source\b[^>]*\/>/.exec(first.text)
+  const match = TAG.exec(first.text)
   if (!match) return null
   const header = match[0]
-  // A block written before the two-part delivery shares its part with the body:
-  // drop the one newline that separated them, so the body starts where it did.
+  // The delivery writes the block and the body in one part, one newline apart:
+  // drop that newline, so the body starts where the sender's words did.
   const rest = first.text.slice(header.length).replace(/^\r?\n/, '')
-  const remainder = rest.trim() === ''
-    ? content.slice(1)
-    : [{ ...first, text: rest }, ...content.slice(1)]
   // A message with nothing left is never rewritten: keeping a slightly ugly body
   // beats dropping what a peer took the trouble to send.
-  if (remainder.length === 0) return null
-  return { header, fields: attributesOf(header), content: remainder }
+  if (rest.trim() === '') return null
+  return { header, fields: attributesOf(header), content: [{ ...first, text: rest }, ...content.slice(1)] }
 }
 
 /**
