@@ -219,7 +219,7 @@ one in the page, or import a bundle. The plugin does not decide anyone's persona
 ### Tests
 
 ```
-741 unit tests (vitest, 20 files)       lines 96.5%  branches 90.4%
+742 unit tests (vitest, 20 files)       lines 96.5%  branches 90.4%
 430 integration checks (6 .mjs suites)  statements 95.4%  functions 95.2%
 zero runtime dependencies (node built-ins only)
 ```
