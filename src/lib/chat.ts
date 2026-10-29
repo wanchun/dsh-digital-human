@@ -12,6 +12,7 @@
 import { appendFile, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { peerSource } from './peer-source.js'
 import type { HumanStore } from './store.js'
 import type { Ctx, Human, MailboxEntry } from './types.js'
 
@@ -94,29 +95,6 @@ function textOf(message) {
     .map((block) => block.text)
     .join('\n')
     .trim()
-}
-
-/**
- * The block that names the conversation a peer message arrived in.
- *
- * The transport knows this and the recipient does not: without the block it has to
- * take the conversation id from somewhere else — a file it read earlier, or its own
- * memory — and a remembered id that has since changed silently starts a second
- * thread for the same subject, with its own context and its own history.
- *
- * The shape matches the IM plugin's `<dsh_im_source>`, so one convention covers
- * every channel a digital human hears from.
- */
-function peerSource(from, fromSession, conversationId) {
-  // Every value is already constrained: the conversation id by CONVERSATION, the
-  // sender by the registry's id rule, the Session id by the Host. None can break
-  // out of its attribute.
-  //
-  // `session` is the one that matters for a reply: it names the Sender's own
-  // Session, so the reply lands in the Session that asked for the work rather than
-  // in whichever Session the conversation name happens to be bound to.
-  const session = fromSession ? ` session="${fromSession}"` : ''
-  return `<dsh_peer_source from="${from}"${session} conversation="${conversationId}" />`
 }
 
 /** Order two edges by their timestamp, newest first. */

@@ -19,6 +19,7 @@ import { dirname } from 'node:path'
 
 import { HumanStore, deadlineMinutesOf, defaultHome } from './lib/store.js'
 import { DEFAULT_CONVERSATION, HumanChat, requireConversation } from './lib/chat.js'
+import { splitPeerSourceMessages } from './lib/peer-source.js'
 import { archiveHistoryOnTurnEnd, memoryPaths } from './lib/memory.js'
 import { HumanLedger } from './lib/ledger.js'
 import type { TaskRow } from './lib/ledger.js'
@@ -200,6 +201,15 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   const memoryEnabled = new Set<string>()
 
   /**
+   * human id -> display name.
+   *
+   * The provenance line of a peer message names the sender the way a reader knows
+   * it, and the pre-step hook that writes it must not await a registry read: the
+   * batch it rewrites is already on its way into a step.
+   */
+  const nameById = new Map<string, string>()
+
+  /**
    * Whether an alignment is worth another attempt.
    *
    * The loader does not order this plugin after IM — its declared dependencies
@@ -290,8 +300,10 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // its binding changed or the record was removed.
     alignmentByHuman.clear()
     memoryEnabled.clear()
+    nameById.clear()
     const humans = await store.list(seed)
     for (const human of humans) if (human.memory !== false) memoryEnabled.add(human.id)
+    for (const human of humans) nameById.set(human.id, human.name)
     defaultWorkspace = await ensureDefaultWorkspace(ctx, { home, log })
     workspaceIdByPath.clear()
     for (const item of await listWorkspaces(ctx)) {
@@ -718,10 +730,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       if (mode === 'cancel') intent = 'cancel'
       else if (mode === 'amend') intent = 'amend'
       else if (mode !== 'new' && replying) {
-        // A reply amends the item it answers, and stays a plain message when there is
-        // nothing open to amend.
+        // A reply amends the one item it answers. With none open there is nothing to
+        // attach to, and with several the anchor is a guess: either way it is a plain
+        // message, never an error — a reply that cannot be filed must still arrive.
         const open = await ledger.open(human.id, conversation)
-        if (open.length === 0) return chat.deliver(human, delivery)
+        if (open.length !== 1) return chat.deliver(human, delivery)
         intent = 'amend'
       }
       else if (mode !== 'new' && busy && await answeringQuestion(human, { from, conversation })) intent = 'amend'
@@ -1164,6 +1177,27 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     }
     attempt(true)
   }
+
+  // A peer message arrives as one user message whose text opens with the source
+  // block the transport wrote. Returning the batch with that block lifted out is the
+  // only way to keep it out of the rendered body — the prompt RPC cannot carry a
+  // source — and the model still reads the same text, before the same words.
+  //
+  // A failed rewrite returns the decision untouched. The inline block is readable;
+  // a message lost on the way into a step is not recoverable.
+  ctx.on('agent/pre-step', async (_payload, next) => {
+    const decision = await next()
+    if (decision?.kind !== 'enter') return decision
+    try {
+      const messages = splitPeerSourceMessages(decision.messages, {
+        nameOf: (id) => nameById.get(id),
+      })
+      return messages === null ? decision : { ...decision, messages }
+    } catch (error) {
+      log(`could not lift a peer source block: ${error.message}`)
+      return decision
+    }
+  }, { global: true })
 
   // The creation header names the preset the session started with, so this is
   // the normal path. A session may still change preset while it is blank, which

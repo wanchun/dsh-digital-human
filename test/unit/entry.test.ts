@@ -180,6 +180,72 @@ describe('apply (platform row)', () => {
     expect(platform.listeners.some((entry) => entry.event === 'session/disposed')).toBe(true)
   })
 
+  it('lifts the source block out of the body before the step runs', async () => {
+    // The block is part of the delivery, not of what the sender wrote. Lifting it
+    // into a notice leaves the reader's words alone and lets the UI fold the
+    // provenance instead of rendering it as message text.
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    expect(hook?.options?.global).toBe(true)
+    const delivered = {
+      id: 'message-1',
+      role: 'user',
+      source: { kind: 'user', rpcId: 'rpc-1' },
+      content: [
+        { type: 'text', text: '<dsh_peer_source from="pm-assistant" session="session-pm" conversation="REQ-1" />\nplease review 12345' },
+      ],
+    }
+    const decision = await hook!.handler({ agent: {} }, async () => ({ kind: 'enter', messages: [delivered] }))
+    expect(decision.kind).toBe('enter')
+    expect(decision.messages).toHaveLength(2)
+    expect(decision.messages[0].source).toEqual({
+      kind: 'plugin:digital-human',
+      form: 'notice',
+      summary: '来自 研发PM助手 · 会话 REQ-1',
+    })
+    expect(decision.messages[0].content).toEqual([
+      { type: 'text', text: '<dsh_peer_source from="pm-assistant" session="session-pm" conversation="REQ-1" />' },
+    ])
+    // The delivered message keeps its id: the UI reconciles it with the inbound one.
+    expect(decision.messages[1]).toMatchObject({ id: 'message-1', content: [{ type: 'text', text: 'please review 12345' }] })
+  })
+
+  it('leaves a step it did not enter alone', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    const rejection = { kind: 'reject' }
+    await expect(hook!.handler({ agent: {} }, async () => rejection)).resolves.toBe(rejection)
+  })
+
+  it('returns the batch unchanged when the rewrite throws', async () => {
+    // A failed split must never cost a peer's message: the ugly inline block is
+    // readable, a dropped message is not.
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.logger.warn = vi.fn()
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    const hostile = {
+      id: 'message-1',
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', get text(): string { throw new Error('unreadable') } }],
+    }
+    const decision = { kind: 'enter', messages: [hostile] }
+    await expect(hook!.handler({ agent: {} }, async () => decision)).resolves.toBe(decision)
+    expect(platform.ctx.logger.warn).toHaveBeenCalled()
+  })
+
+  it('keeps a batch with no block exactly as it came', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    const plain = { id: 'message-1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'just words' }] }
+    const decision = { kind: 'enter', messages: [plain] }
+    await expect(hook!.handler({ agent: {} }, async () => decision)).resolves.toBe(decision)
+  })
+
   it('seeds nothing when seeding is switched off', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home })
@@ -854,11 +920,15 @@ describe('the work-item ledger', () => {
     // The queued task must not steer the turn in progress: it is the next turn.
     expect(platform.prompts.at(-1)!.mode).toBe('queue')
     emit(platform, first.sessionId, 'turn/start', { turn: 1 })
-    await tick()
+    // The promotion is written asynchronously; ending the turn before it lands
+    // leaves nothing to close, which is a test artifact rather than a behaviour.
+    await expect.poll(async () => (await service.tasks('dev-assistant', 'REQ-1'))[0]?.state)
+      .toBe('in_progress')
     emit(platform, first.sessionId, 'turn/end', { reason: { kind: 'error', error: { code: 'BOOM' } } })
-    await tick()
-    const tasks = await service.tasks('dev-assistant', 'REQ-1')
-    expect(tasks.map((task: any) => [task.id, task.state, task.reason])).toEqual([
+    // Both writes are event-driven and asynchronous: a fixed sleep is too short
+    // whenever the machine is busy, so wait for the state the test asserts.
+    await expect.poll(async () => (await service.tasks('dev-assistant', 'REQ-1'))
+      .map((task: any) => [task.id, task.state, task.reason])).toEqual([
       ['w-01', 'failed', 'BOOM'],
       ['w-02', 'in_progress', undefined],
     ])
@@ -1056,6 +1126,23 @@ describe('escalation to a human', () => {
     await tick()
     return sent
   }
+
+  it('delivers a reply even when the conversation holds several open items', async () => {
+    // Two handovers are open, so the item this reply answers is a guess. Filing it on
+    // one of them would close the wrong work; failing the call would lose the answer.
+    const platform = makeCtx({})
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.send('dev-assistant', { message: 'one', from: 'pm-assistant', conversationId: 'REQ-1' })
+    await service.send('dev-assistant', { message: 'two', from: 'pm-assistant', conversationId: 'REQ-1' })
+    const before = (await service.tasks('dev-assistant', 'REQ-1')).length
+
+    const sent = await service.send('dev-assistant', {
+      message: 'about the first one', from: 'pm-assistant', sessionId: 'session-asked', fromSession: 'session-asked', conversationId: 'REQ-1',
+    })
+    expect(sent.accepted).toBe(true)
+    expect((await service.tasks('dev-assistant', 'REQ-1')).length).toBe(before)
+  })
 
   it('treats an answer to a Session as a reply, not as new work', async () => {
     // A peer replying to the Session that asked left a queued item behind, and no

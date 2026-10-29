@@ -157,6 +157,7 @@ pm-assistant-202610131954.dh.tar.gz
   `workspaces.list`、`permissions.list`
 - **订阅事件**：`session/created`（上权限、重试对齐）、`session/event`（记信箱、识别 preset 切换）、
   `session/disposed`（清理）
+- **全局订阅 `agent/pre-step`**：把消息开头的来源块抬成一条独立 notice 消息，正文不再渲染它
 - **读的服务**（都可选，缺了就降级）：`permissionPresets`、`workspaceController`、`dshIm`、
   `skills`、`connection`
 
@@ -232,7 +233,7 @@ node tools/migrate.mjs
 ### 测试
 
 ```
-单测 723 项（vitest，19 个文件）      分支覆盖率 ≥ 90%
+单测 742 项（vitest，20 个文件）      分支覆盖率 ≥ 90%
 集成 430 项（6 个 .mjs，跑编译产物）  零运行时依赖
 零运行时依赖（只用 node 内置）
 ```
