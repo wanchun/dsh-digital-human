@@ -730,10 +730,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       if (mode === 'cancel') intent = 'cancel'
       else if (mode === 'amend') intent = 'amend'
       else if (mode !== 'new' && replying) {
-        // A reply amends the item it answers, and stays a plain message when there is
-        // nothing open to amend.
+        // A reply amends the one item it answers. With none open there is nothing to
+        // attach to, and with several the anchor is a guess: either way it is a plain
+        // message, never an error — a reply that cannot be filed must still arrive.
         const open = await ledger.open(human.id, conversation)
-        if (open.length === 0) return chat.deliver(human, delivery)
+        if (open.length !== 1) return chat.deliver(human, delivery)
         intent = 'amend'
       }
       else if (mode !== 'new' && busy && await answeringQuestion(human, { from, conversation })) intent = 'amend'

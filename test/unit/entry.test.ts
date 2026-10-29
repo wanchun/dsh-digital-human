@@ -1127,6 +1127,23 @@ describe('escalation to a human', () => {
     return sent
   }
 
+  it('delivers a reply even when the conversation holds several open items', async () => {
+    // Two handovers are open, so the item this reply answers is a guess. Filing it on
+    // one of them would close the wrong work; failing the call would lose the answer.
+    const platform = makeCtx({})
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.send('dev-assistant', { message: 'one', from: 'pm-assistant', conversationId: 'REQ-1' })
+    await service.send('dev-assistant', { message: 'two', from: 'pm-assistant', conversationId: 'REQ-1' })
+    const before = (await service.tasks('dev-assistant', 'REQ-1')).length
+
+    const sent = await service.send('dev-assistant', {
+      message: 'about the first one', from: 'pm-assistant', sessionId: 'session-asked', fromSession: 'session-asked', conversationId: 'REQ-1',
+    })
+    expect(sent.accepted).toBe(true)
+    expect((await service.tasks('dev-assistant', 'REQ-1')).length).toBe(before)
+  })
+
   it('treats an answer to a Session as a reply, not as new work', async () => {
     // A peer replying to the Session that asked left a queued item behind, and no
     // turn would ever start for it. A reply carries session_id; that is not a handover.
