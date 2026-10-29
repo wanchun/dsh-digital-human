@@ -249,6 +249,10 @@ node tools/migrate.mjs
    `notify_bot` 给未登记联系人发原始 chatId 一直可用；IM 插件暴露 `createTarget` 后，同一次发送会顺手登记为 `auto-<chatId 后 8 位>`。
    工作项的自动升级同样没有替代出口：未绑 bot、没有 owner 或 IM 服务缺失时，只写一行日志，不推送
 8. `digital_human_usage` 只算本进程还活着的会话 —— 冷存的历史会话要等重新载入才计入
+9. 工具按**会话创建时**挂载：给一条已经在跑的记录新绑 bot，那条会话不会凭空多出 `notify_bot`，
+   要新会话才生效（IM 侧清掉 `chat → session` 映射，或换一个新联系人）
+10. 升级会沿派单链找出口：失败项所属的记录没有 bot 时，用**派活方**的 bot 与 owner 通知
+    —— 所以前台记录绑一个 bot，整条链路的失败都能喊到人
 
 ## 参考借鉴 Halo
 

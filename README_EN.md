@@ -237,6 +237,12 @@ zero runtime dependencies (node built-ins only)
 6. The skill space holds text only; binary resources wait for a zip-based bundle
 7. `digital_human_usage` counts only Sessions this process still holds live — cold
    history counts after it is reloaded
+8. Tools are mounted when a Session is created: binding a bot to a record that
+   already has a running Session does not add `notify_bot` to it. A new Session does
+   (clear the `chat → session` mapping on the IM side, or use a new contact)
+9. Escalation follows the handover chain: when the record that owns a failed item has
+   no bot, the record that assigned the work sends the notice — one bot on the
+   front-of-house record covers every failure behind it
 
 ## Borrowed from Halo
 
