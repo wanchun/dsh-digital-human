@@ -180,6 +180,73 @@ describe('apply (platform row)', () => {
     expect(platform.listeners.some((entry) => entry.event === 'session/disposed')).toBe(true)
   })
 
+  it('lifts the source block out of the body before the step runs', async () => {
+    // The block is part of the delivery, not of what the sender wrote. Lifting it
+    // into a notice leaves the reader's words alone and lets the UI fold the
+    // provenance instead of rendering it as message text.
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    expect(hook?.options?.global).toBe(true)
+    const delivered = {
+      id: 'message-1',
+      role: 'user',
+      source: { kind: 'user', rpcId: 'rpc-1' },
+      content: [
+        { type: 'text', text: '<dsh_peer_source from="pm-assistant" session="session-pm" conversation="REQ-1" />' },
+        { type: 'text', text: 'please review 12345' },
+      ],
+    }
+    const decision = await hook!.handler({ agent: {} }, async () => ({ kind: 'enter', messages: [delivered] }))
+    expect(decision.kind).toBe('enter')
+    expect(decision.messages).toHaveLength(2)
+    expect(decision.messages[0].source).toEqual({
+      kind: 'plugin:digital-human',
+      form: 'notice',
+      summary: '来自 研发PM助手 · 会话 REQ-1',
+    })
+    expect(decision.messages[0].content).toEqual([
+      { type: 'text', text: '<dsh_peer_source from="pm-assistant" session="session-pm" conversation="REQ-1" />' },
+    ])
+    // The delivered message keeps its id: the UI reconciles it with the inbound one.
+    expect(decision.messages[1]).toMatchObject({ id: 'message-1', content: [{ type: 'text', text: 'please review 12345' }] })
+  })
+
+  it('leaves a step it did not enter alone', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    const rejection = { kind: 'reject' }
+    await expect(hook!.handler({ agent: {} }, async () => rejection)).resolves.toBe(rejection)
+  })
+
+  it('returns the batch unchanged when the rewrite throws', async () => {
+    // A failed split must never cost a peer's message: the ugly inline block is
+    // readable, a dropped message is not.
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.logger.warn = vi.fn()
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    const hostile = {
+      id: 'message-1',
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', get text(): string { throw new Error('unreadable') } }],
+    }
+    const decision = { kind: 'enter', messages: [hostile] }
+    await expect(hook!.handler({ agent: {} }, async () => decision)).resolves.toBe(decision)
+    expect(platform.ctx.logger.warn).toHaveBeenCalled()
+  })
+
+  it('keeps a batch with no block exactly as it came', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    const plain = { id: 'message-1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'just words' }] }
+    const decision = { kind: 'enter', messages: [plain] }
+    await expect(hook!.handler({ agent: {} }, async () => decision)).resolves.toBe(decision)
+  })
+
   it('seeds nothing when seeding is switched off', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home })
@@ -196,7 +263,7 @@ describe('the chat service', () => {
     expect(delivered.sessionId).toMatch(/^session-/)
     expect(delivered.accepted).toBe(true)
     expect(platform.sessions[0].agentPreset).toBe(presetIdOf('dev-assistant'))
-    expect(platform.prompts[0].content[0].text).toContain('please review 12345')
+    expect(platform.prompts[0].content[1].text).toBe('please review 12345')
     expect(platform.prompts[0].content[0].text).toContain('conversation="main"')
   })
 

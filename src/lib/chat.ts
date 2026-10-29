@@ -746,8 +746,14 @@ export class HumanChat {
       // behind the turn instead of interrupting it.
       mode: single ? 'queue' : deliveryMode ?? 'steer',
       // The mailbox keeps the message as written; the model also gets the two facts
-      // only the transport knows: who sent it, and which Session to answer.
-      content: [{ type: 'text', text: `${peerSource(from, fromSession, conversation)}\n${text}` }],
+      // only the transport knows: who sent it, and which Session to answer. The block
+      // is its own part rather than a first line, so the pre-step hook can lift it out
+      // of the body without parsing prose — the UI then renders it as a folded row
+      // instead of message text, and the model still reads it first.
+      content: [
+        { type: 'text', text: peerSource(from, fromSession, conversation) },
+        { type: 'text', text },
+      ],
       clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     }, this.#abort.signal)
     return {
