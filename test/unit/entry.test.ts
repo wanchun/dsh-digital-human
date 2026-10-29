@@ -921,11 +921,15 @@ describe('the work-item ledger', () => {
     // The queued task must not steer the turn in progress: it is the next turn.
     expect(platform.prompts.at(-1)!.mode).toBe('queue')
     emit(platform, first.sessionId, 'turn/start', { turn: 1 })
-    await tick()
+    // The promotion is written asynchronously; ending the turn before it lands
+    // leaves nothing to close, which is a test artifact rather than a behaviour.
+    await expect.poll(async () => (await service.tasks('dev-assistant', 'REQ-1'))[0]?.state)
+      .toBe('in_progress')
     emit(platform, first.sessionId, 'turn/end', { reason: { kind: 'error', error: { code: 'BOOM' } } })
-    await tick()
-    const tasks = await service.tasks('dev-assistant', 'REQ-1')
-    expect(tasks.map((task: any) => [task.id, task.state, task.reason])).toEqual([
+    // Both writes are event-driven and asynchronous: a fixed sleep is too short
+    // whenever the machine is busy, so wait for the state the test asserts.
+    await expect.poll(async () => (await service.tasks('dev-assistant', 'REQ-1'))
+      .map((task: any) => [task.id, task.state, task.reason])).toEqual([
       ['w-01', 'failed', 'BOOM'],
       ['w-02', 'in_progress', undefined],
     ])
