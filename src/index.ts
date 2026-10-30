@@ -175,9 +175,20 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // A requirement directory is born on first delivery, so it cannot be in the
     // roster refresh() read. Registering it here is what files its Sessions under
     // their own entry instead of leaving them ungrouped.
-    ensureWorkspace: async (path: string) => {
+    ensureWorkspace: async (path: string, title?: string) => {
       const known = workspaceIdByPath.get(path)
-      if (known !== undefined) return known
+      if (known !== undefined) {
+        // A requirement's Workspace is named after the thread, so the sidebar reads
+        // "requirement -> its Sessions" instead of four paths that differ by a slug.
+        if (typeof title === 'string' && title.trim() !== '') {
+          try {
+            await ctx.get?.('workspaceController')?.rename?.({ workspaceId: known, title })
+          } catch (error) {
+            log(`could not name workspace "${path}": ${error.message}`)
+          }
+        }
+        return known
+      }
       const controller = ctx.get?.('workspaceController')
       if (typeof controller?.create !== 'function') return undefined
       try {
@@ -185,7 +196,14 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         const workspaceId = created?.workspace?.workspaceId
         if (typeof workspaceId !== 'string') return undefined
         workspaceIdByPath.set(path, workspaceId)
-        log(`registered workspace "${path}" for a requirement`)
+        if (typeof title === 'string' && title.trim() !== '') {
+          try {
+            await controller.rename?.({ workspaceId, title })
+          } catch (error) {
+            log(`could not name workspace "${path}": ${error.message}`)
+          }
+        }
+        log(`registered workspace "${path}" (${title ?? ''}) for a requirement`)
         return workspaceId
       } catch (error) {
         log(`requirement workspace "${path}" is unavailable: ${error.message}`)
@@ -903,6 +921,35 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   registerRpc(ctx, async (method, payload) => {
     const ok = (value) => ({ ok: true, value })
     const bad = (message) => ({ ok: false, error: { code: 'bad-request', message, details: {} } })
+    // The tree a person reads: each digital human, the requirements it serves, and
+    // the Sessions behind each one. The sidebar is flat, so the grouping is served
+    // here instead of being guessed from Workspace paths.
+    if (method === 'tree.read') {
+      const humans = (await store.list(seed)).filter((human) => human.enabled !== false)
+      const tree: Array<{
+        humanId: string
+        name: string
+        description: string
+        requirements: Array<{ conversation: string; sessions: Array<{ sessionId: string }> }>
+      }> = []
+      for (const human of humans) {
+        const addresses = await chat.addresses(human.id)
+        const byRequirement = new Map<string, Array<{ sessionId: string }>>()
+        for (const address of addresses) {
+          const key = address.conversationId ?? '(direct)'
+          const bucket = byRequirement.get(key) ?? []
+          bucket.push({ sessionId: address.sessionId })
+          byRequirement.set(key, bucket)
+        }
+        tree.push({
+          humanId: human.id,
+          name: human.name,
+          description: human.description ?? '',
+          requirements: [...byRequirement].map(([conversation, sessions]) => ({ conversation, sessions })),
+        })
+      }
+      return { humans: tree }
+    }
     if (method === 'registry.list') {
       const humans = await service.list()
       return ok({ home, file: store.file, humans: humans.map((entry) => withResolved(entry, humans)) })
@@ -1274,15 +1321,12 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   async function withSessionMemory(decision, sessionId?: string) {
     if (typeof sessionId !== 'string') return decision
     const owner = chat.ownerOf(sessionId)
-    process.stderr.write('DBG owner ' + sessionId + ' ' + JSON.stringify(owner) + '\n')
     if (!owner) return decision
     const human = await store.get(owner.humanId, seed)
-    process.stderr.write('DBG human ' + JSON.stringify({ id: human?.id, scope: human?.memoryScope, memory: human?.memory }) + '\n')
     if (!human || human.memory === false || human.memoryScope !== 'session') return decision
     const isTurnStart = decision.messages.some((message) => message?.source?.kind === 'user')
-    process.stderr.write('DBG turnStart ' + isTurnStart + '\n')
     if (!isTurnStart) return decision
-    const paths = memoryPaths(store, human, { scope: 'session', conversation: owner.conversationId })
+    const paths = memoryPaths(store, human.id, { scope: 'session', conversation: owner.conversationId })
     const text = renderMemoryContext(paths)
     if (!text) return decision
     const message = {

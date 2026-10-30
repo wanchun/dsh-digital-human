@@ -164,7 +164,7 @@ export class HumanChat {
        * roster yet; without an id the Session runs in the right place but the UI
        * cannot group it, and it shows up ungrouped.
        */
-      ensureWorkspace?: (path: string) => Promise<string | undefined>
+      ensureWorkspace?: (path: string, title?: string) => Promise<string | undefined>
     } = {},
   ) {
     this.#ctx = ctx
@@ -656,7 +656,7 @@ export class HumanChat {
       // A directory created here is not in the Workspace roster, and the UI groups
       // by id: registering it (and passing the id instead of the cwd) is what puts
       // the requirement's Sessions under their own entry in the menu.
-      const workspaceId = await this.#ensureWorkspace?.(location.cwd)
+      const workspaceId = await this.#ensureWorkspace?.(location.cwd, conversation)
       if (workspaceId !== undefined) {
         delete location.cwd
         location.workspaceId = workspaceId
@@ -783,8 +783,13 @@ export class HumanChat {
     // own session from the IM source and would lose that here. A shared-session
     // record is named after itself: its one Session is the record, not a subject.
     if (this.#fresh.delete(target.sessionId)) {
+      // One requirement holds one Session per role, and the sidebar lists them flat
+      // inside the requirement's Workspace: the role has to be readable from the
+      // title, or four Sessions look alike.
       if (single) await this.#setTitle(target.sessionId, human.name)
-      else if (!human.im?.botId) await this.#name(target.sessionId, conversation, text)
+      else if (human.sessionWorkspace === 'requirement') {
+        await this.#setTitle(target.sessionId, `${human.name} · ${conversation}`)
+      } else if (!human.im?.botId) await this.#name(target.sessionId, conversation, text)
     }
     await this.#append(human.id, target.sessionId, conversation, record('inbound', {
       from,
