@@ -9,10 +9,12 @@
  * transcript — is what peers read back, so a conversation survives compaction.
  */
 
-import { appendFile, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import { peerSource } from './peer-source.js'
+import { conversationSlug } from './slug.js'
 import type { HumanStore } from './store.js'
 import type { Ctx, Human, MailboxEntry } from './types.js'
 
@@ -488,7 +490,7 @@ export class HumanChat {
     const existing = await this.lookup(human.id, conversationId)
     if (existing) {
       try {
-        return this.#remember(human.id, conversationId, await this.#adopt(human, existing, presetId))
+        return this.#remember(human.id, conversationId, await this.#adopt(human, existing, presetId, conversationId))
       } catch (error) {
         // A Session cannot change its preset or its directory, so a record that now
         // declares a different one cannot reuse it. That is the only reason to
@@ -502,7 +504,7 @@ export class HumanChat {
     }
     // The id is passed through: an address that does not exist yet still gets created
     // under it, so the caller's record of it stays true.
-    return this.#remember(human.id, conversationId, await this.#create(human, presetId, existing))
+    return this.#remember(human.id, conversationId, await this.#create(human, presetId, existing, conversationId))
   }
 
   /**
@@ -528,12 +530,12 @@ export class HumanChat {
       const named = conversationId === undefined ? undefined : requireConversation(conversationId)
       let resolved
       try {
-        resolved = await this.#adopt(human, text, presetId)
+        resolved = await this.#adopt(human, text, presetId, named)
       } catch (error) {
         this.#log(
           `session ${text} could not receive for ${human.id} (${error.message}); opening a new one`,
         )
-        resolved = await this.#create(human, presetId, text)
+        resolved = await this.#create(human, presetId, text, named)
       }
       const conversation = named ?? (await this.#conversationOf(human.id, resolved)) ?? resolved
       // The reverse entry is needed even though nothing was filed: without it this
@@ -564,13 +566,13 @@ export class HumanChat {
    * work in it into a second Session with its own context. Resume is what `prompt`
    * does anyway; this only has to fail early, before a message lands somewhere else.
    */
-  async #adopt(human, sessionId, presetId) {
+  async #adopt(human, sessionId, presetId, conversation) {
     const resolved = await this.#resume(sessionId)
     // No resolution entry point: the Host cannot say, and `prompt` still resumes the
     // Session. A genuinely unknown id fails there rather than being silently replaced.
     if (resolved === undefined) return sessionId
     const header = resolved?.agent?.session?.header
-    const wanted = human.workspace || this.#defaultWorkspacePath?.()
+    const wanted = this.#cwdOf(human, conversation)
     if (wanted !== undefined && header?.cwd !== undefined && header.cwd !== wanted) {
       throw new Error(`session "${sessionId}" runs in "${header.cwd}", not "${wanted}"`)
     }
@@ -601,10 +603,14 @@ export class HumanChat {
    * the Session does not exist yet. When it does exist and cannot be reused, the Host
    * mints a different id; the caller sees the returned one.
    */
-  async #create(human, presetId, sessionId) {
+  async #create(human, presetId, sessionId, conversation) {
+    const location = this.#location(human, conversation)
+    // The Host creates a Workspace's directory for it, but a requirement directory
+    // is ours: without this the first turn would start in a cwd that does not exist.
+    if (location.cwd && human.sessionWorkspace === 'requirement') await mkdir(location.cwd, { recursive: true })
     const created = await this.#ctx.sessionController.create({
       ...(sessionId ? { sessionId } : {}),
-      ...this.#location(human),
+      ...location,
       ...(presetId ? { agentPreset: presetId } : {}),
     })
     // A different id is legal here — a Session that cannot be reused is replaced —
@@ -619,15 +625,39 @@ export class HumanChat {
   /**
    * Where the Session runs.
    *
-   * The Workspace id files it under the Workspace's list, which is what the UI
-   * groups by, and is passed *instead of* `cwd`: the Host resolves the directory
-   * from the Workspace and rejects a request that names both.
+   * A record-scoped Session is filed by Workspace id, which is what the UI groups
+   * by, and is passed *instead of* `cwd`: the Host resolves the directory from the
+   * Workspace and rejects a request that names both. A requirement-scoped Session
+   * must pass `cwd` alone, because its directory is under the Workspace but is not
+   * the Workspace itself.
    */
-  #location(human) {
-    const cwd = human.workspace || this.#defaultWorkspacePath?.() || undefined
-    const workspaceId = cwd ? this.#workspaceIdOf?.(cwd) : undefined
+  #location(human, conversation) {
+    const base = human.workspace || this.#defaultWorkspacePath?.() || undefined
+    if (human.sessionWorkspace === 'requirement' && base) {
+      const slug = conversationSlug(conversation)
+      // No conversation (a direct Session address) keeps the old location: there is
+      // no thread to name a directory after, and inventing one would split it later.
+      if (slug) return { cwd: join(base, 'reqs', slug) }
+    }
+    const workspaceId = base ? this.#workspaceIdOf?.(base) : undefined
     if (workspaceId) return { workspaceId }
-    return cwd ? { cwd } : {}
+    return base ? { cwd: base } : {}
+  }
+
+  /**
+   * The directory one conversation's Session must run in.
+   *
+   * Used only to decide whether a recorded Session can still carry the record.
+   * It mirrors {@link #location}: a requirement record compares the per-thread
+   * directory, and every other record compares the workspace it always did.
+   */
+  #cwdOf(human, conversation) {
+    const base = human.workspace || this.#defaultWorkspacePath?.() || undefined
+    if (human.sessionWorkspace === 'requirement' && base) {
+      const slug = conversationSlug(conversation)
+      if (slug) return join(base, 'reqs', slug)
+    }
+    return base
   }
 
   /**

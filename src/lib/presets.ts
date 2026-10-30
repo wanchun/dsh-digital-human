@@ -15,6 +15,8 @@
  * for workflowEngine" and the Agent fails to load. `test/smoke.mjs` checks this.
  */
 
+import { join } from 'node:path'
+
 /** Prefix applied to every generated preset id, keeping them separable from shipped presets. */
 export const PRESET_PREFIX = 'dh-'
 
@@ -319,7 +321,7 @@ export function renderConfigBlock(human, peerNames = {}) {
  * discover: its own registry identity, where durable memory lives, who its peers
  * are, and which IM target it speaks through.
  */
-export function renderOperatingContext(human, store) {
+export function renderOperatingContext(human, store, peerDescriptions = {}) {
   const lines = [
     '',
     '## Operating context',
@@ -328,10 +330,27 @@ export function renderOperatingContext(human, store) {
     `- Digital humans live under \`${store.file}\`: one directory per human, with \`persona.md\` (identity) and \`config.json\` (settings). Read them when you need the current roster.`,
   ]
   if (human.memory !== false) {
-    lines.push(`- Your durable memory is \`${store.memoryPath(human.id)}\`, and its \`# now\` block is already loaded into your prompt on every step. Update it with edit.`)
+    if (human.memoryScope === 'session') {
+      // The file is per conversation, so the prompt can name the pattern and the
+      // shared file but not one exact path: which one is loaded depends on the
+      // Session this prompt belongs to, and the memory context states that file.
+      const root = typeof store.memoryDir === 'function'
+        ? store.memoryDir(human.id)
+        : join(store.memoryPath(human.id), '..', 'memory')
+      lines.push(`- Your durable memory is per conversation: \`${root}/<conversation>.md\`, with cross-requirement notes in \`${root}/_shared.md\`. The \`# now\` blocks of both are already loaded into your prompt on every step. Update them with edit.`)
+    } else {
+      lines.push(`- Your durable memory is \`${store.memoryPath(human.id)}\`, and its \`# now\` block is already loaded into your prompt on every step. Update it with edit.`)
+    }
   }
   if (human.peers.length > 0) {
-    lines.push(`- Your peers are: ${human.peers.map((peer) => `\`${peer}\``).join(', ')}. Hand work to one with \`digital_human_send\`, then read its reply with \`digital_human_messages\` (or poll \`digital_human_status\`). A message from a peer arrives as a normal turn in this session, prefixed by a \`<dsh_peer_source>\` block naming the sender and the Session it came from — reply with that \`session\` as \`session_id\`, so the answer reaches the Session that asked for the work, and use the same \`conversation_id\` throughout so one subject stays in one thread.`)
+    // One peer per line: a description is a sentence, and a comma list would make
+    // the roster unreadable exactly when it matters. The descriptions come from the
+    // same roster `refresh` already read, so stating them costs no extra disk read.
+    const roster = human.peers.map((peer) => {
+      const description = String(peerDescriptions?.[peer] ?? '').trim()
+      return description ? `- \`${peer}\`（${description}）` : `- \`${peer}\``
+    })
+    lines.push('- Your peers are:', ...roster, '  Hand work to one with \`digital_human_send\`, then read its reply with \`digital_human_messages\` (or poll \`digital_human_status\`). A message from a peer arrives as a normal turn in this session, prefixed by a \`<dsh_peer_source>\` block naming the sender and the Session it came from — reply with that \`session\` as \`session_id\`, so the answer reaches the Session that asked for the work, and use the same \`conversation_id\` throughout so one subject stays in one thread.')
   } else {
     lines.push('- Use `digital_human_list` to see which digital humans you may reach.')
   }
@@ -364,7 +383,7 @@ export function renderOperatingContext(human, store) {
  * The digital human's own row is appended last so the preset scope owns the
  * platform tool's visibility.
  */
-export function buildPresetDefinition(human, { store, toolsPluginName, order, peerNames = {}, platformVariables = [] as string[] }) {
+export function buildPresetDefinition(human, { store, toolsPluginName, order, peerNames = {}, peerDescriptions = {}, platformVariables = [] as string[] }) {
   // Extend, never replace: a deployment that adds a variable must not thereby
   // un-register the two the loop owns.
   const allowedVariables = [...new Set([...PLATFORM_VARIABLES, ...platformVariables])]
@@ -387,7 +406,7 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
       // literal text — as a Halo-authored one is — has no other way to tell an
       // actual value from the example it was written with.
       prefix: neutralizePlaceholders(
-        `${resolveConfig(human.systemPrompt, effectiveConfig(human, peerNames))}${renderOperatingContext(human, store)}${renderConfigBlock(human, peerNames).join('\n')}`,
+        `${resolveConfig(human.systemPrompt, effectiveConfig(human, peerNames))}${renderOperatingContext(human, store, peerDescriptions)}${renderConfigBlock(human, peerNames).join('\n')}`,
         allowedVariables,
       ),
     },
@@ -411,6 +430,9 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
         config: {
           human: human.id,
           memory: human.memory !== false,
+          // The memory scope travels with the row for the same reason the switch
+          // does: `apply` is synchronous, and choosing the file needs the record.
+          memoryScope: human.memoryScope === 'session' ? 'session' : 'record',
           skills: [...(human.skills ?? [])],
           // A record with no bot has no outbound channel. Carrying the flag keeps the
           // tools row from offering `notify_bot`, which could only ever fail.

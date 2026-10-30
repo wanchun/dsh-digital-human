@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -837,3 +837,62 @@ describe('the conversation index', () => {
     expect(chat.ownerOf(42)).toBeUndefined()
   })
 })
+
+describe('requirement workspace', () => {
+  const workspace = () => join(home, 'ws')
+
+  it('runs the session in reqs/<conversation> and creates the directory', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.ensureSession(human({ workspace: workspace(), sessionWorkspace: 'requirement' }), 'REQ-1', 'dh-pm')
+    const expected = join(workspace(), 'reqs', 'REQ-1')
+    expect(controller.created[0].cwd).toBe(expected)
+    // A cwd is passed alone: naming a Workspace would make the Host resolve the
+    // directory from the Workspace and ignore the requirement directory.
+    expect(controller.created[0].workspaceId).toBeUndefined()
+    expect(existsSync(expected)).toBe(true)
+    expect(statSync(expected).isDirectory()).toBe(true)
+  })
+
+  it('turns a conversation into one safe path segment', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.ensureSession(human({ workspace: workspace(), sessionWorkspace: 'requirement' }), 'REQ 1/2', 'dh-pm')
+    expect(controller.created[0].cwd).toBe(join(workspace(), 'reqs', 'REQ-1-2'))
+  })
+
+  it('refuses a conversation that would escape the requirement directory', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await expect(chat.ensureSession(human({ workspace: workspace(), sessionWorkspace: 'requirement' }), '..', 'dh-pm'))
+      .rejects.toThrow(/\.\./)
+  })
+
+  it('keeps two requirement threads in different directories', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const humanRecord = human({ workspace: workspace(), sessionWorkspace: 'requirement' })
+    await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')
+    await chat.ensureSession(humanRecord, 'REQ-2', 'dh-pm')
+    expect(controller.created[0].cwd).toBe(join(workspace(), 'reqs', 'REQ-1'))
+    expect(controller.created[1].cwd).toBe(join(workspace(), 'reqs', 'REQ-2'))
+  })
+
+  it('reuses the requirement session instead of reopening it', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const humanRecord = human({ workspace: workspace(), sessionWorkspace: 'requirement' })
+    const first = await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')
+    expect(await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')).toBe(first)
+    expect(controller.created).toHaveLength(1)
+  })
+
+  it('keeps the record workspace when the switch is off', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.ensureSession(human({ sessionWorkspace: 'record' }), 'REQ-1', 'dh-pm')
+    expect(controller.created[0].workspaceId).toBe('ws-1')
+    expect(controller.created[0].cwd).toBeUndefined()
+  })
+})
+

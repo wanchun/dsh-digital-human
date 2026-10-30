@@ -199,6 +199,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
 
   /** Records that keep durable memory, so a turn end knows whose timeline to reclaim. */
   const memoryEnabled = new Set<string>()
+  /** Records whose memory is split by conversation, kept beside the switch it refines. */
+  const memoryScoped = new Set<string>()
 
   /**
    * human id -> display name.
@@ -300,9 +302,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // its binding changed or the record was removed.
     alignmentByHuman.clear()
     memoryEnabled.clear()
+    memoryScoped.clear()
     nameById.clear()
     const humans = await store.list(seed)
     for (const human of humans) if (human.memory !== false) memoryEnabled.add(human.id)
+    for (const human of humans) if (human.memoryScope === 'session') memoryScoped.add(human.id)
     for (const human of humans) nameById.set(human.id, human.name)
     defaultWorkspace = await ensureDefaultWorkspace(ctx, { home, log })
     workspaceIdByPath.clear()
@@ -338,6 +342,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // already in this list — so `{{peer_name}}` resolves from the same picker the
     // settings page edits, instead of a second copy the operator must keep in step.
     const peerNames = Object.fromEntries(humans.map((entry) => [entry.id, entry.name]))
+    // Read beside the names from the same in-memory roster: a second `store.get`
+    // per peer would be a disk read per peer for a field already in hand.
+    const peerDescriptions = Object.fromEntries(humans.map((entry) => [entry.id, entry.description ?? '']))
     for (const human of humans) {
       if (!human.enabled) continue
       // A fresh binding has no owner: the IM platform never reveals who created a
@@ -368,6 +375,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         toolsPluginName: toolsPlugin,
         order: order++,
         peerNames,
+        peerDescriptions,
         ...(platformVariables ? { platformVariables } : {}),
       })
       permissionByPreset.set(definition.id, permissionPresetOf(record))
@@ -628,10 +636,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
    * memory. Only `# History` moves: dropping working memory is the model's decision,
    * so `# now` is left for `memory_compact` to handle.
    */
-  function reclaimHistory(humanId: string): void {
+  function reclaimHistory(humanId: string, conversation: string): void {
     if (!memoryEnabled.has(humanId)) return
     try {
-      const archived = archiveHistoryOnTurnEnd(memoryPaths(store, humanId))
+      const scope = memoryScoped.has(humanId) ? 'session' : 'record'
+      const archived = archiveHistoryOnTurnEnd(memoryPaths(store, humanId, { scope, conversation }))
       if (archived) log(`archived ${archived.moved} memory history entries of ${humanId} to ${archived.archive}`)
     } catch (error) {
       log(`memory history archive failed for ${humanId}: ${error.message}`)
@@ -990,6 +999,39 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         })),
       })
     }
+    if (method === 'chat.send') {
+      const to = typeof payload?.to === 'string' ? payload.to.trim() : ''
+      if (!to) return bad('to is required')
+      if (typeof payload?.message !== 'string' || !payload.message.trim()) return bad('message is required')
+      const target = await service.resolve(to)
+      if (!target) return bad(`unknown digital human: ${JSON.stringify(payload.to)}`)
+      // The tool and this route share one delivery path; only the caller differs.
+      // Hence the same `service.send` call, so a work item, a queue and an amend
+      // decision cannot diverge between an agent and an automation.
+      try {
+        const delivered = await service.send(target.id, {
+          ...(typeof payload.conversation_id === 'string' && payload.conversation_id.trim()
+            ? { conversationId: payload.conversation_id.trim() }
+            : {}),
+          ...(typeof payload.session_id === 'string' && payload.session_id.trim()
+            ? { sessionId: payload.session_id.trim() }
+            : {}),
+          message: payload.message,
+          ...(typeof payload.from === 'string' && payload.from.trim() ? { from: payload.from.trim() } : {}),
+        })
+        const task = 'task' in delivered ? delivered.task : undefined
+        return ok({
+          ...(task?.id ? { taskId: task.id } : {}),
+          sessionId: delivered.sessionId ?? '',
+          conversation: delivered.conversationId,
+          // The resolved intent, not the requested one: a reply can become an amend
+          // and a busy peer can queue a new item, so the caller needs what happened.
+          mode: task?.intent ?? 'message',
+        })
+      } catch (error) {
+        return bad(error.message)
+      }
+    }
     if (method === 'im.targets') {
       const dshIm = ctx.get('dshIm')
       if (!dshIm || !payload.botId) return ok({ targets: [] })
@@ -1262,7 +1304,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         // Only this turn's own item is closed; the queue behind it is untouched.
         // The same boundary reclaims the timeline, so memory maintenance shares the
         // one subscription instead of adding a timer of its own.
-        reclaimHistory(owner.humanId)
+        reclaimHistory(owner.humanId, owner.conversationId)
         return settleTurn(owner.humanId, sessionId, event.data?.reason)
       }).catch((error) => log(`work item end failed for ${sessionId}: ${error.message}`))
       return

@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -414,3 +415,32 @@ describe('effectiveConfig', () => {
     expect(effectiveConfig(human).self_name).toBe('overridden')
   })
 })
+
+describe('peer descriptions', () => {
+  it('lists each peer on its own line with its description', () => {
+    const lines = renderOperatingContext(record({ peers: ['dev', 'qa'] }), store, { dev: '开发助手' })
+    expect(lines).toContain('- Your peers are:')
+    expect(lines).toContain('- `dev`（开发助手）')
+    // No description means the id alone, never an empty pair of brackets.
+    expect(lines).toContain('- `qa`')
+    expect(lines).not.toContain('`qa`（')
+  })
+
+  it('carries the descriptions already read during refresh into the preset', () => {
+    const definition = buildPresetDefinition(record({ peers: ['dev'] }), {
+      store,
+      toolsPluginName: '@local/tools',
+      order: 100,
+      peerDescriptions: { dev: '通用开发编排' },
+    })
+    expect(definition.plugins[0].config.prefix).toContain('通用开发编排')
+  })
+
+  it('states a session-scoped memory location instead of one record file', () => {
+    const lines = renderOperatingContext(record({ memoryScope: 'session' }), store)
+    expect(lines).toContain(join('/home/humans', 'pm', 'memory'))
+    expect(lines).toContain('_shared.md')
+    expect(lines).not.toContain(store.memoryPath('pm') + '`, and its')
+  })
+})
+

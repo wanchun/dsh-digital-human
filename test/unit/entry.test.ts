@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -447,6 +448,44 @@ describe('the management route', () => {
     expect(answer.result.ok).toBe(false)
     expect(answer.result.error.message).toContain('unsupported method')
   })
+
+  it('sends a chat message and reports the work item', async () => {
+    const { route } = await platformWithRoute()
+    const answer = await (await route.fetch(post(call('chat.send', {
+      to: 'dev-assistant', message: 'please review 12345', conversation_id: 'REQ-1', from: 'pm-assistant',
+    })))).json()
+    expect(answer.result.ok).toBe(true)
+    expect(answer.result.value.conversation).toBe('REQ-1')
+    expect(answer.result.value.sessionId).toBeTypeOf('string')
+    expect(answer.result.value.taskId).toBeTypeOf('string')
+    expect(answer.result.value.mode).toBe('assign')
+  })
+
+  it('sends a plain message when no sender is named', async () => {
+    const { route } = await platformWithRoute()
+    const answer = await (await route.fetch(post(call('chat.send', {
+      to: 'dev-assistant', message: 'hello', conversation_id: 'REQ-2',
+    })))).json()
+    expect(answer.result.ok).toBe(true)
+    expect(answer.result.value.conversation).toBe('REQ-2')
+    expect(answer.result.value.taskId).toBeUndefined()
+    expect(answer.result.value.mode).toBe('message')
+  })
+
+  it('refuses a send with no target, no message or an unknown target', async () => {
+    const { route } = await platformWithRoute()
+    const noTarget = await (await route.fetch(post(call('chat.send', { message: 'x' })))).json()
+    expect(noTarget.result.ok).toBe(false)
+    expect(noTarget.result.error.code).toBe('bad-request')
+    expect(noTarget.result.error.details).toEqual({})
+    const noMessage = await (await route.fetch(post(call('chat.send', { to: 'dev-assistant' })))).json()
+    expect(noMessage.result.ok).toBe(false)
+    expect(noMessage.result.error.code).toBe('bad-request')
+    const unknown = await (await route.fetch(post(call('chat.send', { to: 'nobody', message: 'x' })))).json()
+    expect(unknown.result.ok).toBe(false)
+    expect(unknown.result.error.code).toBe('bad-request')
+    expect(unknown.result.error.message).toContain('unknown digital human')
+  })
 })
 
 describe('the skill-space route', () => {
@@ -806,6 +845,45 @@ describe('the preset-scoped tools row', () => {
     expect(platform.tools.has('memory_status')).toBe(true)
     expect(platform.contexts.map((entry) => entry.name)).toEqual(['digital-human-memory'])
     expect(platform.contexts[0].text()).toContain('# now')
+  })
+
+
+  it('injects the conversation memory and the shared notes for a session-scoped record', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'm1', name: 'M', memoryScope: 'session' })
+    const first = await service.send('m1', { message: 'a', conversationId: 'REQ-1' })
+    const second = await service.send('m1', { message: 'b', conversationId: 'REQ-2' })
+    const one = memoryPaths(service.store, 'm1', { scope: 'session', conversation: 'REQ-1' })
+    const two = memoryPaths(service.store, 'm1', { scope: 'session', conversation: 'REQ-2' })
+    await mkdir(dirname(one.file), { recursive: true })
+    await writeFile(one.file, '# now\n## State | first only\n', 'utf8')
+    await writeFile(two.file, '# now\n## State | second only\n', 'utf8')
+    await writeFile(one.sharedFile!, '# now\n## Patterns\n- shared rule\n', 'utf8')
+    platform.ctx.digitalHumans = service
+    applyToolsEntry(platform.ctx, { human: 'm1', memory: true, memoryScope: 'session' })
+    const text = platform.contexts[0].text as (assembly: unknown) => string
+    const firstContext = text({ scope: { sessionId: first.sessionId } })
+    expect(firstContext).toContain('first only')
+    expect(firstContext).not.toContain('second only')
+    expect(firstContext).toContain('shared rule')
+    const secondContext = text({ scope: { sessionId: second.sessionId } })
+    expect(secondContext).toContain('second only')
+    expect(secondContext).not.toContain('first only')
+  })
+
+  it('points the memory tools at the calling session file', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'm2', name: 'M2', memoryScope: 'session' })
+    const sent = await service.send('m2', { message: 'a', conversationId: 'REQ-9' })
+    const paths = memoryPaths(service.store, 'm2', { scope: 'session', conversation: 'REQ-9' })
+    const tools = buildHumanTools({ ctx: platform.ctx, service, humanId: 'm2', memory: true, im: false, memoryScope: 'session' })
+    const status = tools.find((tool: any) => tool.name === 'memory_status')!
+    const answer = await status.execute({}, { agent: { session: { header: { id: sent.sessionId } } } })
+    expect(answer.detail).toContain(paths.file)
   })
 
   it('mounts the skills the record names, from the plugin skill space', async () => {
@@ -1505,6 +1583,28 @@ describe('the memory history archive on turn end', () => {
     expect(after.archiveFiles).toHaveLength(1)
     // The working block is never moved automatically; only the timeline is.
     expect(after.nowSection).toContain('## State | big')
+  })
+
+
+  it('archives a session-scoped timeline into that conversation directory', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'm3', name: 'M3', memoryScope: 'session' })
+    const sent = await service.send('m3', { message: 'work', from: 'pm-assistant', conversationId: 'REQ-7' })
+    const paths = memoryPaths(service.store, 'm3', { scope: 'session', conversation: 'REQ-7' })
+    await mkdir(dirname(paths.file), { recursive: true })
+    const lines = ['# now', `## State | big\n${'- x\n'.repeat(40000)}`, '', '# History', '']
+    for (let at = 0; at < 61; at += 1) lines.push(`## 2026-10-01-1200 | entry ${at}`, '')
+    await writeFile(paths.file, lines.join('\n'), 'utf8')
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    const after = buildSnapshot(paths)
+    expect(after.historyEntries).toBe(60)
+    expect(after.archiveFiles).toHaveLength(1)
+    // The record's legacy memory.md is not where a session-scoped record keeps its
+    // timeline, so turning the archive on must not create or touch it.
+    expect(existsSync(memoryPaths(service.store, 'm3').file)).toBe(false)
   })
 
   it('leaves a record that keeps no memory alone', async () => {

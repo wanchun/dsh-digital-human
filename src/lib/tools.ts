@@ -234,9 +234,25 @@ function normalizeTool(definition) {
  * @param options.im - whether this record has a bot to push through. Without one,
  *   `notify_bot` can only fail, so the two IM tools are left out.
  */
-export function buildHumanTools({ ctx, service, humanId, memory = true, im = true }) {
+export function buildHumanTools({ ctx, service, humanId, memory = true, im = true, memoryScope = 'record' }) {
   const self = () => service.require(humanId)
   const botOf = async () => (await self()).im
+  /**
+   * The memory files this call works on.
+   *
+   * A session-scoped record names its file by the conversation the calling
+   * Session was filed under. The reverse index is synchronous, so the tools can
+   * resolve that at execution time without an awaited record lookup.
+   */
+  const memoryPathsFor = async (exec) => {
+    if (memoryScope !== 'session') return memoryPaths(service.store, humanId)
+    const sessionId = callerSession(exec)
+    const owner = sessionId ? service.ownerOf?.(sessionId) : undefined
+    return memoryPaths(service.store, humanId, {
+      scope: 'session',
+      ...(owner?.humanId === humanId && owner?.conversationId ? { conversation: owner.conversationId } : {}),
+    })
+  }
   // Fingerprint of a send that already landed, so a retry after a failed report does
   // not assign the same work a second time.
   const recentSends = new Map<string, { at: number; value: any }>()
@@ -951,9 +967,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       + 'or to decide whether to compact.',
     parameters: {},
     output: TEXT_OUTPUT,
-    async execute() {
-      const me = await self()
-      return { detail: renderSnapshot(buildSnapshot(memoryPaths(service.store, me.id))) }
+    async execute(_args, exec) {
+      const paths = await memoryPathsFor(exec)
+      return { detail: renderSnapshot(buildSnapshot(paths)) }
     },
   }
 
@@ -972,9 +988,8 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       },
     },
     output: TEXT_OUTPUT,
-    async execute(args) {
-      const me = await self()
-      const paths = memoryPaths(service.store, me.id)
+    async execute(args, exec) {
+      const paths = await memoryPathsFor(exec)
       if (args.scope === 'history') {
         const archived = archiveHistory(paths, { keep: 0 })
         return {

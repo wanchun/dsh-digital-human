@@ -139,6 +139,23 @@ export interface Human {
    * window belongs to a record whose work is expected back quickly.
    */
   escalationDeadlineMinutes?: number
+  /**
+   * Where this record's Sessions run.
+   *
+   * `record` (default) keeps every Session in the record's workspace, which is
+   * the behaviour every existing record already has. `requirement` gives each
+   * conversation its own `reqs/<conversation>/` directory, so one requirement's
+   * documents and worktrees live together instead of beside every other one.
+   */
+  sessionWorkspace?: 'record' | 'requirement'
+  /**
+   * Which memory file this record reads and writes.
+   *
+   * `record` (default) keeps the single `memory.md` every existing record uses.
+   * `session` splits it into one file per conversation plus a shared file, so a
+   * requirement's working memory does not leak into the next one.
+   */
+  memoryScope?: 'record' | 'session'
 }
 
 /**

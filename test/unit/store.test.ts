@@ -489,3 +489,38 @@ describe('HumanStore paths', () => {
     expect((await store.list()).length).toBe(0)
   })
 })
+
+describe('record switches', () => {
+  it('defaults both switches to the old behaviour', () => {
+    const human = normalizeHuman({ id: 'a' })
+    expect(human.sessionWorkspace).toBe('record')
+    expect(human.memoryScope).toBe('record')
+  })
+
+  it('reads both switches and treats an unknown value as the default', () => {
+    const on = normalizeHuman({ id: 'a', sessionWorkspace: 'requirement', memoryScope: 'session' })
+    expect(on.sessionWorkspace).toBe('requirement')
+    expect(on.memoryScope).toBe('session')
+    const unknown = normalizeHuman({ id: 'a', sessionWorkspace: 'bogus', memoryScope: 'also-bogus' })
+    expect(unknown.sessionWorkspace).toBe('record')
+    expect(unknown.memoryScope).toBe('record')
+  })
+
+  it('round-trips a non-default switch through config.json', async () => {
+    await store.upsert(record({ id: 'exec', sessionWorkspace: 'requirement', memoryScope: 'session' }))
+    const stored = JSON.parse(await readFile(store.configPath('exec'), 'utf8'))
+    expect(stored.sessionWorkspace).toBe('requirement')
+    expect(stored.memoryScope).toBe('session')
+    const loaded = await store.get('exec')
+    expect(loaded?.sessionWorkspace).toBe('requirement')
+    expect(loaded?.memoryScope).toBe('session')
+  })
+
+  it('does not write a default switch, so an old config stays byte-identical', async () => {
+    await store.upsert(record({ id: 'old' }))
+    const stored = JSON.parse(await readFile(store.configPath('old'), 'utf8'))
+    expect(stored.sessionWorkspace).toBeUndefined()
+    expect(stored.memoryScope).toBeUndefined()
+  })
+})
+

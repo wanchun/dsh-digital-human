@@ -190,6 +190,11 @@ export function normalizeHuman(input, now = new Date().toISOString()): Human {
     ...(configMap(input.config) === undefined ? {} : { config: configMap(input.config) }),
     ...(configSchemaList(input.configSchema).length === 0 ? {} : { configSchema: configSchemaList(input.configSchema) }),
     sessionMode: input.sessionMode === 'single' ? 'single' : 'thread',
+    // Unknown values fall back to the old behaviour instead of refusing the record:
+    // a hand-edited config must keep loading, and a typo must not silently turn a
+    // new split-memory record into one that shares everything.
+    sessionWorkspace: input.sessionWorkspace === 'requirement' ? 'requirement' : 'record',
+    memoryScope: input.memoryScope === 'session' ? 'session' : 'record',
     // A non-positive or non-numeric window would mean "escalate at once" or "never",
     // neither of which the operator asked for, so the platform default stays.
     ...(usableMinutes(input.escalationDeadlineMinutes)
@@ -220,7 +225,7 @@ export function deadlineMinutesOf(human: { escalationDeadlineMinutes?: number },
 const CONFIG_FIELDS = [
   'enabled', 'workspace', 'skills', 'peers', 'im', 'permissionPreset', 'memory',
   'subscriptions', 'config', 'configSchema', 'sessionMode', 'escalationDeadlineMinutes',
-  'icon', 'createdAt', 'updatedAt',
+  'sessionWorkspace', 'memoryScope', 'icon', 'createdAt', 'updatedAt',
 ]
 
 /** Largest icon the registry accepts, measured on the data URI itself. */
@@ -300,6 +305,10 @@ function configOf(human: Human): Record<string, unknown> {
     },
     permissionPreset: human.permissionPreset,
     sessionMode: human.sessionMode ?? 'thread',
+    // A default switch is omitted so an existing config.json is not rewritten just
+    // because it was read; the normalizer supplies the same value on the way back.
+    ...(human.sessionWorkspace === 'requirement' ? { sessionWorkspace: human.sessionWorkspace } : {}),
+    ...(human.memoryScope === 'session' ? { memoryScope: human.memoryScope } : {}),
     ...(human.escalationDeadlineMinutes === undefined
       ? {}
       : { escalationDeadlineMinutes: human.escalationDeadlineMinutes }),
@@ -398,6 +407,16 @@ export class HumanStore {
 
   memoryPath(id) {
     return join(this.dir(id), 'memory.md')
+  }
+
+  /** Directory holding per-conversation memory files, when a record scopes memory by session. */
+  memoryDir(id) {
+    return join(this.dir(id), 'memory')
+  }
+
+  /** Cross-conversation memory file used beside the per-conversation files. */
+  sharedMemoryPath(id) {
+    return join(this.memoryDir(id), '_shared.md')
   }
 
   sessionIndexPath(id) {

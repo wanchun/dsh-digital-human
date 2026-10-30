@@ -416,3 +416,71 @@ describe('archiveHistoryOnTurnEnd', () => {
     expect(archiveHistoryOnTurnEnd(paths())).toBeNull()
   })
 })
+
+describe('session memory scope', () => {
+  const session = (conversation = 'REQ-1') => memoryPaths(store, 'pm', { scope: 'session', conversation })
+  const shared = () => memoryPaths(store, 'pm', { scope: 'session', conversation: 'REQ-1' }).sharedFile
+
+  it('names one file per conversation and one shared file under memory/', () => {
+    const paths = session('REQ-1')
+    expect(paths.file).toBe(join(home, 'humans', 'pm', 'memory', 'REQ-1.md'))
+    expect(paths.sharedFile).toBe(join(home, 'humans', 'pm', 'memory', '_shared.md'))
+    expect(paths.archiveDir).toBe(join(home, 'humans', 'pm', 'memory', 'REQ-1'))
+    expect(paths.runDir).toBe(join(home, 'humans', 'pm', 'memory', 'REQ-1', 'run'))
+  })
+
+  it('sanitizes the conversation and refuses traversal', () => {
+    expect(session('REQ 1/2').file).toBe(join(home, 'humans', 'pm', 'memory', 'REQ-1-2.md'))
+    expect(() => session('..')).toThrow(/\.\./)
+  })
+
+  it('keeps record scope unchanged, with no shared file', () => {
+    const paths = memoryPaths(store, 'pm')
+    expect(paths.file).toBe(join(home, 'humans', 'pm', 'memory.md'))
+    expect(paths.sharedFile).toBeUndefined()
+  })
+
+  it('creates the conversation file on first injection', () => {
+    const paths = session('NEW')
+    expect(existsSync(paths.file)).toBe(false)
+    renderMemoryContext(paths)
+    expect(existsSync(paths.file)).toBe(true)
+  })
+
+  it('keeps two conversations apart while both see the shared notes', () => {
+    const first = session('REQ-1')
+    const second = session('REQ-2')
+    ensureMemory(first.file)
+    ensureMemory(second.file)
+    writeFileSync(first.file, '# now\n## State | first only\n', 'utf8')
+    writeFileSync(second.file, '# now\n## State | second only\n', 'utf8')
+    writeFileSync(shared(), '# now\n## Patterns\n- shared rule\n', 'utf8')
+    const one = renderMemoryContext(first)
+    const two = renderMemoryContext(second)
+    expect(one).toContain('first only')
+    expect(one).not.toContain('second only')
+    expect(two).toContain('second only')
+    expect(two).not.toContain('first only')
+    expect(one).toContain('shared rule')
+    expect(two).toContain('shared rule')
+  })
+
+  it('truncates shared memory over its own budget and names what was cut', () => {
+    const paths = session('REQ-1')
+    ensureMemory(paths.file)
+    writeFileSync(shared(), '# now\n## Patterns\n' + '- a shared rule\n'.repeat(600), 'utf8')
+    const context = renderMemoryContext(paths)
+    expect(context).toContain('_shared.md')
+    expect(context).toMatch(/omitted/)
+  })
+
+  it('archives each conversation into its own directory', () => {
+    const paths = session('REQ-1')
+    ensureMemory(paths.file)
+    const archived = compactMemory(paths)
+    expect(archived).toContain(join('memory', 'REQ-1'))
+    expect(existsSync(archived!)).toBe(true)
+    expect(readMemory(paths.file)).toContain('# now')
+  })
+})
+

@@ -84,7 +84,10 @@ export function apply(ctx: Ctx, config: Config = {}): void {
   // Carried on the row for the same reason: a record with no bot has no outbound
   // channel, so the IM tools are not offered at all.
   const im = config.im !== false
-  for (const tool of buildHumanTools({ ctx, service: ctx.digitalHumans, humanId: human, memory, im })) {
+  // Same reason again: choosing a file per conversation needs the record's scope,
+  // and `apply` cannot await the registry to read it.
+  const memoryScope = config.memoryScope === 'session' ? 'session' : 'record'
+  for (const tool of buildHumanTools({ ctx, service: ctx.digitalHumans, humanId: human, memory, im, memoryScope })) {
     ctx.tools.register(tool)
   }
   mountSkills(ctx, human, config)
@@ -95,6 +98,18 @@ export function apply(ctx: Ctx, config: Config = {}): void {
   ctx.systemPrompt.context({
     name: 'digital-human-memory',
     order: MEMORY_CONTEXT_ORDER,
-    text: () => renderMemoryContext(paths),
+    // The assembly names the Agent it is for, and the reverse index maps that
+    // Session to the conversation it was filed under. That is the only place the
+    // per-conversation file can be chosen: a preset is shared by every thread.
+    text: (assembly) => {
+      if (memoryScope !== 'session') return renderMemoryContext(paths)
+      const sessionId = assembly?.scope?.sessionId ?? assembly?.agent?.sessionId
+      const owner = typeof sessionId === 'string' ? ctx.digitalHumans.ownerOf?.(sessionId) : undefined
+      const conversation = owner?.humanId === human && owner?.conversationId ? owner.conversationId : undefined
+      return renderMemoryContext(memoryPaths(ctx.digitalHumans.store, human, {
+        scope: 'session',
+        ...(conversation ? { conversation } : {}),
+      }))
+    },
   })
 }
