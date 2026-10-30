@@ -853,8 +853,10 @@ describe('the preset-scoped tools row', () => {
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     const service = platform.provided.get('digitalHumans')
     await service.upsert({ id: 'm1', name: 'M', memoryScope: 'session' })
-    const first = await service.send('m1', { message: 'a', conversationId: 'REQ-1' })
-    const second = await service.send('m1', { message: 'b', conversationId: 'REQ-2' })
+    const firstSend = await service.send('m1', { message: 'a', conversationId: 'REQ-1' })
+    await service.send('m1', { message: 'b', conversationId: 'REQ-2' })
+    const firstSessionId = firstSend.sessionId
+    const secondSessionId = (await service.send('m1', { message: 'c', conversationId: 'REQ-2' })).sessionId
     const one = memoryPaths(service.store, 'm1', { scope: 'session', conversation: 'REQ-1' })
     const two = memoryPaths(service.store, 'm1', { scope: 'session', conversation: 'REQ-2' })
     await mkdir(dirname(one.file), { recursive: true })
@@ -863,14 +865,26 @@ describe('the preset-scoped tools row', () => {
     await writeFile(one.sharedFile!, '# now\n## Patterns\n- shared rule\n', 'utf8')
     platform.ctx.digitalHumans = service
     applyToolsEntry(platform.ctx, { human: 'm1', memory: true, memoryScope: 'session' })
-    const text = platform.contexts[0].text as (assembly: unknown) => string
-    const firstContext = text({ scope: { sessionId: first.sessionId } })
-    expect(firstContext).toContain('first only')
-    expect(firstContext).not.toContain('second only')
-    expect(firstContext).toContain('shared rule')
-    const secondContext = text({ scope: { sessionId: second.sessionId } })
-    expect(secondContext).toContain('second only')
-    expect(secondContext).not.toContain('first only')
+    // The preset cannot name the Session (assembly scope is opaque), so it registers
+    // no memory context at all for a session-scoped record; the pre-step hook serves
+    // the right file instead.
+    expect(platform.contexts).toHaveLength(0)
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    const batch = (sessionId: string) => ({
+      id: 'message-1',
+      role: 'user',
+      source: { kind: 'user', rpcId: 'rpc-1' },
+      content: [{ type: 'text', text: 'work' }],
+    })
+    const firstDecision = await hook!.handler({ agent: { session: { id: firstSessionId } } }, async () => ({ kind: 'enter', messages: [batch('a')] }))
+    const firstText = firstDecision.messages[0].content[0].text
+    expect(firstText).toContain('first only')
+    expect(firstText).not.toContain('second only')
+    expect(firstText).toContain('shared rule')
+    const secondDecision = await hook!.handler({ agent: { session: { id: secondSessionId } } }, async () => ({ kind: 'enter', messages: [batch('b')] }))
+    const secondText = secondDecision.messages[0].content[0].text
+    expect(secondText).toContain('second only')
+    expect(secondText).not.toContain('first only')
   })
 
   it('points the memory tools at the calling session file', async () => {

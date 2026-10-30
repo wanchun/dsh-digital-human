@@ -92,24 +92,16 @@ export function apply(ctx: Ctx, config: Config = {}): void {
   }
   mountSkills(ctx, human, config)
   if (!memory) return
+  // A session-scoped record cannot name its file here: the assembly context exposes
+  // an opaque scope key, not the Session id, so the per-conversation memory is
+  // injected by the Host's pre-step hook instead, where the Agent is known.
+  if (memoryScope === 'session') return
   const paths = memoryPaths(ctx.digitalHumans.store, human)
   // The provider re-reads on every assembly, so an edit the model made during a
   // turn is already visible on its next step. `# now` stays small by construction.
   ctx.systemPrompt.context({
     name: 'digital-human-memory',
     order: MEMORY_CONTEXT_ORDER,
-    // The assembly names the Agent it is for, and the reverse index maps that
-    // Session to the conversation it was filed under. That is the only place the
-    // per-conversation file can be chosen: a preset is shared by every thread.
-    text: (assembly) => {
-      if (memoryScope !== 'session') return renderMemoryContext(paths)
-      const sessionId = assembly?.scope?.sessionId ?? assembly?.agent?.sessionId
-      const owner = typeof sessionId === 'string' ? ctx.digitalHumans.ownerOf?.(sessionId) : undefined
-      const conversation = owner?.humanId === human && owner?.conversationId ? owner.conversationId : undefined
-      return renderMemoryContext(memoryPaths(ctx.digitalHumans.store, human, {
-        scope: 'session',
-        ...(conversation ? { conversation } : {}),
-      }))
-    },
+    text: () => renderMemoryContext(paths),
   })
 }

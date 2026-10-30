@@ -10,7 +10,7 @@
  */
 
 import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { peerSource } from './peer-source.js'
@@ -143,6 +143,7 @@ export class HumanChat {
    * A session created with a `cwd` alone is not filed under any Workspace, so the
    * UI cannot group it. This is the lookup that fixes that.
    */
+  #ensureWorkspace
   #workspaceIdOf
 
   constructor(
@@ -152,14 +153,24 @@ export class HumanChat {
     {
       defaultWorkspacePath,
       workspaceIdOf,
+      ensureWorkspace,
     }: {
       defaultWorkspacePath?: () => string | undefined
       workspaceIdOf?: (path: string) => string | undefined
+      /**
+       * Register a directory as a Workspace and return its id.
+       *
+       * A per-requirement directory is created on the fly, so it is not in the
+       * roster yet; without an id the Session runs in the right place but the UI
+       * cannot group it, and it shows up ungrouped.
+       */
+      ensureWorkspace?: (path: string) => Promise<string | undefined>
     } = {},
   ) {
     this.#ctx = ctx
     this.#defaultWorkspacePath = defaultWorkspacePath
     this.#workspaceIdOf = workspaceIdOf
+    this.#ensureWorkspace = ensureWorkspace
     this.#store = store
     this.#log = log
   }
@@ -367,9 +378,42 @@ export class HumanChat {
     return found
   }
 
-  /** Map a Session back to the digital human and conversation that own it. */
-  ownerOf(sessionId) {
-    return this.#bySession.get(sessionId)
+  /**
+   * Map a Session back to the digital human and conversation that own it.
+   *
+   * The in-memory map only covers Sessions this process has already delivered
+   * into; after a restart, or on the very first assembly of a reused Session, it
+   * is empty. A caller that knows which record it is asking about passes the id,
+   * and the persisted index answers instead of falling back to a default thread.
+   */
+  ownerOf(sessionId, humanId?: string) {
+    const known = this.#bySession.get(sessionId)
+    if (known !== undefined || typeof humanId !== 'string') return known
+    const index = this.#indexSync(humanId)
+    for (const [conversationId, value] of Object.entries(index)) {
+      if (value !== sessionId) continue
+      const owner = { humanId, conversationId }
+      this.#bySession.set(sessionId, owner)
+      return owner
+    }
+    return undefined
+  }
+
+  /** Read one record's session index without waiting, for a synchronous caller. */
+  #indexSync(humanId) {
+    if (this.#indexes.has(humanId)) return this.#indexes.get(humanId)
+    const path = this.#store.sessionIndexPath(humanId)
+    let index = {}
+    if (existsSync(path)) {
+      try {
+        const parsed = JSON.parse(readFileSync(path, 'utf8'))
+        if (parsed && typeof parsed === 'object') index = parsed
+      } catch (error) {
+        this.#log(`session index unreadable for ${humanId}: ${error.message}`)
+      }
+    }
+    this.#indexes.set(humanId, index)
+    return index
   }
 
   /**
@@ -607,7 +651,17 @@ export class HumanChat {
     const location = this.#location(human, conversation)
     // The Host creates a Workspace's directory for it, but a requirement directory
     // is ours: without this the first turn would start in a cwd that does not exist.
-    if (location.cwd && human.sessionWorkspace === 'requirement') await mkdir(location.cwd, { recursive: true })
+    if (location.cwd && human.sessionWorkspace === 'requirement') {
+      await mkdir(location.cwd, { recursive: true })
+      // A directory created here is not in the Workspace roster, and the UI groups
+      // by id: registering it (and passing the id instead of the cwd) is what puts
+      // the requirement's Sessions under their own entry in the menu.
+      const workspaceId = await this.#ensureWorkspace?.(location.cwd)
+      if (workspaceId !== undefined) {
+        delete location.cwd
+        location.workspaceId = workspaceId
+      }
+    }
     const created = await this.#ctx.sessionController.create({
       ...(sessionId ? { sessionId } : {}),
       ...location,
@@ -617,6 +671,12 @@ export class HumanChat {
     // but it must not be silent: the caller's record of the address just changed.
     if (sessionId && created.sessionId !== sessionId) {
       this.#log(`session ${sessionId} could not carry ${human.id}; the Host opened ${created.sessionId}`)
+    }
+    // The Session's first turn assembles its prompt before the mailbox is written,
+    // so the reverse index must know this thread now: otherwise the memory context
+    // cannot name the requirement and falls back to the default file.
+    if (typeof conversation === 'string' && conversation !== '') {
+      this.#bySession.set(created.sessionId, { humanId: human.id, conversationId: conversation })
     }
     this.#fresh.add(created.sessionId)
     return created.sessionId

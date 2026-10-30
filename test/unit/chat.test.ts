@@ -854,6 +854,18 @@ describe('requirement workspace', () => {
     expect(statSync(expected).isDirectory()).toBe(true)
   })
 
+  it('files the requirement directory as its own Workspace when one can be registered', async () => {
+    // A directory born on first delivery is not in the roster, and the UI groups by
+    // Workspace id: registering it is what keeps the Session out of "ungrouped".
+    const controller = controllerStub()
+    const ensureWorkspace = vi.fn(async (path: string) => (path.endsWith('reqs/REQ-1') ? 'ws-req' : undefined))
+    const { chat } = chatWith(controller, { ensureWorkspace })
+    await chat.ensureSession(human({ workspace: workspace(), sessionWorkspace: 'requirement' }), 'REQ-1', 'dh-pm')
+    expect(ensureWorkspace).toHaveBeenCalledWith(join(workspace(), 'reqs', 'REQ-1'))
+    expect(controller.created[0].workspaceId).toBe('ws-req')
+    expect(controller.created[0].cwd).toBeUndefined()
+  })
+
   it('turns a conversation into one safe path segment', async () => {
     const controller = controllerStub()
     const { chat } = chatWith(controller)

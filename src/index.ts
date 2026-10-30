@@ -20,7 +20,8 @@ import { dirname } from 'node:path'
 import { HumanStore, deadlineMinutesOf, defaultHome } from './lib/store.js'
 import { DEFAULT_CONVERSATION, HumanChat, requireConversation } from './lib/chat.js'
 import { splitPeerSourceMessages } from './lib/peer-source.js'
-import { archiveHistoryOnTurnEnd, memoryPaths } from './lib/memory.js'
+import { randomUUID } from 'node:crypto'
+import { archiveHistoryOnTurnEnd, memoryPaths, renderMemoryContext } from './lib/memory.js'
 import { HumanLedger } from './lib/ledger.js'
 import type { TaskRow } from './lib/ledger.js'
 import {
@@ -171,6 +172,26 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   const chat = new HumanChat(ctx, store, log, {
     defaultWorkspacePath: () => defaultWorkspace?.path,
     workspaceIdOf: (path: string) => workspaceIdByPath.get(path),
+    // A requirement directory is born on first delivery, so it cannot be in the
+    // roster refresh() read. Registering it here is what files its Sessions under
+    // their own entry instead of leaving them ungrouped.
+    ensureWorkspace: async (path: string) => {
+      const known = workspaceIdByPath.get(path)
+      if (known !== undefined) return known
+      const controller = ctx.get?.('workspaceController')
+      if (typeof controller?.create !== 'function') return undefined
+      try {
+        const created = await controller.create({ path })
+        const workspaceId = created?.workspace?.workspaceId
+        if (typeof workspaceId !== 'string') return undefined
+        workspaceIdByPath.set(path, workspaceId)
+        log(`registered workspace "${path}" for a requirement`)
+        return workspaceId
+      } catch (error) {
+        log(`requirement workspace "${path}" is unavailable: ${error.message}`)
+        return undefined
+      }
+    },
   })
   const ledger = new HumanLedger(store, log)
 
@@ -654,7 +675,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     /** Registry root, exposed so the prompt can name the file. */
     home,
     /** Which digital human and conversation a session belongs to, if any. */
-    ownerOf: (sessionId: string) => chat.ownerOf(sessionId),
+    ownerOf: (sessionId: string, humanId?: string) => chat.ownerOf(sessionId, humanId),
     store,
     chat,
     presetIdOf,
@@ -1227,19 +1248,51 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   //
   // A failed rewrite returns the decision untouched. The inline block is readable;
   // a message lost on the way into a step is not recoverable.
-  ctx.on('agent/pre-step', async (_payload, next) => {
+  ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision?.kind !== 'enter') return decision
     try {
       const messages = splitPeerSourceMessages(decision.messages, {
         nameOf: (id) => nameById.get(id),
       })
-      return messages === null ? decision : { ...decision, messages }
+      const withSource = messages === null ? decision : { ...decision, messages }
+      return await withSessionMemory(withSource, payload?.agent?.session?.id)
     } catch (error) {
       log(`could not lift a peer source block: ${error.message}`)
       return decision
     }
   }, { global: true })
+
+  /**
+   * Put the Session's own memory in front of the batch.
+   *
+   * The assembly context cannot name the Session (its scope is opaque), so a
+   * session-scoped record is served here, where the Agent is known. Only a batch
+   * that carries a fresh user message is served: the later steps of one turn would
+   * otherwise pay for the same snapshot again.
+   */
+  async function withSessionMemory(decision, sessionId?: string) {
+    if (typeof sessionId !== 'string') return decision
+    const owner = chat.ownerOf(sessionId)
+    process.stderr.write('DBG owner ' + sessionId + ' ' + JSON.stringify(owner) + '\n')
+    if (!owner) return decision
+    const human = await store.get(owner.humanId, seed)
+    process.stderr.write('DBG human ' + JSON.stringify({ id: human?.id, scope: human?.memoryScope, memory: human?.memory }) + '\n')
+    if (!human || human.memory === false || human.memoryScope !== 'session') return decision
+    const isTurnStart = decision.messages.some((message) => message?.source?.kind === 'user')
+    process.stderr.write('DBG turnStart ' + isTurnStart + '\n')
+    if (!isTurnStart) return decision
+    const paths = memoryPaths(store, human, { scope: 'session', conversation: owner.conversationId })
+    const text = renderMemoryContext(paths)
+    if (!text) return decision
+    const message = {
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin:digital-human', form: 'notice', summary: '记忆快照' },
+    }
+    return { ...decision, messages: [message, ...decision.messages] }
+  }
 
   // The creation header names the preset the session started with, so this is
   // the normal path. A session may still change preset while it is blank, which
