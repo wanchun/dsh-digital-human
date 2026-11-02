@@ -235,9 +235,16 @@ export class HumanChat {
     await this.#serial(humanId, async () => {
       await this.#store.ensureDir(this.#store.dir(humanId))
       const path = this.#store.sessionIndexPath(humanId)
+      // Merge into what is on disk now, not into the cached map: a reloaded
+      // plugin instance may have filed another thread since this map was read,
+      // and writing the stale copy would drop that entry.
+      let onDisk = {}
+      try { onDisk = JSON.parse(await readFile(path, 'utf8')) } catch { onDisk = {} }
+      const merged = { ...onDisk, [conversationId]: sessionId }
       const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
-      await writeFile(temp, `${JSON.stringify(index, null, 2)}\n`, 'utf8')
+      await writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
       await rename(temp, path)
+      this.#indexes.set(humanId, merged)
     })
     return sessionId
   }

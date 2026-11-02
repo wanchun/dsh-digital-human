@@ -1684,10 +1684,6 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
           title: role,
           kind: 'chat',
           rows: [],
-          groups: [
-            { key: 'personal', title: '个人', rows: [] },
-            { key: 'group', title: '群聊', rows: [] },
-          ],
         }
       : undefined
     if (chat) sections.push(chat)
@@ -1702,8 +1698,7 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
           // "direct:…" and "group:…" name the kind of chat; what follows the prefix
           // is the name the operator reads.
           const name = conversation.replace(/^(group|direct):/, '')
-          const group = chat.groups!.find((entry) => entry.key === (conversation.startsWith('group:') ? 'group' : 'personal'))!
-          group.rows.push({ ...row, label: name || '聊天' })
+          chat.rows.push({ ...row, label: name || '聊天' })
           continue
         }
         // A Session reached by id has no thread, so it belongs to no requirement.
@@ -1756,18 +1751,7 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
             </span>
             <span className="dh-tree-label">{section.title}</span>
           </summary>
-          {section.groups
-            // A chat role's rows are split by kind. Both headings stay, so an empty
-            // 群聊 reads as "none yet" instead of vanishing with the last group.
-            ? section.groups.map((group) => (
-                <div className="dh-tree-subgroup" key={group.key}>
-                  <p className="dh-tree-subtitle">{group.title}</p>
-                  {group.rows.map((row) => (
-                    <TreeSession key={row.sessionId} {...row} current={row.sessionId === current} openSession={open} />
-                  ))}
-                </div>
-              ))
-            : section.rows.map((row) => (
+          {section.rows.map((row) => (
                 <TreeSession key={row.sessionId} {...row} current={row.sessionId === current} openSession={open} />
               ))}
         </details>

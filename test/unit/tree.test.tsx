@@ -88,11 +88,11 @@ function mountTree({ ids = ['s-live', 's-group', 's-req', 's-legacy'], phase = '
 }
 
 describe('the requirement tree', () => {
-  it('splits a chat role into the personal and group headings', async () => {
+  it('lists a chat role flat, without personal or group headings', async () => {
     mountTree()
     await waitFor(() => expect(screen.getByText('PM')).toBeTruthy())
-    expect(screen.getByText('个人')).toBeTruthy()
-    expect(screen.getByText('群聊')).toBeTruthy()
+    expect(screen.queryByText('个人')).toBeNull()
+    expect(screen.queryByText('群聊')).toBeNull()
     // A requirement's menu is titled by meta.json, not by the thread name.
     expect(screen.getByText('组织基线验证')).toBeTruthy()
     expect(screen.queryByText('REQ-1')).toBeNull()
