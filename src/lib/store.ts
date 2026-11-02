@@ -173,7 +173,9 @@ export function normalizeHuman(input, now = new Date().toISOString()): Human {
     enabled: input.enabled !== false,
     systemPrompt: typeof input.systemPrompt === 'string' ? input.systemPrompt : '',
     ...(icon === undefined ? {} : { icon }),
-    workspace: typeof input.workspace === 'string' && input.workspace ? input.workspace : '',
+    // One workspace for every record, fixed: a role is not a place. The Host's
+    // default carries it, derived from DSH_HOME so a sandbox stays a sandbox.
+    workspace: '',
     skills: stringList(input.skills, 'skills'),
     peers: stringList(input.peers, 'peers'),
     im: {
@@ -195,6 +197,8 @@ export function normalizeHuman(input, now = new Date().toISOString()): Human {
     // new split-memory record into one that shares everything.
     sessionWorkspace: input.sessionWorkspace === 'requirement' ? 'requirement' : 'record',
     memoryScope: input.memoryScope === 'session' ? 'session' : 'record',
+    sessionKey: input.sessionKey === 'chat' ? 'chat' : 'requirement',
+    ...(typeof input.order === 'number' && Number.isFinite(input.order) ? { order: input.order } : {}),
     // A non-positive or non-numeric window would mean "escalate at once" or "never",
     // neither of which the operator asked for, so the platform default stays.
     ...(usableMinutes(input.escalationDeadlineMinutes)
@@ -223,7 +227,7 @@ export function deadlineMinutesOf(human: { escalationDeadlineMinutes?: number },
 
 /** Fields the config file owns. Identity and prose live in the persona file. */
 const CONFIG_FIELDS = [
-  'enabled', 'workspace', 'skills', 'peers', 'im', 'permissionPreset', 'memory',
+  'enabled', 'skills', 'peers', 'im', 'permissionPreset', 'memory', 'order', 'sessionKey',
   'subscriptions', 'config', 'configSchema', 'sessionMode', 'escalationDeadlineMinutes',
   'sessionWorkspace', 'memoryScope', 'icon', 'createdAt', 'updatedAt',
 ]
@@ -309,6 +313,11 @@ function configOf(human: Human): Record<string, unknown> {
     // because it was read; the normalizer supplies the same value on the way back.
     ...(human.sessionWorkspace === 'requirement' ? { sessionWorkspace: human.sessionWorkspace } : {}),
     ...(human.memoryScope === 'session' ? { memoryScope: human.memoryScope } : {}),
+    // The sidebar reads both: a role's position, and whether its Sessions are chats
+    // or requirement threads. Written only when set, so reading an older config does
+    // not rewrite it just to store a default.
+    ...(human.order === undefined ? {} : { order: human.order }),
+    ...(human.sessionKey === 'chat' ? { sessionKey: human.sessionKey } : {}),
     ...(human.escalationDeadlineMinutes === undefined
       ? {}
       : { escalationDeadlineMinutes: human.escalationDeadlineMinutes }),

@@ -17,6 +17,10 @@ import {
   Button,
   Checkbox,
   IconChevronDownOutlineRegular,
+  IconChevronRightOutlineRegular,
+  IconFolderCloseRegular,
+  IconNewChatOutlineRegular,
+  IconUserOutlineRegular,
   Input,
   Menu,
   Pill,
@@ -130,6 +134,100 @@ const STYLE = `
 }
 .dh-readonly { font-size: 14px; line-height: 22px; color: var(--dsw-alias-label-primary); font-weight: 500; }
 .dh-readonly code { font-family: ui-monospace, monospace; font-size: 13px; }
+/* The tree is the column: it scrolls inside itself, so the footer stays reachable
+   however many requirements there are. The metrics below are the native workspace
+   list's own — a 34px project row, a 32px Session row, a 16px icon slot — so the
+   column reads as the same surface rather than a second design. */
+.dh-tree {
+  display: flex; flex-direction: column;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 4px 8px 12px;
+}
+.dh-tree-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 4px; }
+.dh-tree-title {
+  font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dh-tree-link {
+  flex: 0 0 auto; border: 0; background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit; font-size: 12px; line-height: 16px;
+  padding: 4px 8px; border-radius: var(--dsw-radius-md); cursor: pointer;
+}
+.dh-tree-link:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dh-tree-link:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
+/* The native list's rhythm: sections 4px apart, everything inside one 2px apart. */
+.dh-tree-group { display: flex; flex-direction: column; }
+.dh-tree-group + .dh-tree-group { margin-top: 4px; }
+.dh-tree-group > * + * { margin-top: 2px; }
+/* The native project row: 34px, one line of primary text, a folder glyph. */
+.dh-tree-summary {
+  display: flex; align-items: center; gap: 6px;
+  box-sizing: border-box; height: 34px; padding: 0 8px; margin: 0;
+  border-radius: var(--dsw-radius-md);
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px; line-height: 20px;
+  list-style: none; cursor: pointer; user-select: none;
+}
+.dh-tree-summary::-webkit-details-marker { display: none; }
+.dh-tree-summary:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dh-tree-summary:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary); outline-offset: -2px; }
+/* The disclosure arrow the native list animates; it turns a quarter on open. */
+.dh-tree-chevron {
+  display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center;
+  width: 16px; height: 20px; color: var(--dsw-alias-label-tertiary);
+  transition: transform 0.15s var(--ds-ease-in-out, ease-in-out);
+}
+.dh-tree-group[open] > .dh-tree-summary .dh-tree-chevron { transform: rotate(90deg); }
+/* One icon slot for every node, so a folder, a role mark and a chat glyph share a
+   left edge and a baseline — the same rule the native list follows. */
+.dh-tree-icon {
+  display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center;
+  width: 16px; height: 20px; color: var(--dsw-alias-label-tertiary);
+}
+.dh-tree-icon img { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; }
+.dh-tree-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The native Session row: 32px, no gap, one indent level (12px) in from the group
+   row, and the title carrying its own 4px lead — the same numbers the native list
+   uses for a nested row. */
+.dh-tree-row {
+  display: flex; align-items: center; gap: 0;
+  box-sizing: border-box; width: 100%; height: 32px; padding: 0 8px;
+  padding-inline-start: 40px;
+  border: 0; border-radius: var(--dsw-radius-md); background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 14px; line-height: 20px; text-align: left;
+  cursor: pointer; user-select: none;
+}
+.dh-tree-row .dh-tree-label { flex: 1; margin: 0 6px 0 4px; }
+.dh-tree-row:hover, .dh-tree-row[data-current="true"] { background: var(--dsw-alias-interactive-bg-hover); }
+.dh-tree-row:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary); outline-offset: -2px; }
+.dh-tree-hint { margin: 0; padding: 4px 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
+.dh-tree-error {
+  display: flex; flex-direction: column; gap: 8px; margin: 4px 0; padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md, 8px);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.dh-tree-error-text { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
+.dh-tree-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* The view switch inside the sidebar's "more" menu, built to the menu's own row
+   metrics (34px, 6/8 padding, 13px text) so it sits among the shipped rows. */
+.dh-menu-item-wrap { position: relative; }
+.dh-menu-item {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  min-height: 34px; padding: 6px 8px; border: 0;
+  border-radius: var(--dsw-radius-md); background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 13px; line-height: 20px; text-align: left;
+  cursor: pointer;
+}
+.dh-menu-item:hover, .dh-menu-item:focus-visible { background: var(--dsw-alias-interactive-bg-hover); outline: none; }
+.dh-menu-item-icon {
+  display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center;
+  width: 16px; height: 16px; color: var(--dsw-alias-menu-icon, var(--dsw-alias-label-tertiary));
+}
+.dh-menu-item-icon svg { width: 16px; height: 16px; }
+.dh-menu-item-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 `
 
 let styleInjected = false
@@ -1042,26 +1140,12 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
               />
             )}
 
-          <MenuField
-            key={`workspace-${draft?.id ?? 'new'}`}
-            label="工作区"
-            value={draft?.workspace ?? ''}
-            options={[
-              { id: '', label: `（默认：${workspaces.defaultTitle}）` },
-              ...(workspaces.items ?? []).map((item) => ({
-                id: item.path,
-                label: item.title || item.path,
-              })),
-            ]}
-            onChange={(value) => patch({ workspace: value })}
-            // A failed roster read comes first: the picker is unusable either way, and
-            // a record that already names a directory would otherwise hide that.
-            hint={sideErrors.workspaces
-              ? `工作区列表读取失败：${sideErrors.workspaces}${draft?.workspace ? `（这条记录仍在 ${draft.workspace} 里跑）` : ''}`
-              : (draft?.workspace
-                ? `会话在 ${draft.workspace} 里跑。`
-                : `不选就在「${workspaces.defaultTitle}」工作区里跑。`)}
-          />
+          {/* One workspace for the whole platform: a digital human is a role, not a
+              place, so there is nothing to pick here. */}
+          <div className="dh-field">
+            <span className="dh-label">工作区</span>
+            <div className="dh-hint">所有数字人都在「{workspaces.defaultTitle}」工作区里运行，不可更改。</div>
+          </div>
 
           <div className="dh-section">
             <span className="dh-section-title">技能</span>
@@ -1382,6 +1466,297 @@ function DigitalHumansPanel({ rpc }: { rpc: RpcCall }) {
   return <div className="dh-panel"><DigitalHumansPage rpc={rpc} /></div>
 }
 
+/** Which column the sidebar shows; remembered so a reload keeps the choice. */
+const VIEW_KEY = 'dh.sidebar.view'
+/** The Host caller, set by apply(); a slot face is not guaranteed to carry it. */
+let hostRpc: RpcCall | null = null
+/** Whether the tree is the chosen column. A host without storage shows the native list. */
+const wantsTree = () => {
+  try { return localStorage.getItem(VIEW_KEY) === 'tree' } catch { return false }
+}
+/** Remember the chosen column; a host without storage keeps the one it has. */
+const rememberTree = (on: boolean) => {
+  try { localStorage.setItem(VIEW_KEY, on ? 'tree' : 'native') } catch { /* no storage, no memory */ }
+}
+
+/** One Session behind a requirement or a chat. */
+interface TreeRow {
+  /** The role's name for a requirement row, the chat's name for a chat row. */
+  label: string
+  sessionId: string
+  /** The role's own position; smaller comes first, ties keep the record order. */
+  order: number
+  /** The role's own mark, a data URI; the row falls back to a neutral icon. */
+  icon?: string
+}
+
+/** One digital human as `tree.read` reports it. */
+interface TreeHuman {
+  humanId: string
+  name: string
+  description?: string
+  /** The role's own mark, a data URI the row renders instead of the neutral icon. */
+  icon?: string
+  /** Sidebar position of this role; smaller comes first. No role is named in code. */
+  order?: number
+  /** What this role's Sessions are keyed by: a chat, or a requirement thread. */
+  sessionKey?: string
+  requirements?: Array<{ conversation?: string; sessions?: Array<{ sessionId?: string }> }>
+}
+
+/** One menu in the column: a chat-keyed role's Sessions, or one requirement's. */
+interface TreeSection {
+  /** Stable key: the role id for a chat, the thread name for a requirement. */
+  key: string
+  title: string
+  /** A chat-keyed role reads as an entry; a requirement reads as a folder. */
+  kind: 'chat' | 'requirement'
+  rows: TreeRow[]
+}
+
+/** One session row inside a requirement menu. */
+function TreeSession({ label, sessionId, icon, current, openSession }: {
+  label: string
+  sessionId: string
+  /** The role's own mark; the row falls back to a neutral Session icon. */
+  icon?: string
+  /** Whether the main column is showing this Session. */
+  current?: boolean
+  openSession: (sessionId: string) => void
+}) {
+  return (
+    <button
+      type="button"
+      className="dh-tree-row"
+      data-current={current === true ? 'true' : undefined}
+      aria-current={current === true ? 'true' : undefined}
+      onClick={() => openSession(sessionId)}
+      title={sessionId}
+    >
+      {/* The record's own mark when it has one, so the tree reads like the native
+          list; otherwise a neutral Session glyph. */}
+      <span className="dh-tree-icon">
+        {icon ? <img src={icon} alt="" width={16} height={16} /> : <IconNewChatOutlineRegular size={16} />}
+      </span>
+      <span className="dh-tree-label">{label}</span>
+    </button>
+  )
+}
+
+/**
+ * The digital-human column: chat-keyed roles first, then one menu per requirement.
+ *
+ * The tree is read whole from the Host; nothing here holds its own state. A
+ * requirement is the conversation a Session was filed under, and the rows inside
+ * it are ordered by the role's own `order`, so adding or reordering a role needs
+ * no change here. Chat-keyed roles are their own sections because a chat is not a
+ * requirement. Clicking a row only selects that Session; the conversation pane
+ * never changes.
+ */
+function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }: {
+  rpc?: RpcCall
+  openSession?: (sessionId: string) => void
+  onClose?: () => void
+  /** The workspace service, read lazily: it may register after this plugin. */
+  getWorkspace?: () => any
+}) {
+  const rpc = injected ?? hostRpc
+  const [state, setState] = React.useState<{ loading: boolean; error: string; humans: TreeHuman[] }>({
+    loading: true,
+    error: '',
+    humans: [],
+  })
+  const [current, setCurrent] = React.useState<string | undefined>(undefined)
+
+  const load = React.useCallback(async () => {
+    // A face that lost its caller cannot read anything. Say so instead of showing
+    // an empty tree, which would read as "no requirements".
+    if (typeof rpc !== 'function') {
+      console.warn('[digital-human] the tree has no Host caller:', typeof rpc)
+      setState({ loading: false, error: '没有拿到 Host 调用器', humans: [] })
+      return
+    }
+    setState((value) => ({ ...value, loading: true, error: '' }))
+    try {
+      // The caller returns the Connection envelope, not the value: a refusal
+      // arrives as `ok: false` with the Host's own message, and reading past it
+      // would turn every failure into an empty tree.
+      const result = await rpc('tree.read', {})
+      if (result?.ok !== true) throw new Error(result?.error?.message ?? '宿主拒绝了这次请求')
+      const humans = result.value?.humans
+      setState({ loading: false, error: '', humans: Array.isArray(humans) ? humans : [] })
+    } catch (error) {
+      // The caller's own message is what tells a refusal from a dead channel.
+      console.warn('[digital-human] tree.read failed', error)
+      setState({ loading: false, error: error?.message ?? String(error), humans: [] })
+    }
+  }, [rpc])
+
+  React.useEffect(() => {
+    console.debug('[digital-human] the tree caller is', typeof rpc)
+    void load()
+  }, [load, rpc])
+
+  // Mark the Session the main column shows. It is read from the workspace service
+  // rather than remembered here: another surface may change the selection, and the
+  // tree must not claim a row is current after that.
+  React.useEffect(() => {
+    const selection = typeof getWorkspace === 'function' ? getWorkspace()?.selection : undefined
+    if (typeof selection?.getSnapshot !== 'function' || typeof selection?.subscribe !== 'function') return
+    const read = () => setCurrent(selection.getSnapshot()?.sessionId)
+    read()
+    return selection.subscribe(read)
+  }, [getWorkspace])
+
+  const open = (sessionId: string) => {
+    if (typeof openSession !== 'function') {
+      console.warn('[digital-human] the tree has no session opener')
+      return
+    }
+    openSession(sessionId)
+  }
+
+  // One pass over the roles in their own order: a chat-keyed role becomes its own
+  // section, the rest fill the menu of the requirement they were filed under.
+  const sections: TreeSection[] = []
+  const byRequirement = new Map<string, TreeRow[]>()
+  const ordered = [...state.humans].sort((a, b) => (a.order ?? 100) - (b.order ?? 100))
+  for (const human of ordered) {
+    const role = human.name || human.humanId
+    const chat: TreeSection | undefined = human.sessionKey === 'chat'
+      ? { key: `chat:${human.humanId}`, title: role, kind: 'chat', rows: [] }
+      : undefined
+    if (chat) sections.push(chat)
+    for (const requirement of human.requirements ?? []) {
+      const conversation = String(requirement.conversation ?? '')
+      for (const session of requirement.sessions ?? []) {
+        const sessionId = session?.sessionId
+        if (!sessionId) continue
+        const row: TreeRow = { label: role, sessionId, order: human.order ?? 100, icon: human.icon }
+        if (chat) {
+          // "direct:…" and "group:…" name a chat, not a requirement; what follows
+          // the prefix is the name the operator reads.
+          const name = conversation.replace(/^(group|direct):/, '')
+          chat.rows.push({ ...row, label: name || '聊天' })
+          continue
+        }
+        // A Session reached by id has no thread, so it belongs to no requirement.
+        if (!conversation) continue
+        const rows = byRequirement.get(conversation) ?? []
+        rows.push(row)
+        byRequirement.set(conversation, rows)
+      }
+    }
+  }
+  const requirements: TreeSection[] = [...byRequirement.entries()]
+    .map(([name, rows]) => ({
+      key: name,
+      title: name,
+      kind: 'requirement' as const,
+      rows: [...rows].sort((a, b) => a.order - b.order),
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title))
+  const empty = !state.loading && state.error === '' && requirements.length === 0
+
+  return (
+    <div className="dh-tree">
+      <div className="dh-tree-head">
+        <span className="dh-tree-title">数字人视图</span>
+        {/* An escape hatch, not the switch: the way in and out is the foot's row. */}
+        <button type="button" className="dh-tree-link" onClick={onClose}>回到原生</button>
+      </div>
+      {state.loading ? <p className="dh-tree-hint">加载中…</p> : null}
+      {state.error ? (
+        <div className="dh-tree-error">
+          <p className="dh-tree-error-text">读取需求失败：{state.error}</p>
+          <div className="dh-tree-actions">
+            <Button variant="outline" size="sm" onClick={() => { void load() }}>重试</Button>
+            <Button variant="ghost" size="sm" onClick={onClose}>回到原生列表</Button>
+          </div>
+        </div>
+      ) : null}
+      {[...sections, ...requirements].map((section) => (
+        // A chat role opens by default; a requirement starts folded, so the operator
+        // scans several before opening the one they are working on.
+        <details
+          className="dh-tree-group"
+          key={section.key}
+          {...(section.kind === 'chat' ? { open: true } : {})}
+        >
+          <summary className="dh-tree-summary">
+            <span className="dh-tree-chevron"><IconChevronRightOutlineRegular size={16} /></span>
+            <span className="dh-tree-icon">
+              {section.kind === 'chat' ? <IconUserOutlineRegular size={16} /> : <IconFolderCloseRegular size={16} />}
+            </span>
+            <span className="dh-tree-label">{section.title}</span>
+          </summary>
+          {section.rows.map((row) => (
+            <TreeSession key={row.sessionId} {...row} current={row.sessionId === current} openSession={open} />
+          ))}
+        </details>
+      ))}
+      {empty ? <p className="dh-tree-hint">还没有需求</p> : null}
+    </div>
+  )
+}
+
+/**
+ * Add the view switch to the sidebar's "more" menu.
+ *
+ * That menu is a `single` slot with a fixed item list, so there is no contribution
+ * point: the row is added to the menu's own DOM when it opens, first, and carries
+ * `role="menuitem"` so the menu's keyboard walk treats it like the rows beside it.
+ * A shell that replaces that menu simply gets no row — the tree's own header still
+ * offers a way back.
+ */
+function installMenuSwitch(onPick: () => void): () => void {
+  if (typeof document === 'undefined') return () => {}
+  let expected = false
+  // Only the account trigger counts: other menus in the page open the same way.
+  const expectMenu = (event: Event) => {
+    const target = event.target
+    if (target instanceof Element && target.closest('[data-slot="settings.launcher"] [aria-haspopup="menu"]')) {
+      expected = true
+    }
+  }
+  const inject = (menu: Element) => {
+    if (menu.querySelector('[data-dh-view-switch]')) return
+    const wrap = document.createElement('div')
+    wrap.className = 'dh-menu-item-wrap'
+    const item = document.createElement('button')
+    item.type = 'button'
+    item.setAttribute('role', 'menuitem')
+    item.setAttribute('data-dh-view-switch', '')
+    item.className = 'dh-menu-item'
+    // Static markup: the row's icon is the same folder the tree uses, drawn small.
+    item.innerHTML = '<span class="dh-menu-item-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5z"/></svg></span><span class="dh-menu-item-label">切换数字人视图</span>'
+    item.addEventListener('click', () => { onPick() })
+    wrap.appendChild(item)
+    menu.prepend(wrap)
+  }
+  const observer = new MutationObserver((records) => {
+    if (!expected) return
+    for (const record of records) {
+      for (const node of Array.from(record.addedNodes)) {
+        if (!(node instanceof Element)) continue
+        const menu = node.matches('[role="menu"]') ? node : node.querySelector('[role="menu"]')
+        if (!menu) continue
+        expected = false
+        inject(menu)
+        return
+      }
+    }
+  })
+  document.addEventListener('pointerdown', expectMenu, true)
+  document.addEventListener('click', expectMenu, true)
+  observer.observe(document.body, { childList: true, subtree: true })
+  return () => {
+    document.removeEventListener('pointerdown', expectMenu, true)
+    document.removeEventListener('click', expectMenu, true)
+    observer.disconnect()
+  }
+}
+
 export const inject = ['slots', 'connection']
 
 export function apply(ctx) {
@@ -1395,9 +1770,24 @@ export function apply(ctx) {
       return await ctx.connection.rpc.call('/api', RPC_ENDPOINT, { method, payload }, signal)
     } catch (cause) {
       if (signal?.aborted || cause?.name === 'AbortError') throw cause
-      throw new Error('无法访问 DSH 管理接口，请检查连接后重试。')
+      // The cause is what says *why* — a refused call, an unreadable route, a
+      // malformed response. Replacing it with one sentence made every failure look
+      // like a dropped connection, so it is kept for the console and the surface.
+      console.warn(`[digital-human] ${method} failed`, cause)
+      throw new Error(`无法访问 DSH 管理接口：${cause?.message ?? String(cause)}`)
     }
   }
+
+  /** The workspace service, resolved on use: it may register after this plugin. */
+  const workspaceService = () => {
+    try {
+      return ctx.get?.('uiWorkspace') ?? (ctx as any).uiWorkspace
+    } catch {
+      return undefined
+    }
+  }
+
+  hostRpc = rpc
 
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => {
     const dispose = ctx.slots.register({
@@ -1408,6 +1798,49 @@ export function apply(ctx) {
     }, DigitalHumansIcon)
     return () => dispose()
   }), 'digital-human: sidebar panel entry')
+
+  // ds-bot's pattern: claim the column once, at startup, through inject(). A
+  // later re-register after dispose proved unreliable, so the switch flips a flag
+  // and reloads — the startup path is the one that is known to work.
+  const showTree = (on: boolean) => {
+    rememberTree(on)
+    try { window.location.reload() } catch { /* a host without reload keeps the old column */ }
+  }
+
+  if (wantsTree()) {
+    ctx.effect(() => ctx.slots.inject('sidebar.workspaces', () => {
+      /**
+       * Select one Session in the main column.
+       *
+       * Resolved on every click, not at registration: the workspace service may
+       * register after this plugin, and a captured miss would stay a miss. Only the
+       * selection moves — the conversation pane is not reopened or reset here.
+       */
+      const openSession = (sessionId: string) => {
+        try {
+          const workspace = workspaceService()
+          if (typeof workspace?.openSession !== 'function') {
+            console.warn('[digital-human] no workspace service to open a Session with')
+            return
+          }
+          workspace.openSession(sessionId)
+        } catch (error) {
+          // Navigation is a convenience: a failure must not take the column down.
+          console.warn('[digital-human] could not open the Session', error)
+        }
+      }
+      const dispose = ctx.slots.register({
+        name: 'sidebar.workspaces',
+        priority: -20,
+        inject: () => ({ rpc, openSession, onClose: () => showTree(false), getWorkspace: workspaceService }),
+      } as any, DigitalHumansTree as any)
+      return () => dispose()
+    }), 'digital-human: sidebar column')
+  }
+
+  // The one switch entry: the first row of the sidebar's "more" menu. The tree's
+  // own header keeps an escape hatch, but the way in is there.
+  ctx.effect(() => installMenuSwitch(() => showTree(!wantsTree())), 'digital-human: sidebar view switch')
 
   ctx.effect(() => ctx.slots.inject('main', () => {
     const dispose = ctx.slots.register({

@@ -113,8 +113,9 @@ function controllerStub() {
 const chatWith = (controller: any, options: Record<string, unknown> = {}) => {
   const log = vi.fn()
   const chat = new HumanChat({ sessionController: controller, ...(options.ctx as object ?? {}) } as any, store, log, {
+    // Every record shares one Workspace, so the default is the one the Host knows.
     defaultWorkspacePath: () => '/default',
-    workspaceIdOf: (path: string) => (path === '/w' ? 'ws-1' : undefined),
+    workspaceIdOf: (path: string) => (path === '/default' ? 'ws-1' : undefined),
     ...options,
   } as any)
   return { chat, log }
@@ -371,8 +372,9 @@ describe('ensureSession', () => {
 
   it('falls back to the default directory and no workspace', async () => {
     const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    await chat.ensureSession(human({ workspace: '' }), 'main', 'dh-pm')
+    // A Host whose roster does not name the directory: it is passed as a cwd.
+    const { chat } = chatWith(controller, { workspaceIdOf: () => undefined })
+    await chat.ensureSession(human(), 'main', 'dh-pm')
     expect(controller.created[0]).toMatchObject({ cwd: '/default' })
     expect(controller.created[0].workspaceId).toBeUndefined()
   })
@@ -387,9 +389,10 @@ describe('ensureSession', () => {
 })
 
 describe('naming a conversation', () => {
-  it('names a fresh peer conversation after the requirement it carries', async () => {
-    // The list is otherwise titled from whatever the first prompt happened to say,
-    // which for a peer delivery is the transport block itself.
+  it('names a fresh bot-less conversation after the role it belongs to', async () => {
+    // A bot-less record serves requirement threads; the custom tree tells them
+    // apart, so the title names the role rather than a subject. Otherwise the list
+    // would be titled from the transport block the first prompt carried.
     const controller = controllerStub()
     const { chat } = chatWith(controller)
     await chat.deliver(human(), {
@@ -398,15 +401,8 @@ describe('naming a conversation', () => {
       from: 'pm',
     })
     expect(controller.renamed).toEqual([
-      { sessionId: expect.any(String), title: 'micrometer-core 安全升级' },
+      { sessionId: expect.any(String), title: 'PM' },
     ])
-  })
-
-  it('falls back to the thread name when the message names no subject', async () => {
-    const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    await chat.deliver(human(), { conversationId: 'REQ-42', message: '进度如何' })
-    expect(controller.renamed[0].title).toBe('REQ-42')
   })
 
   it('never renames an established conversation', async () => {
@@ -840,11 +836,14 @@ describe('the conversation index', () => {
 
 describe('requirement workspace', () => {
   const workspace = () => join(home, 'ws')
+  // The record no longer names a directory: every role shares the one Workspace,
+  // and a requirement thread is the only thing that gets a directory of its own.
+  const inWorkspace = () => ({ defaultWorkspacePath: () => workspace() })
 
   it('runs the session in reqs/<conversation> and creates the directory', async () => {
     const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    await chat.ensureSession(human({ workspace: workspace(), sessionWorkspace: 'requirement' }), 'REQ-1', 'dh-pm')
+    const { chat } = chatWith(controller, inWorkspace())
+    await chat.ensureSession(human({ sessionWorkspace: 'requirement' }), 'REQ-1', 'dh-pm')
     const expected = join(workspace(), 'reqs', 'REQ-1')
     expect(controller.created[0].cwd).toBe(expected)
     // A cwd is passed alone: naming a Workspace would make the Host resolve the
@@ -859,31 +858,32 @@ describe('requirement workspace', () => {
     // Workspace id: registering it is what keeps the Session out of "ungrouped".
     const controller = controllerStub()
     const ensureWorkspace = vi.fn(async (path: string) => (path.endsWith('reqs/REQ-1') ? 'ws-req' : undefined))
-    const { chat } = chatWith(controller, { ensureWorkspace })
-    await chat.ensureSession(human({ workspace: workspace(), sessionWorkspace: 'requirement' }), 'REQ-1', 'dh-pm')
-    expect(ensureWorkspace).toHaveBeenCalledWith(join(workspace(), 'reqs', 'REQ-1'))
+    const { chat } = chatWith(controller, { ...inWorkspace(), ensureWorkspace })
+    await chat.ensureSession(human({ sessionWorkspace: 'requirement' }), 'REQ-1', 'dh-pm')
+    // The thread is passed too: the Host names the Workspace after it.
+    expect(ensureWorkspace).toHaveBeenCalledWith(join(workspace(), 'reqs', 'REQ-1'), 'REQ-1')
     expect(controller.created[0].workspaceId).toBe('ws-req')
     expect(controller.created[0].cwd).toBeUndefined()
   })
 
   it('turns a conversation into one safe path segment', async () => {
     const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    await chat.ensureSession(human({ workspace: workspace(), sessionWorkspace: 'requirement' }), 'REQ 1/2', 'dh-pm')
+    const { chat } = chatWith(controller, inWorkspace())
+    await chat.ensureSession(human({ sessionWorkspace: 'requirement' }), 'REQ 1/2', 'dh-pm')
     expect(controller.created[0].cwd).toBe(join(workspace(), 'reqs', 'REQ-1-2'))
   })
 
   it('refuses a conversation that would escape the requirement directory', async () => {
     const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    await expect(chat.ensureSession(human({ workspace: workspace(), sessionWorkspace: 'requirement' }), '..', 'dh-pm'))
+    const { chat } = chatWith(controller, inWorkspace())
+    await expect(chat.ensureSession(human({ sessionWorkspace: 'requirement' }), '..', 'dh-pm'))
       .rejects.toThrow(/\.\./)
   })
 
   it('keeps two requirement threads in different directories', async () => {
     const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    const humanRecord = human({ workspace: workspace(), sessionWorkspace: 'requirement' })
+    const { chat } = chatWith(controller, inWorkspace())
+    const humanRecord = human({ sessionWorkspace: 'requirement' })
     await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')
     await chat.ensureSession(humanRecord, 'REQ-2', 'dh-pm')
     expect(controller.created[0].cwd).toBe(join(workspace(), 'reqs', 'REQ-1'))
@@ -892,14 +892,14 @@ describe('requirement workspace', () => {
 
   it('reuses the requirement session instead of reopening it', async () => {
     const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    const humanRecord = human({ workspace: workspace(), sessionWorkspace: 'requirement' })
+    const { chat } = chatWith(controller, inWorkspace())
+    const humanRecord = human({ sessionWorkspace: 'requirement' })
     const first = await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')
     expect(await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')).toBe(first)
     expect(controller.created).toHaveLength(1)
   })
 
-  it('keeps the record workspace when the switch is off', async () => {
+  it('runs a record-scoped session in the shared Workspace when the switch is off', async () => {
     const controller = controllerStub()
     const { chat } = chatWith(controller)
     await chat.ensureSession(human({ sessionWorkspace: 'record' }), 'REQ-1', 'dh-pm')
@@ -907,4 +907,3 @@ describe('requirement workspace', () => {
     expect(controller.created[0].cwd).toBeUndefined()
   })
 })
-

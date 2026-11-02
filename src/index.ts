@@ -930,13 +930,18 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         humanId: string
         name: string
         description: string
+        icon: string
+        order: number
+        sessionKey: string
         requirements: Array<{ conversation: string; sessions: Array<{ sessionId: string }> }>
       }> = []
       for (const human of humans) {
         const addresses = await chat.addresses(human.id)
         const byRequirement = new Map<string, Array<{ sessionId: string }>>()
         for (const address of addresses) {
-          const key = address.conversationId ?? '(direct)'
+          // An address the index does not name is a Session reached by id; it has no
+          // thread, and the view decides whether that is a chat or not a requirement.
+          const key = address.conversationId ?? ''
           const bucket = byRequirement.get(key) ?? []
           bucket.push({ sessionId: address.sessionId })
           byRequirement.set(key, bucket)
@@ -945,10 +950,17 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           humanId: human.id,
           name: human.name,
           description: human.description ?? '',
+          // The row's own mark, when the record carries one: the tree then reads
+          // like the native list instead of four identical rows.
+          icon: human.icon ?? '',
+          order: human.order ?? 100,
+          sessionKey: human.sessionKey ?? 'requirement',
           requirements: [...byRequirement].map(([conversation, sessions]) => ({ conversation, sessions })),
         })
       }
-      return { humans: tree }
+      // The envelope is the contract the client's channel validates: a bare value
+      // here fails the response parse and surfaces as a transport error.
+      return ok({ humans: tree })
     }
     if (method === 'registry.list') {
       const humans = await service.list()

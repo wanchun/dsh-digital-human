@@ -144,13 +144,14 @@ describe('the host methods the page leans on', () => {
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('preset disposal failed'))).toBe(true)
   })
 
-  it('reports a workspace it cannot register', async () => {
+  it('reports a requirement workspace it cannot register', async () => {
     const log = vi.fn()
     const { ctx } = makeCtx({
       workspaceController: {
         follow: () => ({ async *[Symbol.asyncIterator]() { yield { type: 'baseline', value: { items: [] } } } }),
         create: async (options: any) => {
-          if (options.path === '/blocked') throw new Error('read-only')
+          // The shared Workspace is fine; a requirement directory is refused.
+          if (options.path.includes('reqs')) throw new Error('read-only')
           return { workspace: { workspaceId: 'w', path: options.path } }
         },
         rename: async () => ({}),
@@ -158,7 +159,9 @@ describe('the host methods the page leans on', () => {
     })
     ctx.logger = { warn: log, info: () => {} }
     await applyPlatform(ctx, { home })
-    await ctx.get('digitalHumans').upsert({ id: 'b', name: 'B', workspace: '/blocked', memory: false })
+    const service = ctx.get('digitalHumans')
+    await service.upsert({ id: 'b', name: 'B', sessionWorkspace: 'requirement', memory: false })
+    await service.send('b', { message: 'hi' })
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('is unavailable'))).toBe(true)
   })
 
@@ -279,13 +282,13 @@ describe('the page in its last states', () => {
     expect(screen.getByText(/还没有 bot/)).toBeTruthy()
   })
 
-  it('names the default workspace when none is chosen', async () => {
+  it('names the one shared workspace instead of offering a choice', async () => {
     mount({
       'registry.list': () => ({ home: '/h', file: '/h/humans.json', humans: [{ ...human, workspace: '' }] }),
       'workspaces.list': () => ({ defaultTitle: '数字人', defaultPath: '/w', workspaces: [] }),
     })
     await open()
-    expect(screen.getByText(/不选就在「数字人」工作区里跑/)).toBeTruthy()
+    expect(screen.getByText(/所有数字人都在「数字人」工作区里运行，不可更改。/)).toBeTruthy()
   })
 
   it('reports a refresh that fails', async () => {

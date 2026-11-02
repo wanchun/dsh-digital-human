@@ -787,9 +787,10 @@ export class HumanChat {
       // inside the requirement's Workspace: the role has to be readable from the
       // title, or four Sessions look alike.
       if (single) await this.#setTitle(target.sessionId, human.name)
-      else if (human.sessionWorkspace === 'requirement') {
-        await this.#setTitle(target.sessionId, `${human.name} · ${conversation}`)
-      } else if (!human.im?.botId) await this.#name(target.sessionId, conversation, text)
+      // A bot-less record serves requirement threads, not one chat: its Sessions
+      // are told apart by the custom tree, so the title names the role. An
+      // IM-bound record keeps naming the person it is talking to.
+      else if (!human.im?.botId) await this.#setTitle(target.sessionId, human.name)
     }
     await this.#append(human.id, target.sessionId, conversation, record('inbound', {
       from,

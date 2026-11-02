@@ -90,18 +90,24 @@ function workspaceController(items: any[] = []) {
 }
 
 describe('a record whose directory is not a known Workspace', () => {
-  it('registers the directory and files the session under it', async () => {
-    // Without the id the session carries a cwd but no workspaceId, and the UI
-    // groups by the id — so it shows up as ungrouped though it runs in the right
-    // place.
-    const controller = workspaceController([])
+  it('registers the requirement directory and files the session under it', async () => {
+    // A requirement directory is born on first delivery, so it cannot be in the
+    // roster startup read. Without the id the session carries a cwd but no
+    // workspaceId, and the UI groups by the id — it would show up as ungrouped
+    // though it runs in the right place.
+    // The shared Workspace is already in the roster, so only the requirement
+    // directory has to be registered.
+    const controller = workspaceController([
+      { workspaceId: 'ws-default', path: join(home, 'workspace'), title: '数字人' },
+    ])
     const platform = makeCtx({ workspaceController: controller })
     await applyPlatform(platform.ctx, { home })
     const service = platform.provided.get('digitalHumans')
-    await service.upsert({ id: 'own', name: 'Own', workspace: '/somewhere/else', memory: false })
-    const created = controller.created.find((entry) => entry.path === '/somewhere/else')
-    expect(created).toBeTruthy()
+    await service.upsert({ id: 'own', name: 'Own', sessionWorkspace: 'requirement', memory: false })
     const sent = await service.send('own', { message: 'hi' })
+    const directory = join(home, 'workspace', 'reqs', 'main')
+    const created = controller.created.find((entry) => entry.path === directory)
+    expect(created).toBeTruthy()
     const row = platform.sessions.find((entry) => entry.sessionId === sent.sessionId)
     // The session is filed under whatever id the controller returned for it. The
     // directory is not sent alongside it: naming a Workspace and a cwd together is
@@ -111,25 +117,34 @@ describe('a record whose directory is not a known Workspace', () => {
   })
 
   it('reuses a directory it already registered', async () => {
-    const controller = workspaceController([{ workspaceId: 'ws-known', path: '/known', title: 'K' }])
+    const directory = join(home, 'workspace', 'reqs', 'main')
+    const controller = workspaceController([{ workspaceId: 'ws-known', path: directory, title: 'K' }])
     const platform = makeCtx({ workspaceController: controller })
     await applyPlatform(platform.ctx, { home })
-    await platform.provided.get('digitalHumans').upsert({ id: 'k', name: 'K', workspace: '/known', memory: false })
-    // The default workspace is still created; the record's own directory is not.
-    expect(controller.created.map((entry) => entry.path)).not.toContain('/known')
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'k', name: 'K', sessionWorkspace: 'requirement', memory: false })
+    await service.send('k', { message: 'hi' })
+    // The default workspace is still created; the known requirement directory is not.
+    expect(controller.created.map((entry) => entry.path)).not.toContain(directory)
   })
 
-  it('reports a directory the controller refuses', async () => {
+  it('reports a requirement directory the controller refuses', async () => {
     const controller = {
       follow: () => ({ async *[Symbol.asyncIterator]() { yield { type: 'baseline', value: { items: [] } } } }),
-      create: async () => { throw new Error('read-only') },
+      create: async (options: any) => {
+        // The default Workspace is fine; the requirement directory is what fails.
+        if (options.path.endsWith(join('reqs', 'main'))) throw new Error('read-only')
+        return { workspace: { workspaceId: 'ws-default', path: options.path } }
+      },
       rename: async () => ({}),
     }
     const log = vi.fn()
     const platform = makeCtx({ workspaceController: controller })
     platform.ctx.logger = { warn: log, info: () => {} }
     await applyPlatform(platform.ctx, { home })
-    await platform.provided.get('digitalHumans').upsert({ id: 'r', name: 'R', workspace: '/nope', memory: false })
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'r', name: 'R', sessionWorkspace: 'requirement', memory: false })
+    await service.send('r', { message: 'hi' })
     expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('is unavailable'))).toBe(true)
   })
 
@@ -137,8 +152,10 @@ describe('a record whose directory is not a known Workspace', () => {
     const controller = workspaceController([])
     const platform = makeCtx({ workspaceController: controller })
     await applyPlatform(platform.ctx, { home })
-    await platform.provided.get('digitalHumans').upsert({ id: 'off', name: 'Off', workspace: '/x', enabled: false, memory: false })
-    expect(controller.created.map((entry) => entry.path)).not.toContain('/x')
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'off', name: 'Off', sessionWorkspace: 'requirement', enabled: false, memory: false })
+    await expect(service.send('off', { message: 'hi' })).rejects.toThrow(/disabled/)
+    expect(controller.created.map((entry) => entry.path)).not.toContain(join(home, 'workspace', 'reqs', 'main'))
   })
 })
 

@@ -156,6 +156,10 @@ export interface Human {
    * requirement's working memory does not leak into the next one.
    */
   memoryScope?: 'record' | 'session'
+  /** What a Session is keyed by: a chat, or a requirement thread. */
+  sessionKey?: 'chat' | 'requirement'
+  /** Sidebar order; smaller comes first. No role is named in code. */
+  order?: number
 }
 
 /**

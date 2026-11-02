@@ -312,11 +312,12 @@ describe('the detail form', () => {
     expect(within(field).getByRole('menuitem', { name: /PM/ })).toBeTruthy()
   })
 
-  it('picks a workspace', () => {
+  it('names the one shared workspace instead of offering a picker', () => {
+    // A role is not a place: every digital human runs in the same Workspace, so
+    // there is nothing to choose here.
     const field = screen.getByText('工作区').parentElement!
-    fireEvent.click(within(field).getByRole('button'))
-    fireEvent.click(within(field).getByRole('menuitem', { name: '数字人' }))
-    expect(within(field).getByText('数字人')).toBeTruthy()
+    expect(within(field).getByText(/所有数字人都在「数字人」工作区里运行，不可更改。/)).toBeTruthy()
+    expect(within(field).queryByRole('button')).toBeNull()
   })
 
   it('saves the record and reports the preset', async () => {
@@ -454,11 +455,10 @@ describe('an empty profile', () => {
     await waitFor(() => expect(screen.getByText(/还没有数字人/)).toBeTruthy())
   })
 
-  it('says so when the bot, workspace and skill loads fail', async () => {
+  it('says so when the bot and skill loads fail', async () => {
     view = mount({
       ...defaultAnswers(),
       'im.bots': () => new Error('no im'),
-      'workspaces.list': () => new Error('no ws'),
       'skills.list': () => new Error('no skills'),
     })
     await settle()
@@ -467,7 +467,6 @@ describe('an empty profile', () => {
     // operator's to fix.
     await waitFor(() => expect(screen.getByText(/bot 列表读取失败：no im/)).toBeTruthy())
     expect(screen.getByText(/技能目录读取失败：no skills/)).toBeTruthy()
-    expect(screen.getByText(/工作区列表读取失败：no ws/)).toBeTruthy()
     expect(screen.queryByText(/还没有 bot/)).toBeNull()
     expect(screen.queryByText(/没有可用的技能/)).toBeNull()
   })

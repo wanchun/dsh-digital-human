@@ -373,6 +373,67 @@ describe('the management route', () => {
     expect(Array.isArray(pm.alignment)).toBe(true)
   })
 
+  it('serves the requirement tree: roles in their own order, requirements grouped, chats keyed', async () => {
+    // The tree is the view's whole input: a role's position, what its Sessions are
+    // keyed by, and the requirements it serves. Written through the store before
+    // apply() because startup primes the Session index from these files.
+    const ICON = 'data:image/png;base64,iVBORw0KGgo='
+    const store = new HumanStore(home)
+    const records = [
+      { id: 'pm-assistant', name: 'PM 角色', enabled: true, order: 0, sessionKey: 'chat' },
+      { id: 'lead-assistant', name: '负责人', enabled: true, order: 10, sessionKey: 'requirement' },
+      { id: 'dev-assistant', name: '开发', enabled: true, order: 20, sessionKey: 'requirement', icon: ICON },
+      { id: 'retired-assistant', name: '停用', enabled: false, order: 30, sessionKey: 'requirement' },
+    ]
+    for (const record of records) await store.upsert(record as any)
+    const indexes: Record<string, Record<string, string>> = {
+      'pm-assistant': { 'direct:leader': 'session-pm-direct', 'group:team': 'session-pm-group' },
+      'lead-assistant': { 'REQ-1': 'session-lead-1', 'REQ-2': 'session-lead-2' },
+      'dev-assistant': { 'REQ-1': 'session-dev-1' },
+      'retired-assistant': { 'REQ-1': 'session-retired-1' },
+    }
+    for (const [id, index] of Object.entries(indexes)) {
+      await writeFile(join(home, 'humans', id, 'sessions.json'), JSON.stringify(index))
+    }
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const route = connection.routes[0]
+
+    const answer = await (await route.fetch(post(call('tree.read')))).json()
+    // The channel refuses a bare value, so the envelope is part of the contract.
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    // A disabled record is not part of the view.
+    expect(tree.map((entry) => entry.humanId).sort()).toEqual(['dev-assistant', 'lead-assistant', 'pm-assistant'])
+    const byId = Object.fromEntries(tree.map((entry) => [entry.humanId, entry]))
+
+    const pm = byId['pm-assistant']
+    expect(pm.sessionKey).toBe('chat')
+    expect(pm.order).toBe(0)
+    expect(pm.requirements).toEqual([
+      { conversation: 'direct:leader', sessions: [{ sessionId: 'session-pm-direct' }] },
+      { conversation: 'group:team', sessions: [{ sessionId: 'session-pm-group' }] },
+    ])
+
+    const lead = byId['lead-assistant']
+    expect(lead.sessionKey).toBe('requirement')
+    expect(lead.order).toBe(10)
+    expect(lead.requirements).toEqual([
+      { conversation: 'REQ-1', sessions: [{ sessionId: 'session-lead-1' }] },
+      { conversation: 'REQ-2', sessions: [{ sessionId: 'session-lead-2' }] },
+    ])
+
+    // One requirement, many roles: each role reports its own Session for it.
+    const dev = byId['dev-assistant']
+    expect(dev.order).toBe(20)
+    // The row's own mark travels with the record; a record without one says so.
+    expect(dev.icon).toBe(ICON)
+    expect(lead.icon).toBe('')
+    expect(dev.requirements).toEqual([{ conversation: 'REQ-1', sessions: [{ sessionId: 'session-dev-1' }] }])
+  })
+
   it('resolves one session to its digital human icon', async () => {
     const { route, platform } = await platformWithRoute()
     const icon = 'data:image/png;base64,iVBORw0KGgo='
