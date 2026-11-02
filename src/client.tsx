@@ -160,6 +160,16 @@ const STYLE = `
 .dh-tree-group { display: flex; flex-direction: column; }
 .dh-tree-group + .dh-tree-group { margin-top: 4px; }
 .dh-tree-group > * + * { margin-top: 2px; }
+/* A chat role's two conversation kinds, each under its own small heading. The
+   heading is indented to the Session rows' own lead, so it reads as their parent
+   rather than as another role. */
+.dh-tree-subgroup { display: flex; flex-direction: column; }
+.dh-tree-subgroup + .dh-tree-subgroup { margin-top: 4px; }
+.dh-tree-subgroup > * + * { margin-top: 2px; }
+.dh-tree-subtitle {
+  margin: 0; padding: 2px 8px 2px 40px;
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary);
+}
 /* The native project row: 34px, one line of primary text, a folder glyph. */
 .dh-tree-summary {
   display: flex; align-items: center; gap: 6px;
@@ -713,7 +723,6 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   // instead of claiming the profile is empty.
   const [sideErrors, setSideErrors] = React.useState<{
     bots?: string
-    workspaces?: string
     skills?: string
     library?: string
   }>({})
@@ -804,10 +813,9 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
           defaultPath: value?.defaultPath ?? null,
         })
       })
-      .catch((caught) => {
-        if (controller.signal.aborted || !mounted.current) return
-        setSideErrors((current) => ({ ...current, workspaces: String(caught?.message ?? caught) }))
-      })
+      // Nothing on the page shows a roster failure: the Workspace line only uses
+      // the default title. Swallow it instead of keeping a write-only error field.
+      .catch(() => {})
     return () => controller.abort()
   }, [call])
 
@@ -1204,7 +1212,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
             <span className="dh-hint">
               {sideErrors.skills
                 ? `技能目录读取失败：${sideErrors.skills}`
-                : '全局、项目与内置技能对所有数字人默认加载，不用勾选；只有这个技能空间里的，才需要按数字人勾选。'}
+                : '勾选即启用：这个数字人只加载勾选的技能；全局、项目与内置的同名技能在本数字人里会被隐藏，未勾选的也不会加载。'}
             </span>
             {!sideErrors.library && chosen.some((name) => !library.some((entry) => entry.name === name))
               ? (
@@ -1501,7 +1509,23 @@ interface TreeHuman {
   order?: number
   /** What this role's Sessions are keyed by: a chat, or a requirement thread. */
   sessionKey?: string
-  requirements?: Array<{ conversation?: string; sessions?: Array<{ sessionId?: string }> }>
+  requirements?: Array<{
+    /** The Session key; the requirement menu never shows it. */
+    conversation?: string
+    /** Directory name under `reqs/`, read from the directory's `meta.json`. */
+    dir?: string
+    /** Requirement name the menu shows; falls back to the thread name. */
+    name?: string
+    sessions?: Array<{ sessionId?: string }>
+  }>
+}
+
+/** One subheading inside a chat role: the personal chats or the group chats. */
+interface TreeGroup {
+  key: 'personal' | 'group'
+  /** Chinese label the operator reads. */
+  title: string
+  rows: TreeRow[]
 }
 
 /** One menu in the column: a chat-keyed role's Sessions, or one requirement's. */
@@ -1512,6 +1536,8 @@ interface TreeSection {
   /** A chat-keyed role reads as an entry; a requirement reads as a folder. */
   kind: 'chat' | 'requirement'
   rows: TreeRow[]
+  /** Chat sections split their rows into 个人 and 群聊; requirements have none. */
+  groups?: TreeGroup[]
 }
 
 /** One session row inside a requirement menu. */
@@ -1541,6 +1567,20 @@ function TreeSession({ label, sessionId, icon, current, openSession }: {
       <span className="dh-tree-label">{label}</span>
     </button>
   )
+}
+
+/**
+ * The Session ids the Workspace catalog lists right now.
+ *
+ * The tree reads its rows from the digital-human index, and that index outlives a
+ * Session: a Session removed outside the platform leaves its address behind, and
+ * clicking the stale row clears the main area. `null` means "no authoritative
+ * catalog yet", so the tree keeps what it has instead of hiding everything.
+ */
+function liveSessionIds(workspace: any): Set<string> | null {
+  const snapshot = workspace?.sessions?.list?.getSnapshot?.()
+  if (!snapshot || snapshot.phase === 'pending' || !Array.isArray(snapshot.ids)) return null
+  return new Set(snapshot.ids)
 }
 
 /**
@@ -1608,6 +1648,16 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
     return selection.subscribe(read)
   }, [getWorkspace])
 
+  // The catalog arrives asynchronously, and a row filtered against an empty first
+  // frame would stay hidden. Re-render on every catalog change; the filter itself
+  // reads the latest snapshot.
+  const [, refreshCatalog] = React.useState(0)
+  React.useEffect(() => {
+    const list = typeof getWorkspace === 'function' ? getWorkspace()?.sessions?.list : undefined
+    if (typeof list?.subscribe !== 'function') return
+    return list.subscribe(() => refreshCatalog((value) => value + 1))
+  }, [getWorkspace])
+
   const open = (sessionId: string) => {
     if (typeof openSession !== 'function') {
       console.warn('[digital-human] the tree has no session opener')
@@ -1617,14 +1667,28 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
   }
 
   // One pass over the roles in their own order: a chat-keyed role becomes its own
-  // section, the rest fill the menu of the requirement they were filed under.
+  // section with the two chat kinds as subheadings, the rest fill the menu of the
+  // requirement they were filed under. Rows whose Session the catalog no longer
+  // lists are dropped: clicking one would clear the main area.
+  const live = liveSessionIds(typeof getWorkspace === 'function' ? getWorkspace() : undefined)
   const sections: TreeSection[] = []
-  const byRequirement = new Map<string, TreeRow[]>()
+  // Keyed by the thread, because that is the Session key; the title comes from the
+  // directory's meta.json, so the menu reads the requirement's name.
+  const byRequirement = new Map<string, { title: string; rows: TreeRow[] }>()
   const ordered = [...state.humans].sort((a, b) => (a.order ?? 100) - (b.order ?? 100))
   for (const human of ordered) {
     const role = human.name || human.humanId
     const chat: TreeSection | undefined = human.sessionKey === 'chat'
-      ? { key: `chat:${human.humanId}`, title: role, kind: 'chat', rows: [] }
+      ? {
+          key: `chat:${human.humanId}`,
+          title: role,
+          kind: 'chat',
+          rows: [],
+          groups: [
+            { key: 'personal', title: '个人', rows: [] },
+            { key: 'group', title: '群聊', rows: [] },
+          ],
+        }
       : undefined
     if (chat) sections.push(chat)
     for (const requirement of human.requirements ?? []) {
@@ -1632,28 +1696,30 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
       for (const session of requirement.sessions ?? []) {
         const sessionId = session?.sessionId
         if (!sessionId) continue
+        if (live && !live.has(sessionId)) continue
         const row: TreeRow = { label: role, sessionId, order: human.order ?? 100, icon: human.icon }
         if (chat) {
-          // "direct:…" and "group:…" name a chat, not a requirement; what follows
-          // the prefix is the name the operator reads.
+          // "direct:…" and "group:…" name the kind of chat; what follows the prefix
+          // is the name the operator reads.
           const name = conversation.replace(/^(group|direct):/, '')
-          chat.rows.push({ ...row, label: name || '聊天' })
+          const group = chat.groups!.find((entry) => entry.key === (conversation.startsWith('group:') ? 'group' : 'personal'))!
+          group.rows.push({ ...row, label: name || '聊天' })
           continue
         }
         // A Session reached by id has no thread, so it belongs to no requirement.
         if (!conversation) continue
-        const rows = byRequirement.get(conversation) ?? []
-        rows.push(row)
-        byRequirement.set(conversation, rows)
+        const entry = byRequirement.get(conversation) ?? { title: requirement.name || conversation, rows: [] }
+        entry.rows.push(row)
+        byRequirement.set(conversation, entry)
       }
     }
   }
   const requirements: TreeSection[] = [...byRequirement.entries()]
-    .map(([name, rows]) => ({
-      key: name,
-      title: name,
+    .map(([thread, entry]) => ({
+      key: thread,
+      title: entry.title,
       kind: 'requirement' as const,
-      rows: [...rows].sort((a, b) => a.order - b.order),
+      rows: [...entry.rows].sort((a, b) => a.order - b.order),
     }))
     .sort((a, b) => a.title.localeCompare(b.title))
   const empty = !state.loading && state.error === '' && requirements.length === 0
@@ -1690,9 +1756,20 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
             </span>
             <span className="dh-tree-label">{section.title}</span>
           </summary>
-          {section.rows.map((row) => (
-            <TreeSession key={row.sessionId} {...row} current={row.sessionId === current} openSession={open} />
-          ))}
+          {section.groups
+            // A chat role's rows are split by kind. Both headings stay, so an empty
+            // 群聊 reads as "none yet" instead of vanishing with the last group.
+            ? section.groups.map((group) => (
+                <div className="dh-tree-subgroup" key={group.key}>
+                  <p className="dh-tree-subtitle">{group.title}</p>
+                  {group.rows.map((row) => (
+                    <TreeSession key={row.sessionId} {...row} current={row.sessionId === current} openSession={open} />
+                  ))}
+                </div>
+              ))
+            : section.rows.map((row) => (
+                <TreeSession key={row.sessionId} {...row} current={row.sessionId === current} openSession={open} />
+              ))}
         </details>
       ))}
       {empty ? <p className="dh-tree-hint">还没有需求</p> : null}

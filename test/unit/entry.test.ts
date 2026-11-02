@@ -395,6 +395,11 @@ describe('the management route', () => {
     for (const [id, index] of Object.entries(indexes)) {
       await writeFile(join(home, 'humans', id, 'sessions.json'), JSON.stringify(index))
     }
+    // One requirement directory carries meta.json; the other is legacy, so the
+    // thread name stays the fallback for both its fields.
+    const requirementDir = join(home, 'workspace', 'reqs', '组织基线验证-20261102')
+    await mkdir(requirementDir, { recursive: true })
+    await writeFile(join(requirementDir, 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
     const platform = makeCtx()
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
@@ -413,16 +418,16 @@ describe('the management route', () => {
     expect(pm.sessionKey).toBe('chat')
     expect(pm.order).toBe(0)
     expect(pm.requirements).toEqual([
-      { conversation: 'direct:leader', sessions: [{ sessionId: 'session-pm-direct' }] },
-      { conversation: 'group:team', sessions: [{ sessionId: 'session-pm-group' }] },
+      { conversation: 'direct:leader', dir: 'direct:leader', name: 'direct:leader', sessions: [{ sessionId: 'session-pm-direct' }] },
+      { conversation: 'group:team', dir: 'group:team', name: 'group:team', sessions: [{ sessionId: 'session-pm-group' }] },
     ])
 
     const lead = byId['lead-assistant']
     expect(lead.sessionKey).toBe('requirement')
     expect(lead.order).toBe(10)
     expect(lead.requirements).toEqual([
-      { conversation: 'REQ-1', sessions: [{ sessionId: 'session-lead-1' }] },
-      { conversation: 'REQ-2', sessions: [{ sessionId: 'session-lead-2' }] },
+      { conversation: 'REQ-1', dir: '组织基线验证-20261102', name: '组织基线验证', sessions: [{ sessionId: 'session-lead-1' }] },
+      { conversation: 'REQ-2', dir: 'REQ-2', name: 'REQ-2', sessions: [{ sessionId: 'session-lead-2' }] },
     ])
 
     // One requirement, many roles: each role reports its own Session for it.
@@ -431,7 +436,9 @@ describe('the management route', () => {
     // The row's own mark travels with the record; a record without one says so.
     expect(dev.icon).toBe(ICON)
     expect(lead.icon).toBe('')
-    expect(dev.requirements).toEqual([{ conversation: 'REQ-1', sessions: [{ sessionId: 'session-dev-1' }] }])
+    expect(dev.requirements).toEqual([
+      { conversation: 'REQ-1', dir: '组织基线验证-20261102', name: '组织基线验证', sessions: [{ sessionId: 'session-dev-1' }] },
+    ])
   })
 
   it('resolves one session to its digital human icon', async () => {
@@ -979,6 +986,90 @@ describe('the preset-scoped tools row', () => {
     // registration succeeds and every later `skill` call fails to read the body.
     expect(platform.mounted[0]).toMatchObject({ name: 'qs', description: 'query the platform', whenToUse: 'when asked', source: 'digital-human' })
     expect(platform.mounted[0].content).toContain('# Body')
+  })
+
+  it('shadows every catalog skill the record did not enable', async () => {
+    const { writeSkill } = await import('../../src/lib/skills')
+    await writeSkill(home, 'qs', {
+      'SKILL.md': '---\nname: qs\ndescription: query the platform\n---\n\n# Body\n',
+    })
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    // The catalog the whitelist compares against: one ordinary skill, one already
+    // hidden, and the mounted one.
+    platform.ctx.skills.snapshot = async () => ({
+      skills: [
+        { name: 'git', description: 'version control', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } },
+        { name: 'quiet', description: 'already hidden', source: 'user-agents', invocation: { modelInvocable: false, userInvocable: true } },
+        { name: 'qs', description: 'mounted here', source: 'digital-human', invocation: { modelInvocable: true, userInvocable: true } },
+      ],
+      complete: true,
+    })
+    const providers: any[] = []
+    platform.ctx.skills.registerProvider = (create: any) => {
+      providers.push(create({ signal: new AbortController().signal, invalidate: () => {} }))
+      return () => {}
+    }
+    applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
+    expect(providers).toHaveLength(1)
+    const shadows = await providers[0].list({})
+    // The enabled one keeps its real body; the already-hidden one needs no shadow;
+    // every other model-invocable skill becomes a same-name, rank-0 shadow.
+    expect(shadows.map((entry: any) => entry.name)).toEqual(['git'])
+    expect(shadows[0]).toMatchObject({
+      provider: 'digital-human-whitelist',
+      rank: 0,
+      source: 'digital-human',
+      invocation: { modelInvocable: false, userInvocable: false },
+    })
+    // Loading the shadow yields exactly the disabled sentence.
+    expect(await providers[0].get(shadows[0])).toMatchObject({
+      name: 'git',
+      content: '该技能未在本数字人启用',
+      provider: 'digital-human-whitelist',
+    })
+  })
+
+  it('reads the catalog with the caller scope and skips its own nested read', async () => {
+    const { writeSkill } = await import('../../src/lib/skills')
+    await writeSkill(home, 'qs', { 'SKILL.md': '---\nname: qs\ndescription: q\n---\n\n# Body\n' })
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    const scope = { opaque: 'scope-key' }
+    const seen: any[] = []
+    platform.ctx.skills.snapshot = async (options: any) => {
+      seen.push(options)
+      return { skills: [{ name: 'git', description: 'vcs', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } }], complete: true }
+    }
+    const providers: any[] = []
+    platform.ctx.skills.registerProvider = (create: any) => {
+      providers.push(create({ signal: new AbortController().signal, invalidate: () => {} }))
+      return () => {}
+    }
+    applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
+    await providers[0].list({ scope, cwd: '/w' })
+    // The scope is what selects this preset's layer, so it must reach the read.
+    expect(seen[0]).toMatchObject({ scope, cwd: '/w' })
+    // The provider's own read is marked, so answering it with no candidates is what
+    // stops the recursion.
+    expect(seen[0][Object.getOwnPropertySymbols(seen[0])[0]]).toBe(true)
+  })
+
+  it('keeps the enabled skills when the whitelist provider cannot register', async () => {
+    const { writeSkill } = await import('../../src/lib/skills')
+    await writeSkill(home, 'qs', { 'SKILL.md': '---\nname: qs\ndescription: q\n---\n\n# Body\n' })
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    const warn = vi.fn()
+    platform.ctx.logger = { warn, info: () => {} }
+    platform.ctx.skills.snapshot = async () => ({ skills: [], complete: true })
+    platform.ctx.skills.registerProvider = () => { throw new Error('no provider') }
+    applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
+    expect(platform.mounted.map((entry) => entry.name)).toEqual(['qs'])
+    expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('no provider'))).toBe(true)
   })
 
   it('mounts nothing when the record names none, and reports one that is gone', async () => {

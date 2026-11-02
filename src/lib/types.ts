@@ -90,12 +90,11 @@ export interface Human {
   icon?: string
   workspace: string
   /**
-   * The plugin-space skills this digital human mounts, by name.
+   * The skills this digital human enables, by name: a whitelist.
    *
-   * Only these are added: the deployment's own roots — the global directory, the
-   * project's, the bundled set — keep loading for every agent as they always did.
-   * So a skill in the plugin's space is opt-in per digital human, while everything
-   * outside it needs no configuration at all.
+   * A name here mounts the plugin-space skill of that name. Every other skill the
+   * global catalog offers — the global directory, the project's, the bundled set —
+   * is shadowed in this digital human's preset layer, so the model cannot see it.
    */
   skills: string[]
   peers: string[]

@@ -89,14 +89,14 @@ Tools: `memory_status` (inspect, with per-section bytes) and `memory_compact`
 
 ### Skill space
 
-Skills live in two layers that do not interfere:
+The record's `skills` list is a **whitelist**:
 
 ```
 global ~/.agents/skills/  ─┐
-the project's skills/      ─┼─→  loaded by every digital human, no configuration
+the project's skills/      ─┼─→  not selected: a same-name shadow, invisible to the model
 bundled skills            ─┘
 
-the plugin's skill space  ──→  only what the record selects, for that human alone
+the plugin's skill space  ──→  selected: mounted and usable as usual
 ~/.dsh/digital-human/skills/
 ```
 
@@ -104,6 +104,9 @@ the plugin's skill space  ──→  only what the record selects, for that huma
 - Mounted through a **preset-scoped** `ctx.skills.register`, so it is visible to
   that digital human only — the global directory is untouched and no symlinks are
   needed
+- Every skill the record did not select is shadowed by a preset-scoped whitelist
+  provider: `modelInvocable: false`, with one sentence as its body
+  ("该技能未在本数字人启用")
 - A runtime registration **outranks** a user (global) entry of the same name, so a
   private skill can replace a global one
 - The page can **upload** (pick a directory; relative paths are kept), **select**

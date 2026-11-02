@@ -36,7 +36,8 @@ import { RPC_PATH } from './lib/rpc.js'
 import { registerRpc } from './lib/rpc.js'
 import { directSenderOf, directSenders, syncBotToHuman } from './lib/im.js'
 import type { ImSyncResult } from './lib/im.js'
-import { DEFAULT_WORKSPACE_TITLE, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
+import { DEFAULT_WORKSPACE_TITLE, defaultWorkspacePath, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
+import { readRequirementDirs } from './lib/requirements.js'
 import type { Config, Ctx, Human, HumanPatch, WorkspaceView } from './lib/types.js'
 import { DEFAULT_PERMISSION_PRESET } from './lib/types.js'
 
@@ -352,27 +353,6 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     for (const item of await listWorkspaces(ctx)) {
       if (typeof item?.path === 'string' && typeof item?.workspaceId === 'string') {
         workspaceIdByPath.set(item.path, item.workspaceId)
-      }
-    }
-    // A record may name a directory the roster does not know yet. Register it, or
-    // the session it creates carries a `cwd` but no `workspaceId` — and the UI
-    // groups by the id, so the session shows up as ungrouped even though it runs in
-    // the right place.
-    const workspaceController = ctx.get?.('workspaceController')
-    if (typeof workspaceController?.create === 'function') {
-      for (const human of humans) {
-        const path = human.workspace
-        if (!human.enabled || !path || workspaceIdByPath.has(path)) continue
-        try {
-          const created = await workspaceController.create({ path })
-          const workspaceId = created?.workspace?.workspaceId
-          if (typeof workspaceId === 'string') {
-            workspaceIdByPath.set(path, workspaceId)
-            log(`registered workspace "${path}" for ${human.id}`)
-          }
-        } catch (error) {
-          log(`workspace "${path}" for ${human.id} is unavailable: ${error.message}`)
-        }
       }
     }
     let order = PRESET_ORDER_BASE
@@ -926,6 +906,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // here instead of being guessed from Workspace paths.
     if (method === 'tree.read') {
       const humans = (await store.list(seed)).filter((human) => human.enabled !== false)
+      // The requirement root is the directory the digital humans share: `reqs/`
+      // sits in it, and each directory's `meta.json` names its thread.
+      const requirementDirs = readRequirementDirs(defaultWorkspace?.path ?? defaultWorkspacePath(home))
       const tree: Array<{
         humanId: string
         name: string
@@ -933,7 +916,12 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         icon: string
         order: number
         sessionKey: string
-        requirements: Array<{ conversation: string; sessions: Array<{ sessionId: string }> }>
+        requirements: Array<{
+          conversation: string
+          dir: string
+          name: string
+          sessions: Array<{ sessionId: string }>
+        }>
       }> = []
       for (const human of humans) {
         const addresses = await chat.addresses(human.id)
@@ -955,7 +943,12 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           icon: human.icon ?? '',
           order: human.order ?? 100,
           sessionKey: human.sessionKey ?? 'requirement',
-          requirements: [...byRequirement].map(([conversation, sessions]) => ({ conversation, sessions })),
+          // A requirement without meta.json keeps its thread name for both fields,
+          // which is exactly the legacy `reqs/<thread>/` layout.
+          requirements: [...byRequirement].map(([conversation, sessions]) => {
+            const meta = requirementDirs.get(conversation)
+            return { conversation, dir: meta?.dir ?? conversation, name: meta?.name ?? conversation, sessions }
+          }),
         })
       }
       // The envelope is the contract the client's channel validates: a bare value

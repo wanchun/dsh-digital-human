@@ -31,6 +31,22 @@ export function IconChevronDownOutlineRegular() {
   return <span data-icon="chevron" />
 }
 
+export function IconChevronRightOutlineRegular() {
+  return <span data-icon="chevron-right" />
+}
+
+export function IconFolderCloseRegular() {
+  return <span data-icon="folder" />
+}
+
+export function IconNewChatOutlineRegular() {
+  return <span data-icon="chat" />
+}
+
+export function IconUserOutlineRegular() {
+  return <span data-icon="user" />
+}
+
 export function Input(props: any) {
   return (
     <span className={props.className}>

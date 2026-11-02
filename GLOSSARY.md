@@ -30,7 +30,7 @@ DSH 里的一次对话上下文。执行角色：**一个线程名一个会话**
 
 ## 需求目录
 
-`<工作区根>/reqs/<线程名>/`，下含 `docs/`（brief/params/progress/nodes）。所有角色共用同一个目录。
+`<工作区根>/reqs/<需求名>-<日期>/`，下含 `docs/`（brief/params/progress/nodes）与 `meta.json`（`{"thread":"<线程名>","name":"<需求名>"}`）。线程名仍是会话主键；目录名与显示名只认 `meta.json`。所有角色共用同一个目录。
 
 ## 工作区（workspace）
 
