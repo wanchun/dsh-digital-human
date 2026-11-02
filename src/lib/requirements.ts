@@ -11,7 +11,7 @@
  * requirement without one falls back to its thread name.
  */
 
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /** One requirement directory, as `meta.json` describes it. */
@@ -58,4 +58,51 @@ export function readRequirementDirs(workspacePath: string | undefined): Map<stri
     }
   }
   return found
+}
+
+/** What one created requirement knows about itself. */
+export interface CreatedRequirement {
+  dir: string
+  path: string
+  metaPath: string
+}
+
+/**
+ * Create one requirement directory and its metadata in a single step.
+ *
+ * The directory, the display name and the thread name are one fact written once:
+ * letting a persona assemble them by hand is how the three drifted apart.
+ */
+export function createRequirement(
+  root: string,
+  input: { thread: string; name: string; subsystems?: Array<Record<string, string>> },
+): CreatedRequirement {
+  const thread = String(input.thread || '').trim()
+  const name = String(input.name || '').trim()
+  if (!thread) throw new Error('thread is required')
+  if (!name) throw new Error('name is required')
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+  const dir = `${name}-${stamp}`
+  const path = join(root, REQUIREMENTS_DIR, dir)
+  mkdirSync(path, { recursive: true })
+  const metaPath = join(path, 'meta.json')
+  const meta = { thread, name, createdAt: new Date().toISOString(), subsystems: input.subsystems ?? [] }
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n', 'utf8')
+  const rows = (input.subsystems ?? []).map((row) =>
+    `| ${row.subsystem ?? ''} | ${row.version ?? ''} | ${row.deployBranch ?? ''} | ${row.env ?? ''} |`)
+  const params = [
+    '# 参数确认',
+    '',
+    `- 需求名称：${name}`,
+    `- 线程名：${thread}`,
+    '',
+    '## 子系统参数',
+    '',
+    '| 子系统 | 版本 | 部署分支 | 目标环境 |',
+    '|---|---|---|---|',
+    ...(rows.length > 0 ? rows : ['| （无子系统） | | | |']),
+    '',
+  ].join('\n')
+  writeFileSync(join(path, 'params.md'), params, 'utf8')
+  return { dir, path, metaPath }
 }

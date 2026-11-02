@@ -13,9 +13,11 @@
  * and editing digital humans is deployment work, not digital-human work.
  */
 
+import { join } from 'node:path'
 import { requireConversation } from './chat.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
+import { createRequirement } from './requirements.js'
 import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
 import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
@@ -1014,6 +1016,39 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
   if (im) tools.push(notify, targets)
   tools.push(setTitle)
   if (memory) tools.push(memoryStatus, memoryCompact)
+  tools.push({
+    name: 'digital_human_requirement_create',
+    description:
+      'Create one requirement directory and its metadata in a single step: reqs/<name>-<date>/ with meta.json and a params.md skeleton. '
+      + 'Use this instead of writing those files by hand, so the thread name, the directory and the display name cannot drift apart.',
+    parameters: {
+      thread: { type: 'string', description: 'Thread name (the Session key) this requirement runs under.', required: true },
+      name: { type: 'string', description: 'Requirement name people read; the directory is named after it.', required: true },
+      subsystems: {
+        type: 'array',
+        description: 'One entry per subsystem: { subsystem, version, deployBranch, env }.',
+        items: { type: 'object' },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { dir: { type: 'string', required: true }, path: { type: 'string', required: true } },
+      },
+    },
+    async execute(args) {
+      const record = await service.require(humanId)
+      const root = record.workspace || join(service.store.home, 'workspace')
+      const created = createRequirement(root, {
+        thread: String(args.thread),
+        name: String(args.name),
+        subsystems: Array.isArray(args.subsystems) ? args.subsystems : [],
+      })
+      return { dir: created.dir, path: created.path }
+    },
+  })
+
   return tools.map(normalizeTool)
 }
 
