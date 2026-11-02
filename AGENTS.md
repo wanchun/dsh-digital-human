@@ -13,3 +13,7 @@ The five canonical roles keep their default names. See `docs/agents/triage-label
 ### Domain docs
 
 Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+# 文档写作
+
+所有交付文档遵循 ASD-STE100 的 80%：短句、一句一个意思、主动语态、固定用词。
