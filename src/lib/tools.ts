@@ -152,20 +152,20 @@ function receiptLine(thread: string, node: any): string {
 /**
  * Append the receipt request to a dispatch, and to nothing else.
  *
- * A reply answers the Session that asked: the schema names `session_id` as that
- * address, and the transport files the message as an amendment to the item it
- * answers. Asking for a receipt on that path would let two peers ask each other
- * forever, so only a dispatch carries the line. `mode: 'new'` still marks a new
- * handover into a Session this side already knows.
+ * The caller decides. `expect_receipt: true` says this send hands over work, so the
+ * answer is due; every other send carries no line. A receipt, a reply, a
+ * cancellation and an amendment all omit it: asking for a receipt in a receipt
+ * would let two peers ask each other forever. The tool never infers the flag from
+ * `session_id` or `mode`.
  *
  * The line is part of the message text: it is neither a fact nor context.
  */
-function withReceiptLine(message: string, { thread, node, reply }: {
+function withReceiptLine(message: string, { thread, node, expectReceipt }: {
   thread: string
   node?: unknown
-  reply: boolean
+  expectReceipt: boolean
 }): string {
-  return reply ? message : `${message}\n\n${receiptLine(thread, node)}`
+  return expectReceipt ? `${message}\n\n${receiptLine(thread, node)}` : message
 }
 
 /** Refuse a dispatch that carries how-to-work fields, and say why. */
@@ -497,7 +497,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       + 'thread this Session already shares with the peer — the transport sends it back to the Session '
       + 'that asked. Pass session_id to choose a Session. '
       + 'Every send is also a work item: a reply to its running turn amends the item already open, '
-      + 'and a new dispatch gets its own. The detail says which it became.',
+      + 'and a new dispatch gets its own. The detail says which it became. '
+      + 'Pass expect_receipt: true only when you hand work to a person or a peer and need the result '
+      + 'reported back. Omit it for a receipt, a reply, a cancellation or an amendment: a receipt that '
+      + 'asks for a receipt starts a loop.',
     parameters: {
       to: {
         required: true,
@@ -535,6 +538,13 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       wait_seconds: {
         type: 'number',
         description: `Wait up to this many seconds for the target to finish its turn, at most ${WAIT_MAX_SECONDS}. Defaults to 0 (return as soon as the message is accepted).`,
+      },
+      // The only switch that adds the receipt request. Nothing else infers it.
+      expect_receipt: {
+        type: 'boolean',
+        description: 'Append the fixed receipt request to this message. Pass true only when you dispatch '
+          + 'work to a person or a peer and need the result reported back. Omit it for a receipt, a reply, '
+          + 'a cancellation or an amendment: a receipt that asks for a receipt starts a loop. Defaults to false.',
       },
       mode: {
         type: 'string',
@@ -672,13 +682,12 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       // same facts and context in the same fixed order.
       const head = dispatchHead(requirementDir, args)
       const body = typeof args.message === 'string' ? args.message : ''
-      // A reply travels to the Session that asked, named by `session_id`; the
-      // transport files it as an amendment. Only a dispatch asks for a receipt.
-      const replying = typeof args.session_id === 'string' && args.session_id.trim() !== '' && args.mode !== 'new'
+      // The caller says whether a receipt is due. The flag is read strictly, so a
+      // caller that omits it sends the message as written.
       const message = withReceiptLine(body ? `${head}\n\n${body}` : head, {
         thread: conversation,
         node: args.node,
-        reply: replying,
+        expectReceipt: args.expect_receipt === true,
       })
       const targets = Array.isArray(args.to) ? args.to : [args.to]
       if (targets.length === 0) throw new Error('a target digital human is required')

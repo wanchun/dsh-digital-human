@@ -13,10 +13,10 @@ const REQ_NAME = '组织基线验证'
 let requirementDir = ''
 
 /**
- * The receipt request every dispatch ends with.
+ * The receipt request a dispatch ends with.
  *
  * The tool fills the requirement's thread name and the node of the call; a call that
- * names no node keeps the placeholder. A reply carries no line at all.
+ * names no node keeps the placeholder. Only `expect_receipt: true` adds the line.
  */
 const receipt = (thread = REQ, node = '<节点名>') =>
   `—— 完成后请用 digital_human_send 回执给我：requirement=${thread}，node=${node}。写在你自己的会话里我收不到。`
@@ -200,7 +200,7 @@ describe('the chat tools', () => {
   it('sends to a peer by name or id, and reports the conversation it used', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    const result = await send.execute({ to: 'dev', message: 'do it', requirement: REQ })
+    const result = await send.execute({ to: 'dev', message: 'do it', requirement: REQ, expect_receipt: true })
     expect(result).toMatchObject({ to: 'dev', conversationId: REQ, accepted: true, finished: false })
     const delivered = service.calls.find((entry) => entry.method === 'send')!.args[1]
     // The requirement's thread is the address: every role is reached there.
@@ -253,7 +253,7 @@ describe('the chat tools', () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
     await send.execute({
-      to: 'dev', message: 'x', requirement: REQ + '-20260101',
+      to: 'dev', message: 'x', requirement: REQ + '-20260101', expect_receipt: true,
     })
     // The receipt names the thread, even when the call named the directory.
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
@@ -279,6 +279,7 @@ describe('the chat tools', () => {
         repo: '/repo',
       },
       context: '开发完成；上一步结论见 nodes/dev.md',
+      expect_receipt: true,
     })
     const delivered = service.calls.find((entry) => entry.method === 'send')!.args[1]
     expect(delivered.message).toBe([
@@ -306,6 +307,7 @@ describe('the chat tools', () => {
       to: 'dev', requirement: REQ,
       facts: { subsystem: 'RCS-CSA' },
       context: '已接单；上一步结论见 nodes/intake.md',
+      expect_receipt: true,
     })
     const delivered = service.calls.find((entry) => entry.method === 'send')!.args[1]
     expect(delivered.message).toBe([
@@ -323,6 +325,7 @@ describe('the chat tools', () => {
     await toolOf(build(service), 'digital_human_send').execute({
       to: 'dev', message: 'x', requirement: REQ,
       facts: '子系统 RCS-CSA；版本 1.16.0',
+      expect_receipt: true,
     })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
       .toBe(`需求目录：${requirementDir}\n事实：子系统 RCS-CSA；版本 1.16.0\n\nx\n\n${receipt()}`)
@@ -358,18 +361,18 @@ describe('the chat tools', () => {
     // rewrite the payload for no gain.
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({
-      to: 'dev', message: 'x', requirement: REQ, steps: [],
+      to: 'dev', message: 'x', requirement: REQ, steps: [], expect_receipt: true,
     })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
       .toBe(`需求目录：${requirementDir}\n\nx\n\n${receipt()}`)
   })
 
-  it('ends every dispatch with one fixed receipt request', async () => {
-    // The request cannot depend on a persona remembering it: the dispatch carries the
-    // two values the answer has to name.
+  it('ends a dispatch with one fixed receipt request when asked to', async () => {
+    // The caller decides; the line itself is fixed. It cannot depend on a persona
+    // remembering it: the dispatch carries the two values the answer has to name.
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    await send.execute({ to: 'dev', message: 'x', requirement: REQ, node: '开发' })
+    await send.execute({ to: 'dev', message: 'x', requirement: REQ, node: '开发', expect_receipt: true })
     const message = service.calls.find((entry) => entry.method === 'send')!.args[1].message
     const lines = message.split('\n')
     expect(lines[lines.length - 1]).toBe(receipt(REQ, '开发'))
@@ -379,33 +382,52 @@ describe('the chat tools', () => {
   it('keeps the receipt placeholders when the dispatch names no node', async () => {
     // A node is the executor's call, so the request must still go out without one.
     const service = serviceStub()
-    await toolOf(build(service), 'digital_human_send').execute({ to: 'dev', message: 'x', requirement: REQ })
+    await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'x', requirement: REQ, expect_receipt: true })
     const message = service.calls.find((entry) => entry.method === 'send')!.args[1].message
     expect(message).toContain('requirement=REQ-1，node=<节点名>。')
   })
 
-  it('asks for no receipt in a reply', async () => {
-    // A reply answers the Session that asked. Asking for a receipt there too would let
-    // two peers ask each other forever, so the line stays on the dispatch path.
+  it('adds no receipt request when the call omits expect_receipt', async () => {
+    // The flag defaults to false: a message goes out as written.
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({
-      to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ, node: '开发',
+      to: 'dev', message: 'x', requirement: REQ, node: '开发',
     })
     const message = service.calls.find((entry) => entry.method === 'send')!.args[1].message
     expect(message).not.toContain('完成后请用 digital_human_send 回执给我')
-    // The head is unchanged; only the request at the end is missing.
     expect(message).toBe(`需求目录：${requirementDir}\n节点：开发\n\nx`)
   })
 
-  it('asks for a receipt again when a new handover names a known Session', async () => {
-    // `mode: 'new'` says the send is new work, not an answer: the receipt is due.
+  it('adds no receipt request on a new handover that names a known Session', async () => {
+    // `session_id` and `mode` no longer imply anything: only the flag decides.
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({
       to: 'dev', message: 'x', session_id: 'session-them-1', mode: 'new', requirement: REQ, node: '自测',
     })
     const message = service.calls.find((entry) => entry.method === 'send')!.args[1].message
-    expect(message).toContain('node=自测。')
-    expect(message.endsWith(receipt(REQ, '自测'))).toBe(true)
+    expect(message).not.toContain('回执给我')
+    expect(message).toBe(`需求目录：${requirementDir}\n节点：自测\n\nx`)
+  })
+
+  it('documents the flag as the only switch for the receipt request', () => {
+    const send = toolOf(build(serviceStub()), 'digital_human_send')
+    expect(send.description).toContain('expect_receipt')
+    expect(send.parameters.properties.expect_receipt.type).toBe('boolean')
+    expect(send.parameters.properties.expect_receipt.description).toContain('Omit it for a receipt')
+  })
+
+  it('adds no receipt request to a receipt', async () => {
+    // A receipt answers the Session that asked. Asking for a receipt there too would
+    // let two peers ask each other forever, so the caller omits the flag.
+    const service = serviceStub()
+    await toolOf(build(service), 'digital_human_send').execute({
+      to: 'dev', message: '【回执】REQ-1 开发完成', session_id: 'session-them-1', requirement: REQ, node: '开发',
+    })
+    const message = service.calls.find((entry) => entry.method === 'send')!.args[1].message
+    expect(message).not.toContain('完成后请用 digital_human_send 回执给我')
+    // The head is unchanged; only the request at the end is missing.
+    expect(message).toBe(`需求目录：${requirementDir}\n节点：开发\n\n【回执】REQ-1 开发完成`)
   })
 
   it('waits for a reply when asked, and reports the outcome', async () => {

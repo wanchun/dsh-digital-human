@@ -260,6 +260,8 @@ const outbound = await scope.tools.get('digital_human_send')
       docs: `${requirement.path}/params.md`,
     },
     context: '已接单；上一步结论见 nodes/intake.md',
+    // Only a dispatch asks for a receipt, and only when the caller says so.
+    expect_receipt: true,
   })
 check('send resolves the peer by id', outbound.to === 'pm-assistant' && outbound.accepted === true)
 check('send reports the requirement thread', outbound.conversationId === 'REQ-1')
@@ -275,6 +277,16 @@ check('the head carries task, node, facts and context in one fixed order',
   && lastPrompt.indexOf('上下文：已接单；上一步结论见 nodes/intake.md') < lastPrompt.indexOf('status please'))
 check('the dispatch ends with one fixed receipt request',
   lastPrompt.indexOf('status please') < lastPrompt.indexOf('—— 完成后请用 digital_human_send 回执给我：requirement=REQ-1，node=开发。写在你自己的会话里我收不到。'))
+// The flag is the only switch. A send without it carries no request, so a receipt
+// never asks for a receipt.
+await scope.tools.get('digital_human_send')
+  .execute({ to: 'pm-assistant', message: 'no receipt', requirement: 'REQ-1' })
+check('a send without expect_receipt carries no receipt request',
+  !platform.prompts.at(-1).content[0].text.includes('完成后请用 digital_human_send 回执给我'))
+await scope.tools.get('digital_human_send')
+  .execute({ to: 'pm-assistant', message: '【回执】REQ-1 done', session_id: outbound.sessionId, requirement: 'REQ-1' })
+check('a receipt carries no receipt request of its own',
+  !platform.prompts.at(-1).content[0].text.includes('完成后请用 digital_human_send 回执给我'))
 check('send refuses a dispatch that carries steps, commands or cautions',
   await scope.tools.get('digital_human_send').execute({
     to: 'pm-assistant', message: 'x', requirement: 'REQ-1', steps: ['one', 'two'],
