@@ -242,13 +242,39 @@ const requirement = await scope.tools.get('digital_human_requirement_create')
   .execute({ thread: 'REQ-1', name: '组织基线验证' })
 check('create returns an absolute requirement directory', requirement.path.startsWith('/'))
 const outbound = await scope.tools.get('digital_human_send')
-  .execute({ to: 'pm-assistant', message: 'status please', conversation_id: 'main', requirement: 'REQ-1' })
+  .execute({
+    to: 'pm-assistant',
+    message: 'status please',
+    conversation_id: 'main',
+    requirement: 'REQ-1',
+    task_id: 'w-01',
+    node: '开发',
+    facts: {
+      subsystem: 'RCS-CSA',
+      version: '3.32.0',
+      branch: 'feature/x',
+      environment: 'M1',
+      repo: '/repo',
+      docs: `${requirement.path}/params.md`,
+    },
+    context: '已接单；上一步结论见 nodes/intake.md',
+  })
 check('send resolves the peer by id', outbound.to === 'pm-assistant' && outbound.accepted === true)
 check('send reports the conversation', outbound.conversationId === 'main')
 const lastPrompt = platform.prompts.at(-1).content[0].text
-check('the requirement path follows the peer source and precedes the body',
+check('the requirement path follows the peer source and precedes the facts',
   lastPrompt.indexOf('<dsh_peer_source') < lastPrompt.indexOf(`需求目录：${requirement.path}`)
-  && lastPrompt.indexOf(`需求目录：${requirement.path}`) < lastPrompt.indexOf('status please'))
+  && lastPrompt.indexOf(`需求目录：${requirement.path}`) < lastPrompt.indexOf('事实：'))
+check('the head carries task, node, facts and context in one fixed order',
+  lastPrompt.indexOf('工作项：w-01') < lastPrompt.indexOf('节点：开发')
+  && lastPrompt.indexOf('节点：开发') < lastPrompt.indexOf('事实：')
+  && lastPrompt.indexOf('- 子系统：RCS-CSA') < lastPrompt.indexOf('- 版本：3.32.0')
+  && lastPrompt.indexOf('- 文档：') < lastPrompt.indexOf('上下文：已接单；上一步结论见 nodes/intake.md')
+  && lastPrompt.indexOf('上下文：已接单；上一步结论见 nodes/intake.md') < lastPrompt.indexOf('status please'))
+check('send refuses a dispatch that carries steps, commands or cautions',
+  await scope.tools.get('digital_human_send').execute({
+    to: 'pm-assistant', message: 'x', conversation_id: 'main', requirement: 'REQ-1', steps: ['one', 'two'],
+  }).then(() => false, (error) => error.message.includes('派单只传事实')))
 check('send refuses a missing requirement',
   await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', conversation_id: 'main' }).then(() => false, (error) => error.message.includes('派单必须带需求')))
 check('send refuses an unknown requirement',

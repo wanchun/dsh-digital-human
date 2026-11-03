@@ -164,7 +164,16 @@ const calls = [
   ['digital_human_status', { to: 'pm-assistant' }],
   ['digital_human_messages', { to: 'pm-assistant' }],
   // An address, because the tool refuses a send that names none.
-  ['digital_human_send', { to: 'pm-assistant', message: 'schema probe', conversation_id: 'schema-probe', requirement: 'REQ-SCHEMA' }],
+  ['digital_human_send', {
+    to: 'pm-assistant',
+    message: 'schema probe',
+    conversation_id: 'schema-probe',
+    requirement: 'REQ-SCHEMA',
+    task_id: 'w-schema',
+    node: '开发',
+    facts: { subsystem: 'RCS-CSA', version: '3.32.0', docs: ['/spec.md'] },
+    context: '已接单；上一步结论见 nodes/intake.md',
+  }],
   ['digital_human_requirement_read', { requirement: 'REQ-SCHEMA' }],
   ['digital_human_requirement_update', { requirement: 'REQ-SCHEMA', node: 'dev', status: 'running' }],
   ['digital_human_requirement_attach', { requirement: 'REQ-SCHEMA', name: 'probe.md', content: 'x' }],

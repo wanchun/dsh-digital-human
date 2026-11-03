@@ -35,6 +35,107 @@ const WAIT_MAX_SECONDS = 120
  */
 const DUPLICATE_WINDOW_MS = 60_000
 
+/**
+ * Fields a dispatch must not carry.
+ *
+ * A dispatch hands over facts. The executor's own playbook decides the steps, the
+ * commands and the cautions. When the sender writes them into the payload, two
+ * descriptions of the same work drift apart, and the executor stops judging what
+ * applies. The three canonical names are declared in the tool schema so a caller
+ * gets this reason; the aliases are refused too, for a caller that guessed one.
+ */
+const FORBIDDEN_DISPATCH_FIELDS: Record<string, string> = {
+  steps: '步骤列表',
+  step_list: '步骤列表',
+  steps_list: '步骤列表',
+  instructions: '步骤列表',
+  commands: '命令',
+  command: '命令',
+  cautions: '注意事项',
+  precautions: '注意事项',
+  warnings: '注意事项',
+}
+
+/** The fixed labels and order of the facts a dispatch prints. */
+const FACT_LABELS: Record<string, string> = {
+  subsystem: '子系统',
+  version: '版本',
+  branch: '分支',
+  deployBranch: '部署分支',
+  environment: '环境',
+  env: '环境',
+  repo: '仓库',
+  repository: '仓库',
+  docs: '文档',
+  doc: '文档',
+}
+
+const FACT_ORDER = [
+  'subsystem', 'version', 'branch', 'deployBranch', 'environment', 'env',
+  'repo', 'repository', 'docs', 'doc',
+]
+
+/** One fact as a line fragment; an array prints as a comma list, in order. */
+function factValue(value: any): string {
+  if (Array.isArray(value)) return value.map(factValue).filter(Boolean).join('、')
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+/** A field is present when it carries something; an empty string is not a field. */
+function present(value: any): boolean {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return value.trim().length > 0
+  if (Array.isArray(value)) return value.length > 0
+  return true
+}
+
+/** Render the facts block in one fixed order, so every dispatch reads the same. */
+function renderFacts(facts: any): string[] {
+  if (typeof facts === 'string') return facts.trim() ? [`事实：${facts.trim()}`] : []
+  if (!facts || typeof facts !== 'object' || Array.isArray(facts)) return []
+  const keys = [
+    ...FACT_ORDER.filter((key) => present(facts[key])),
+    ...Object.keys(facts).filter((key) => !FACT_ORDER.includes(key) && present(facts[key])),
+  ]
+  const lines = keys.map((key) => {
+    const label = FACT_LABELS[key] ?? key
+    return `- ${label}：${factValue(facts[key])}`
+  }).filter((line) => !line.endsWith('：'))
+  return lines.length > 0 ? ['事实：', ...lines] : []
+}
+
+/**
+ * Compose the head every peer reads before the body.
+ *
+ * The requirement path always comes first, because everything else is filed
+ * inside it. Facts and context follow in a fixed format: the executor needs the
+ * same facts in the same place on every dispatch.
+ */
+function dispatchHead(requirementDir: string, args: any): string {
+  const lines = [`需求目录：${requirementDir}`]
+  if (present(args.task_id)) lines.push(`工作项：${String(args.task_id).trim()}`)
+  if (present(args.node)) lines.push(`节点：${String(args.node).trim()}`)
+  lines.push(...renderFacts(args.facts))
+  if (present(args.context)) lines.push(`上下文：${String(args.context).trim()}`)
+  return lines.join('\n')
+}
+
+/** Refuse a dispatch that carries how-to-work fields, and say why. */
+function refuseForbiddenDispatch(args: any): void {
+  for (const [key, label] of Object.entries(FORBIDDEN_DISPATCH_FIELDS)) {
+    if (!present(args?.[key])) continue
+    throw new Error(
+      `digital_human_send refuses ${key}（${label}）：派单只传事实，不传做法。 `
+      + 'The executor\'s playbook decides the steps, the commands and the cautions. '
+      + 'A dispatch that writes them takes that decision away, and the two descriptions drift apart. '
+      + 'Pass facts and context instead.',
+    )
+  }
+}
+
 const CONVERSATION_PARAM = {
   type: 'string',
   description: 'Conversation id that isolates one thread, for example a requirement or version name. Defaults to "main".',
@@ -315,6 +416,8 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     name: 'digital_human_send',
     description:
       'Send a message to another digital human and start a turn in its conversation. '
+      + 'A dispatch carries facts and context, never how to work: pass requirement, facts and context, '
+      + 'not steps, commands or cautions. The peer\'s playbook decides the steps. '
       + 'Delivery is asynchronous, like handing over a task. Set wait_seconds to wait for its reply, '
       + 'then read it with digital_human_messages, or poll with digital_human_status. '
       + 'Omit the address to reply in the thread this Session already shares with the peer — the '
@@ -332,7 +435,12 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         description: 'Target digital human id or display name, or an array of them. '
           + 'An array assigns one independent work item per target, each with its own receipt.',
       },
-      message: { type: 'string', required: true, description: 'Message body. State the task, the acceptance criteria, and how to report back.' },
+      // Optional: a structured dispatch can state everything in facts and context.
+      message: {
+        type: 'string',
+        description: 'Optional body. State facts, the acceptance criteria and the evidence you need. '
+          + 'Do not write steps, commands or cautions: the executor decides them.',
+      },
       // Required on every send: the peer needs the requirement's own directory, and a
       // message that names none could only file the work in a shared folder.
       requirement: {
@@ -364,7 +472,41 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       },
       task_id: {
         type: 'string',
-        description: 'The work item to amend or cancel. Required when the conversation has more than one open item.',
+        description: 'The work item to amend or cancel. Required when the conversation has more than one open item. '
+          + 'It is also written into the head of a dispatch as 工作项.',
+      },
+      node: {
+        type: 'string',
+        description: 'Node name, written into the head as 节点. Omit it to let the executor decide. '
+          + 'The executor judges whether the node applies; when it skips one, it records the reason.',
+      },
+      facts: {
+        oneOf: [
+          { type: 'string' },
+          { type: 'object', additionalProperties: true },
+        ],
+        description: 'Facts the executor needs, with no procedure: subsystem, version, branch, environment, '
+          + 'repo, and the absolute paths of related documents. Known keys print in a fixed order as '
+          + '事实：- 子系统：… - 版本：…; any other key prints under its own name.',
+      },
+      context: {
+        type: 'string',
+        description: 'One sentence of current progress plus a pointer to the previous conclusion, as '
+          + '上下文：… . Give the path, not the full text.',
+      },
+      // Declared so a caller that tries one gets a reason, not a schema error. The
+      // executor checks both the canonical names and their aliases.
+      steps: {
+        oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+        description: 'Refused: a dispatch does not prescribe steps. The executor\'s playbook decides them.',
+      },
+      commands: {
+        oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+        description: 'Refused: a dispatch does not carry commands. The executor decides how to run the work.',
+      },
+      cautions: {
+        oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+        description: 'Refused: a dispatch does not carry cautions. The executor owns the risks of its own playbook.',
       },
       note: {
         type: 'string',
@@ -416,6 +558,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       render: (_args, value) => renderText(value),
     },
     async execute(args, exec) {
+      // A dispatch carries facts, not a procedure. Refuse before any lookup, so a
+      // rejected call has no side effect and the reason is the first thing the
+      // caller reads.
+      refuseForbiddenDispatch(args)
       const me = await self()
       // Resolve the requirement before any peer or address: a send with no requirement
       // is refused, never filed into a shared directory.
@@ -425,8 +571,11 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           + 'or directory name so the peer works inside that requirement.',
       })
       // The transport prepends <dsh_peer_source>, so this head lands after it and
-      // before the body. Every recipient reads the same absolute directory.
-      const message = `需求目录：${requirementDir}\n\n${String(args.message ?? '')}`
+      // before the body. Every recipient reads the same absolute directory, then the
+      // same facts and context in the same fixed order.
+      const head = dispatchHead(requirementDir, args)
+      const body = typeof args.message === 'string' ? args.message : ''
+      const message = body ? `${head}\n\n${body}` : head
       const targets = Array.isArray(args.to) ? args.to : [args.to]
       if (targets.length === 0) throw new Error('a target digital human is required')
       // Its own Session travels with the message, so the reply can come back to the

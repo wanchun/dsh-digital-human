@@ -39,3 +39,5 @@ DSH 里的一次对话上下文。执行角色：**一个线程名一个会话**
 ## 写作规则
 
 所有给人看的文档（brief / progress / 报告 / 回执）遵循 ASD-STE100 的 80%：短句、一句一个意思、主动语态、用词固定、不写比喻与省略。
+
+人设四段式、playbook 上限、上下文预算、派单字段与技能库位置的细则见 [`docs/agents/writing.md`](docs/agents/writing.md)。

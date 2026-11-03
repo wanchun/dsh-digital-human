@@ -207,6 +207,107 @@ describe('the chat tools', () => {
       .toBe(`需求目录：${requirementDir}\n\nx`)
   })
 
+  it('writes task, node, facts and context after the requirement path, in a fixed order', async () => {
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    await send.execute({
+      to: 'dev',
+      message: '请处理',
+      conversation_id: 'main',
+      requirement: REQ,
+      task_id: 'w-01',
+      node: '开发',
+      // Deliberately out of order: the head must not depend on key order.
+      facts: {
+        version: '1.16.0',
+        subsystem: 'RCS-CSA',
+        docs: ['/spec.md', '/issue.md'],
+        environment: 'M1',
+        branch: 'feature/x',
+        repo: '/repo',
+      },
+      context: '开发完成；上一步结论见 nodes/dev.md',
+    })
+    const delivered = service.calls.find((entry) => entry.method === 'send')!.args[1]
+    expect(delivered.message).toBe([
+      `需求目录：${requirementDir}`,
+      '工作项：w-01',
+      '节点：开发',
+      '事实：',
+      '- 子系统：RCS-CSA',
+      '- 版本：1.16.0',
+      '- 分支：feature/x',
+      '- 环境：M1',
+      '- 仓库：/repo',
+      '- 文档：/spec.md、/issue.md',
+      '上下文：开发完成；上一步结论见 nodes/dev.md',
+      '',
+      '请处理',
+    ].join('\n'))
+  })
+
+  it('sends a structured dispatch with no body', async () => {
+    const service = serviceStub()
+    await toolOf(build(service), 'digital_human_send').execute({
+      to: 'dev', conversation_id: 'main', requirement: REQ,
+      facts: { subsystem: 'RCS-CSA' },
+      context: '已接单；上一步结论见 nodes/intake.md',
+    })
+    const delivered = service.calls.find((entry) => entry.method === 'send')!.args[1]
+    expect(delivered.message).toBe([
+      `需求目录：${requirementDir}`,
+      '事实：',
+      '- 子系统：RCS-CSA',
+      '上下文：已接单；上一步结论见 nodes/intake.md',
+    ].join('\n'))
+  })
+
+  it('accepts facts as one line when the caller has no structure to give', async () => {
+    const service = serviceStub()
+    await toolOf(build(service), 'digital_human_send').execute({
+      to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ,
+      facts: '子系统 RCS-CSA；版本 1.16.0',
+    })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
+      .toBe(`需求目录：${requirementDir}\n事实：子系统 RCS-CSA；版本 1.16.0\n\nx`)
+  })
+
+  it('refuses a dispatch that carries steps, commands or cautions', async () => {
+    // The executor's playbook owns the procedure. A payload that writes it down
+    // would take the decision away, so the contract rejects the call instead of
+    // letting the two descriptions drift.
+    for (const [field, label] of [['steps', '步骤列表'], ['commands', '命令'], ['cautions', '注意事项']]) {
+      const service = serviceStub()
+      const send = toolOf(build(service), 'digital_human_send')
+      await expect(send.execute({
+        to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ,
+        [field]: ['do this', 'then that'],
+      })).rejects.toThrow(new RegExp(`refuses ${field}（${label}）：派单只传事实`))
+      expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
+    }
+  })
+
+  it('refuses the aliases of the forbidden dispatch fields too', async () => {
+    for (const field of ['step_list', 'instructions', 'precautions', 'command']) {
+      const service = serviceStub()
+      await expect(toolOf(build(service), 'digital_human_send').execute({
+        to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ, [field]: 'x',
+      })).rejects.toThrow(/派单只传事实，不传做法/)
+      expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
+    }
+  })
+
+  it('ignores an empty forbidden field instead of refusing the call', async () => {
+    // An empty list is no instruction at all; refusing it would make a caller
+    // rewrite the payload for no gain.
+    const service = serviceStub()
+    await toolOf(build(service), 'digital_human_send').execute({
+      to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ, steps: [],
+    })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
+      .toBe(`需求目录：${requirementDir}\n\nx`)
+  })
+
   it('waits for a reply when asked, and reports the outcome', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
