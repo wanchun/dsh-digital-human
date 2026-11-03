@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -162,6 +162,111 @@ describe('requirement state', () => {
     expect(index.split('\n').filter((line) => line.startsWith('| 需求名'))).toHaveLength(1)
     expect(index).toContain('已恢复')
     expect(index).toContain(restored.restoredAt)
+  })
+
+  it('marks the newest row when one thread was archived twice', async () => {
+    // Archive, restore, archive again: the table now holds two rows for the thread.
+    // The note belongs on the row the last archive wrote, not on the first one.
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    const first = archiveRequirement(root, dir(), fallback)
+    restoreRequirement(root, join(root, '_archive', first.dir), fallback)
+    const second = archiveRequirement(root, dir(), fallback)
+    restoreRequirement(root, join(root, '_archive', second.dir), fallback)
+    const rows = readFileSync(join(root, '_archive', 'index.md'), 'utf8')
+      .split('\n')
+      .filter((line) => line.startsWith('| 组织基线验证'))
+    expect(rows).toHaveLength(2)
+    // The first row keeps the one note its own restore added, and never a second one.
+    expect(rows[0].match(/已恢复/g)).toHaveLength(1)
+    expect(rows[1].match(/已恢复/g)).toHaveLength(1)
+  })
+
+  it('leaves the requirement live when the archive cannot write its state', async () => {
+    // The record is written before the move, so a failed write must leave the
+    // directory where it was and the index untouched: the call can be retried.
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    await mkdir(statePath(dir()), { recursive: true })
+    expect(() => archiveRequirement(root, dir(), fallback)).toThrow()
+    expect(findRequirementDir(root, 'REQ-1')).toBe(dir())
+    expect(existsSync(join(root, '_archive', '组织基线验证-20260101'))).toBe(false)
+    expect(existsSync(join(root, '_archive', 'index.md'))).toBe(false)
+  })
+
+  it('leaves the requirement archived when the restore cannot write its state', async () => {
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    const archived = archiveRequirement(root, dir(), fallback)
+    const archivedState = join(root, '_archive', archived.dir, 'state.json')
+    rmSync(archivedState)
+    await mkdir(archivedState, { recursive: true })
+    expect(() => restoreRequirement(root, join(root, '_archive', archived.dir), fallback)).toThrow()
+    expect(findArchivedRequirementDir(root, 'REQ-1')).toBe(join(root, '_archive', archived.dir))
+    expect(findRequirementDir(root, 'REQ-1')).toBeUndefined()
+  })
+
+  // A permission failure is how a real rename fails here, and root ignores it.
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0
+
+  it.skipIf(asRoot)('rolls the archive record back when the move itself fails', async () => {
+    // One archive first, so the index exists and the rollback has a row to take back.
+    const other = join(root, 'reqs', '另一个需求-20260101')
+    await mkdir(other, { recursive: true })
+    await writeFile(join(other, 'meta.json'), JSON.stringify({ thread: 'REQ-2', name: '另一个需求' }))
+    archiveRequirement(root, other, { thread: 'REQ-2', name: '另一个需求' })
+    const indexFile = join(root, '_archive', 'index.md')
+    const before = readFileSync(indexFile, 'utf8')
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    // Every write succeeds; the move cannot, because reqs/ is read-only. What the
+    // test measures is the rollback: the record must not claim a move that failed.
+    await chmod(join(root, 'reqs'), 0o500)
+    try {
+      expect(() => archiveRequirement(root, dir(), fallback)).toThrow(/EACCES/)
+    } finally {
+      await chmod(join(root, 'reqs'), 0o700)
+    }
+    expect(findRequirementDir(root, 'REQ-1')).toBe(dir())
+    expect(readState(dir(), fallback).phase).toBe('planning')
+    expect(existsSync(join(root, '_archive', '组织基线验证-20260101'))).toBe(false)
+    expect(readFileSync(indexFile, 'utf8')).toBe(before)
+  })
+
+  it.skipIf(asRoot)('rolls the restore record back when the move itself fails', async () => {
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    const archived = archiveRequirement(root, dir(), fallback)
+    await chmod(join(root, '_archive'), 0o500)
+    try {
+      expect(() => restoreRequirement(root, join(root, '_archive', archived.dir), fallback)).toThrow(/EACCES/)
+    } finally {
+      await chmod(join(root, '_archive'), 0o700)
+    }
+    expect(readArchivedRequirementDirs(root).get('REQ-1')).toEqual({ dir: '组织基线验证-20260101', name: '组织基线验证' })
+    // Still archived, so its state still says so.
+    expect(readState(join(root, '_archive', archived.dir), fallback).phase).toBe('archived')
+  })
+
+  it('notes the row of a hand-written index in its own last column', async () => {
+    // The index a person writes may order its columns differently. The row is found
+    // by the column the header names, and the note goes in that row's last cell.
+    const source = join(root, '_archive', '手工归档-20260101')
+    await mkdir(source, { recursive: true })
+    await writeFile(join(source, 'meta.json'), JSON.stringify({ thread: 'HAND-1', name: '手工归档' }))
+    const header = '| 需求名 | 线程名 | 项目 | 归档日期 | 结论 |'
+    await writeFile(join(root, '_archive', 'index.md'), [
+      '# 归档索引',
+      '',
+      header,
+      '|---|---|---|---|---|',
+      '| 手工归档 | HAND-1 | 平台 | 2026-11-03 | 通过 |',
+      '',
+    ].join('\n'))
+    restoreRequirement(root, source, { thread: 'HAND-1', name: '手工归档' })
+    const index = readFileSync(join(root, '_archive', 'index.md'), 'utf8')
+    expect(index).toContain('| 手工归档 | HAND-1 | 平台 | 2026-11-03 | 通过（已恢复 ')
+    expect(index.split('\n')[2]).toBe(header)
   })
 
   it('refuses a restore onto a directory that already exists', async () => {

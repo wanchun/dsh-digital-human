@@ -17,7 +17,7 @@ import { basename, join } from 'node:path'
 import { requireConversation } from './chat.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
-import { ARCHIVE_DIR, archiveRequirement, attachFile, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
+import { ARCHIVE_DIR, REQUIREMENTS_DIR, archiveRequirement, attachFile, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
 import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
 import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
@@ -396,8 +396,11 @@ function requirementConversation(requirement, dir, requested) {
  *   and offer to archive nothing.
  * @param options.im - whether this record has a bot to push through. Without one,
  *   `notify_bot` can only fail, so the two IM tools are left out.
+ * @param options.canArchive - whether this record may archive and restore a
+ *   requirement. Archiving is the PM's action, and a lead never performs it, so the
+ *   two tools stay out of every other record's surface.
  */
-export function buildHumanTools({ ctx, service, humanId, memory = true, im = true, memoryScope = 'record' }) {
+export function buildHumanTools({ ctx, service, humanId, memory = true, im = true, memoryScope = 'record', canArchive = true }) {
   const self = () => service.require(humanId)
   const botOf = async () => (await self()).im
   /**
@@ -1377,7 +1380,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     description:
       'Archive one finished requirement: move reqs/<dir>/ to _archive/<dir>/ keeping every file, append one row '
       + 'to _archive/index.md, and set its state phase to "archived". Nothing is deleted. A target directory that '
-      + 'already exists is refused, never overwritten.',
+      + 'already exists is refused, never overwritten. '
+      + 'Call it only when the person says the requirement is live or may be archived. The chain ends at the '
+      + 'test environment, so no node status and no judgement of your own is a reason to archive.',
     parameters: {
       requirement: {
         type: 'string',
@@ -1424,7 +1429,8 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       'Restore one archived requirement: move _archive/<dir>/ back to reqs/<dir> keeping every file, set its '
       + 'state phase to the value recorded before the archive (active when no record names one), append one '
       + 'event, and mark its row in _archive/index.md as restored. A target directory that already exists is '
-      + 'refused, never overwritten. The requirement is nameable and dispatchable again after the restore.',
+      + 'refused, never overwritten. The requirement is nameable and dispatchable again after the restore. '
+      + 'Call it when the person asks to change something based on an archived requirement.',
     parameters: {
       requirement: {
         type: 'string',
@@ -1464,7 +1470,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       }
       const restored = restoreRequirement(root, source, requirementFallback(root, source, reference))
       return {
-        detail: `Restored ${restored.dir} to ${join(root, 'reqs', restored.dir)}; its state phase and the archive index now record the restore.`,
+        detail: `Restored ${restored.dir} to ${join(root, REQUIREMENTS_DIR, restored.dir)}; its state phase and the archive index now record the restore.`,
         ...restored,
       }
     },
@@ -1510,7 +1516,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       return { dir: created.dir, path: created.path }
     },
   })
-  tools.push(requirementRead, requirementUpdate, requirementAttach, requirementArchive, requirementRestore)
+  tools.push(requirementRead, requirementUpdate, requirementAttach)
+  // Archiving is the PM's action, and a lead's link stops at the test environment,
+  // so only a record the preset row allowed gets either tool.
+  if (canArchive) tools.push(requirementArchive, requirementRestore)
 
   return tools.map(normalizeTool)
 }

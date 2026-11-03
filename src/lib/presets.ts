@@ -450,6 +450,11 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
           // A record with no bot has no outbound channel. Carrying the flag keeps the
           // tools row from offering `notify_bot`, which could only ever fail.
           im: Boolean(human.im?.botId),
+          // Archiving is the PM's action: its link goes past the test environment to
+          // what the person says about production. A lead's link stops at the test
+          // environment, so the lead never archives. The PM is the record keyed by a
+          // chat rather than by a requirement thread, and that is the signal used here.
+          canArchive: human.sessionKey === 'chat',
         },
       },
     ],

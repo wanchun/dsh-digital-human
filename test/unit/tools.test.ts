@@ -159,6 +159,27 @@ describe('the chat tools', () => {
     expect(names).toContain('digital_human_send')
   })
 
+  it('leaves the archive tools out when the record may not archive', () => {
+    // Archiving is the PM's action. A lead's link stops at the test environment, so
+    // offering it the tools would invite an archive nothing asked for.
+    const names = buildHumanTools({ ctx: ctxWith(), service: serviceStub(), humanId: 'dev', canArchive: false })
+      .map((tool) => tool.name)
+    expect(names).not.toContain('digital_human_requirement_archive')
+    expect(names).not.toContain('digital_human_requirement_restore')
+    // Reading and recording progress stay: only the archive pair is withheld.
+    expect(names).toContain('digital_human_requirement_read')
+    expect(names).toContain('digital_human_requirement_update')
+  })
+
+  it('states the one trigger an archive needs', () => {
+    // The chain ends at the test environment, so nothing in it may justify an
+    // archive by itself: only a person's word does.
+    const archive = toolOf(build(serviceStub()), 'digital_human_requirement_archive')
+    expect(archive.description).toContain('Call it only when the person says the requirement is live or may be archived')
+    const restore = toolOf(build(serviceStub()), 'digital_human_requirement_restore')
+    expect(restore.description).toContain('asks to change something based on an archived requirement')
+  })
+
   it('leaves the memory tools out when the record keeps no memory', () => {
     const names = buildHumanTools({ ctx: ctxWith(), service: serviceStub(), humanId: 'pm', memory: false })
       .map((tool) => tool.name)

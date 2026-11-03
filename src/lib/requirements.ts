@@ -11,7 +11,18 @@
  * requirement without one falls back to its thread name.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  truncateSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { basename, join } from 'node:path'
 
 /** One requirement directory, as `meta.json` describes it. */
@@ -33,6 +44,20 @@ const ARCHIVE_INDEX_HEADER = [
   '| 需求名 | 线程名 | 归档时间 | 节点数 | 最后阶段 |',
   '|---|---|---|---|---|',
 ]
+
+/**
+ * The separator between two table cells: a pipe the writer did not escape.
+ *
+ * A requirement name is free text and may contain a pipe, so a row is split on the
+ * unescaped separators only; otherwise one such name would shift every cell after
+ * it and the row could never be found again.
+ */
+const TABLE_CELL = /(?<!\\)\|/
+
+/** One index cell: a pipe inside a value would end the cell early. */
+function cell(value: string): string {
+  return String(value ?? '').replace(/\|/g, '\\|')
+}
 
 /**
  * Read every `reqs/<dir>/meta.json` under one requirement root.
@@ -260,9 +285,13 @@ export interface ArchivedRequirement {
  * Move one requirement directory into the archive root and record the move.
  *
  * The move keeps every file: a requirement holds the evidence of its own work, so
- * archiving is a change of location, never a cleanup. The state is written in the
- * new location with phase `archived`, and one row is appended to
- * `_archive/index.md`, which is created with its header on the first archive.
+ * archiving is a change of location, never a cleanup. The state is written with
+ * phase `archived`, and one row is appended to `_archive/index.md`, which is
+ * created with its header on the first archive.
+ *
+ * Every write happens before the move. A write that fails therefore leaves the
+ * requirement where it was, unchanged and retryable; a directory that moved before
+ * its record was written could only be put right by hand.
  *
  * @param root - the requirement root, the parent of `reqs/`.
  * @param sourcePath - the requirement directory to move.
@@ -283,23 +312,65 @@ export function archiveRequirement(
       `archive target already exists: ${target}. Nothing was moved. Rename or remove the archived copy first.`,
     )
   }
-  // Read the state before the move: the row records the phase the requirement
-  // ended in, and the archived state keeps every node it reached.
-  const state = readState(sourcePath, names)
-  const lastPhase = state.phase
+  // Read the state before anything is written: the row records the phase the
+  // requirement ended in, and the snapshot is what a failed move is rolled back to.
+  const before = readState(sourcePath, names)
+  const lastPhase = before.phase
   const archivedAt = new Date().toISOString()
   mkdirSync(archiveRoot, { recursive: true })
-  renameSync(sourcePath, target)
-  state.phase = 'archived'
   // The phase before the move is kept in the event: a restore reads it back and
   // has no other record of what the requirement was doing.
-  state.events = [...state.events, `${archivedAt} archived to ${target} (phase before archive: ${lastPhase})`]
-  writeState(target, state)
+  const state: RequirementState = {
+    ...before,
+    phase: 'archived',
+    events: [...before.events, `${archivedAt} archived to ${target} (phase before archive: ${lastPhase})`],
+  }
+  // The state file moves with the directory, so it is written in place.
+  writeState(sourcePath, state)
   const index = join(archiveRoot, 'index.md')
-  const header = existsSync(index) ? '' : ARCHIVE_INDEX_HEADER.join('\n') + '\n'
-  const row = `| ${state.name} | ${state.thread} | ${archivedAt} | ${Object.keys(state.nodes).length} | ${lastPhase} |`
-  appendFileSync(index, header + row + '\n', 'utf8')
+  const rowAt = sizeOrNone(index)
+  appendArchiveRow(index, state, archivedAt, lastPhase)
+  try {
+    renameSync(sourcePath, target)
+  } catch (error) {
+    // Nothing moved, so nothing may say it did: the row and the state go back.
+    dropArchiveRow(index, rowAt)
+    writeState(sourcePath, before)
+    throw error
+  }
   return { dir, archivedAt, index }
+}
+
+/** Byte size of one file, or -1 when it does not exist yet. */
+function sizeOrNone(path: string): number {
+  try {
+    return statSync(path).size
+  } catch {
+    return -1
+  }
+}
+
+/** Append one archive row, writing the header first when the index is new. */
+function appendArchiveRow(
+  index: string,
+  state: RequirementState,
+  archivedAt: string,
+  lastPhase: string,
+): void {
+  const header = existsSync(index) ? '' : ARCHIVE_INDEX_HEADER.join('\n') + '\n'
+  const row = `| ${cell(state.name)} | ${cell(state.thread)} | ${archivedAt} | ${Object.keys(state.nodes).length} | ${cell(lastPhase)} |`
+  appendFileSync(index, header + row + '\n', 'utf8')
+}
+
+/** Put the index back to the size it had before one row, or remove the file it created. */
+function dropArchiveRow(index: string, size: number): void {
+  try {
+    if (size < 0) unlinkSync(index)
+    else truncateSync(index, size)
+  } catch {
+    // The move failed and the requirement is live. A stray row is the lesser fault,
+    // and the next archive appends its own row to the same table.
+  }
 }
 
 /** One restored requirement: where it went and when. */
@@ -337,15 +408,28 @@ export function restoreRequirement(
       `restore target already exists: ${target}. Nothing was moved. Rename or remove the live copy first.`,
     )
   }
-  const state = readState(sourcePath, names)
+  // The phase an archive recorded is never `archived` itself: an archive event
+  // names the phase the requirement was in before the move.
+  const before = readState(sourcePath, names)
   const archivedIndex = join(root, ARCHIVE_DIR, 'index.md')
-  const phase = phaseBeforeArchive(state) || 'active'
+  const phase = phaseBeforeArchive(before) || 'active'
   const restoredAt = new Date().toISOString()
+  const state: RequirementState = {
+    ...before,
+    phase,
+    events: [...before.events, `${restoredAt} restored to ${target}`],
+  }
   mkdirSync(join(root, REQUIREMENTS_DIR), { recursive: true })
-  renameSync(sourcePath, target)
-  state.phase = phase === 'archived' ? 'active' : phase
-  state.events = [...state.events, `${restoredAt} restored to ${target}`]
-  writeState(target, state)
+  // The state is written before the move, like the archive: a failed write leaves
+  // the requirement archived and retryable, instead of live while still saying
+  // "archived".
+  writeState(sourcePath, state)
+  try {
+    renameSync(sourcePath, target)
+  } catch (error) {
+    writeState(sourcePath, before)
+    throw error
+  }
   markIndexRestored(archivedIndex, state.thread, restoredAt)
   return { dir, restoredAt }
 }
@@ -362,9 +446,11 @@ function phaseBeforeArchive(state: RequirementState): string {
 /**
  * Mark one archived row as restored, in place.
  *
- * The note goes inside the row's last cell, so the table keeps its five columns and
- * no other line is rewritten. A row that cannot be found is left alone: the move
- * already happened and the state already records it.
+ * The note goes inside the row's last cell, so the table keeps its columns and no
+ * other line is rewritten. The newest row for the thread is the one marked: a
+ * requirement can be archived, restored and archived again, and only the row of the
+ * last archive describes the archive this restore reverses. A row that cannot be
+ * found is left alone: the move already happened and the state already records it.
  */
 function markIndexRestored(index: string, thread: string, restoredAt: string): void {
   let body = ''
@@ -374,11 +460,21 @@ function markIndexRestored(index: string, thread: string, restoredAt: string): v
     return
   }
   const lines = body.split('\n')
-  for (let position = 0; position < lines.length; position += 1) {
-    const cells = lines[position].split('|')
-    if (cells.length !== 7) continue
-    if (cells[2].trim() !== thread) continue
-    cells[5] = `${cells[5]}（已恢复 ${restoredAt}）`
+  // The thread column is read from the header, because an index a person wrote may
+  // order its columns differently. A table without that header keeps the column this
+  // module writes.
+  const named = (values: string[]) => values.findIndex((value) => value.trim() === '线程名')
+  const header = lines.find((line) => named(line.split(TABLE_CELL)) >= 0)
+  const column = header === undefined ? 2 : named(header.split(TABLE_CELL))
+  for (let position = lines.length - 1; position >= 0; position -= 1) {
+    if (lines[position] === header) continue
+    const cells = lines[position].split(TABLE_CELL)
+    // The last cell is the empty tail the closing pipe leaves; the note goes in the
+    // cell before it, which is the row's last column.
+    if (cells.length < 4) continue
+    if ((cells[column] ?? '').trim() !== thread) continue
+    const last = cells.length - 2
+    cells[last] = `${cells[last].replace(/\s+$/, '')}（已恢复 ${restoredAt}） `
     lines[position] = cells.join('|')
     writeFileSync(index, lines.join('\n'), 'utf8')
     return

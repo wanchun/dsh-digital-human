@@ -149,7 +149,12 @@ export function apply(ctx: Ctx, config: Config = {}): void {
   // Same reason again: choosing a file per conversation needs the record's scope,
   // and `apply` cannot await the registry to read it.
   const memoryScope = config.memoryScope === 'session' ? 'session' : 'record'
-  for (const tool of buildHumanTools({ ctx, service: ctx.digitalHumans, humanId: human, memory, im, memoryScope })) {
+  // Same reason again: which records may archive a requirement is decided from the
+  // record, and this row cannot await the registry to read it.
+  const canArchive = config.canArchive !== false
+  for (const tool of buildHumanTools({
+    ctx, service: ctx.digitalHumans, humanId: human, memory, im, memoryScope, canArchive,
+  })) {
     ctx.tools.register(tool)
   }
   whitelistSkills(ctx, human, config)

@@ -330,6 +330,17 @@ describe('buildPresetDefinition', () => {
     expect(off.plugins.at(-1)?.config).toMatchObject({ human: 'pm', memory: false })
   })
 
+  it('lets only a chat-keyed record archive, because archiving is the PM action', () => {
+    const tools = (patch: Record<string, unknown>) => buildPresetDefinition(
+      record(patch), { store, toolsPluginName: '@local/tools', order: 1 },
+    ).plugins.at(-1)?.config
+    expect(tools({ sessionKey: 'chat' })).toMatchObject({ canArchive: true })
+    expect(tools({ sessionKey: 'requirement' })).toMatchObject({ canArchive: false })
+    // A record that names nothing is an execution role: the normalizer keys it to a
+    // requirement thread, so it never archives.
+    expect(tools({})).toMatchObject({ canArchive: false })
+  })
+
   it('resolves the prose against the config', () => {
     const human = record({ systemPrompt: '你是「{{bot}}」。', config: { bot: '研发PM助手' } })
     const config = buildPresetDefinition(human, { store, toolsPluginName: '@local/tools', order: 1 }).plugins[0].config

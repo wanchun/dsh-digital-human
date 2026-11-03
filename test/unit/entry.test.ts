@@ -540,6 +540,56 @@ describe('the management route', () => {
     ])
   })
 
+  it('keeps an archived requirement off the tree by thread, however its Sessions were filed', async () => {
+    // The reported shape: one thread archived, its Sessions filed by thread and by
+    // directory. No row may survive, and no field may carry the thread name alone.
+    const THREAD = 'cas-bind-verify-v0.1.0-20261103'
+    const DIR = '绑定验证-20261103'
+    const store = new HumanStore(home)
+    for (const id of ['lead-assistant', 'dev-assistant']) {
+      await store.upsert({ id, name: id, enabled: true, sessionKey: 'requirement' } as any)
+    }
+    await writeMailbox('lead-assistant', 'session-lead-arch', THREAD)
+    await writeMailbox('dev-assistant', 'session-dev-arch', DIR)
+    const archived = join(home, 'workspace', '_archive', DIR)
+    await mkdir(archived, { recursive: true })
+    await writeFile(join(archived, 'meta.json'), JSON.stringify({ thread: THREAD, name: '绑定验证' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    expect(tree).toHaveLength(2)
+    for (const role of tree) expect(role.requirements).toEqual([])
+    expect(JSON.stringify(tree)).not.toContain(THREAD)
+  })
+
+  it('shows a requirement created again under an archived thread', async () => {
+    // The old copy is archived and a new directory names the same thread. The live
+    // directory is the requirement now, so the archive must not hide it.
+    const THREAD = 'REQ-REBORN'
+    const OLD = '旧需求-20261101'
+    const NOW = '新需求-20261102'
+    const store = new HumanStore(home)
+    await store.upsert({ id: 'dev-assistant', name: '开发', enabled: true, order: 20, sessionKey: 'requirement' } as any)
+    await writeMailbox('dev-assistant', 'session-dev-reborn', THREAD)
+    await mkdir(join(home, 'workspace', '_archive', OLD), { recursive: true })
+    await writeFile(join(home, 'workspace', '_archive', OLD, 'meta.json'), JSON.stringify({ thread: THREAD, name: '旧需求' }))
+    await mkdir(join(home, 'workspace', 'reqs', NOW), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', NOW, 'meta.json'), JSON.stringify({ thread: THREAD, name: '新需求' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    expect(answer.result.value.humans[0].requirements).toEqual([
+      { conversation: THREAD, dir: NOW, name: '新需求', sessions: [{ sessionId: 'session-dev-reborn' }] },
+    ])
+  })
+
   it('serves the requirement tree from the mailbox alone', async () => {
     // No sessions.json is written here at all: one delivery path creates the
     // Session, writes the edge and the mailbox, and never writes the index. The
@@ -1164,6 +1214,23 @@ describe('the preset-scoped tools row', () => {
     expect(platform.contexts[0].text()).toContain('# now')
   })
 
+
+  it('registers the archive tools only for a record the preset allowed them', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    // A lead: the switch travels on the preset row, because apply is synchronous.
+    applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: true, canArchive: false })
+    expect(platform.tools.has('digital_human_requirement_archive')).toBe(false)
+    expect(platform.tools.has('digital_human_requirement_restore')).toBe(false)
+    expect(platform.tools.has('digital_human_requirement_read')).toBe(true)
+    const pm = makeCtx()
+    await applyPlatform(pm.ctx, { home, humans: SEED_HUMANS })
+    pm.ctx.digitalHumans = pm.provided.get('digitalHumans')
+    applyToolsEntry(pm.ctx, { human: 'pm-assistant', memory: true, canArchive: true })
+    expect(pm.tools.has('digital_human_requirement_archive')).toBe(true)
+    expect(pm.tools.has('digital_human_requirement_restore')).toBe(true)
+  })
 
   it('injects the conversation memory and the shared notes for a session-scoped record', async () => {
     const platform = makeCtx()

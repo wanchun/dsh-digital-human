@@ -920,22 +920,27 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       // The requirement root is the directory the digital humans share: `reqs/`
       // sits in it, and each directory's `meta.json` names its thread.
       const requirementRoot = defaultWorkspace?.path ?? defaultWorkspacePath(home)
-      const requirementDirs = readRequirementDirs(requirementRoot)
+      const liveDirs = readRequirementDirs(requirementRoot)
       // An archived requirement moved out of `reqs/`, so it is no longer a node of
-      // the live tree. Its thread and its directory still name its old Sessions, and
-      // those rows must drop until a restore brings the requirement back.
+      // the live tree. Its `meta.json` moved with it, and the name it holds is the
+      // only thing that still labels its old Sessions: read both roots, or the row
+      // falls back to the thread name with no way to tell it is archived.
       const archivedDirs = readArchivedRequirementDirs(requirementRoot)
-      const archivedThreads = new Set(archivedDirs.keys())
-      const archivedFolders = new Set([...archivedDirs.values()].map((meta) => meta.dir))
-      const isArchived = (conversation: string) =>
-        archivedThreads.has(conversation) || archivedFolders.has(conversation)
+      // The live root wins a thread named in both: a requirement created again after
+      // its old copy was archived is a new requirement, and the archive must not
+      // hide it.
+      const metaByThread = new Map([...archivedDirs, ...liveDirs])
       // A Session is filed by a conversation name, and the requirement it belongs to
       // may be named by the thread or by the directory. Both resolve to the thread,
       // so one requirement is one node even when its Sessions were filed two ways.
-      const threadByDir = new Map<string, string>()
-      for (const [thread, meta] of requirementDirs) threadByDir.set(meta.dir, thread)
-      const requirementOf = (conversation: string) =>
-        requirementDirs.has(conversation) ? conversation : threadByDir.get(conversation) ?? ''
+      const threadByLabel = new Map<string, string>()
+      for (const [thread, meta] of [...archivedDirs, ...liveDirs]) threadByLabel.set(meta.dir, thread)
+      const requirementOf = (label: string) =>
+        label ? (metaByThread.has(label) ? label : threadByLabel.get(label) ?? '') : ''
+      // Filtering reads the thread alone, never the label a Session was filed under:
+      // a directory name would otherwise answer for a requirement it no longer names.
+      const isArchived = (thread: string) =>
+        Boolean(thread) && !liveDirs.has(thread) && archivedDirs.has(thread)
       const tree: Array<{
         humanId: string
         name: string
@@ -968,13 +973,14 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           // thread, and the view decides whether that is a chat or not a requirement.
           // A named one is grouped by the requirement it belongs to, not by the label
           // it was filed under: the thread and the directory are the same requirement.
-          const conversation = address.conversationId ?? ''
+          const label = address.conversationId ?? ''
+          // The thread is the requirement's key; a directory name resolves to it here.
+          const conversation = requirementOf(label) || label
           // The requirement is archived, so this row is not part of the live tree.
-          if (conversation && isArchived(conversation)) continue
-          const key = requirementOf(conversation) || conversation
-          const bucket = byRequirement.get(key) ?? []
+          if (isArchived(conversation)) continue
+          const bucket = byRequirement.get(conversation) ?? []
           bucket.push({ sessionId: address.sessionId })
-          byRequirement.set(key, bucket)
+          byRequirement.set(conversation, bucket)
         }
         tree.push({
           humanId: human.id,
@@ -988,7 +994,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           // A requirement without meta.json keeps its thread name for both fields,
           // which is exactly the legacy `reqs/<thread>/` layout.
           requirements: [...byRequirement].map(([conversation, sessions]) => {
-            const meta = requirementDirs.get(conversation)
+            const meta = metaByThread.get(conversation)
             return { conversation, dir: meta?.dir ?? conversation, name: meta?.name ?? conversation, sessions }
           }),
         })
