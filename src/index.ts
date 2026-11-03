@@ -732,7 +732,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
      */
     async send(
       idOrName: string,
-      { conversationId, sessionId, message, from, fromSession, mode, taskId, note, deadline }: {
+      { conversationId, sessionId, message, from, fromSession, mode, taskId, note, deadline, deliveryMode }: {
         conversationId?: string
         sessionId?: string
         message?: string
@@ -741,6 +741,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         mode?: 'new' | 'amend' | 'cancel'
         taskId?: string
         note?: string
+        /** How the peer reads the message: injected into the running turn, or after it. */
+        deliveryMode?: 'steer' | 'queue'
         /** Explicit due time. Omitted means the record's escalation window. */
         deadline?: string
       },
@@ -758,6 +760,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         // The caller's own Session rides along, so the answer can come back to it.
         fromSession,
         presetId: presetIdOf(human.id),
+        ...(deliveryMode ? { deliveryMode } : {}),
       }
       // A person or a record talking to itself is a message, not a work item: the
       // ledger tracks work handed over between digital humans.
@@ -809,9 +812,12 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           : deadlineIn(new Date(), deadlineMinutesOf(human, deadlineMinutes)),
       })
       try {
-        // A queued task must not steer the running turn: it is the next turn, not
-        // news for this one.
-        const delivered = await chat.deliver(human, { ...delivery, deliveryMode: busy ? 'queue' : 'steer' })
+        // A caller that named a mode gets it. Otherwise a queued task must not steer
+        // the running turn: it is the next turn, not news for this one.
+        const delivered = await chat.deliver(human, {
+          ...delivery,
+          deliveryMode: deliveryMode ?? (busy ? 'queue' : 'steer'),
+        })
         return { ...delivered, task: { id: assigned.id, state: assigned.state, intent, queued: busy } }
       } catch (error) {
         // The row is already on the ledger. Say it never arrived instead of leaving

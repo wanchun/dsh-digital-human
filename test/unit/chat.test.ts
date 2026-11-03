@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -266,15 +266,21 @@ describe('ensureSession', () => {
     expect(target).toMatchObject({ sessionId: 'session-pm-1', via: 'thread' })
   })
 
-  it('falls back to the legacy name index when no edge exists', async () => {
+  it('falls back to the name index of the record that answers when no edge exists', async () => {
+    // The thread's legacy name is filed in the record that answers in it. Reading the
+    // caller's own index handed back the caller's Session as the peer's address — a
+    // real dispatch then opened the peer's Session under that wrong id.
     const { chat } = chatWith(controllerStub())
-    const opened = await chat.ensureSession(human({ id: 'dev' }), 'REQ-1', 'dh-dev')
+    const opened = await chat.ensureSession(human({ id: 'pm' }), 'REQ-1', 'dh-pm')
     const target = await chat.threadTarget('dev', {
       selfSession: 'session-dev-9',
       peer: 'pm',
       conversationId: 'REQ-1',
     })
     expect(target).toMatchObject({ sessionId: opened, via: 'legacy' })
+    // The caller's own entry for the same thread is not the peer's address.
+    await chat.ensureSession(human({ id: 'dev' }), 'REQ-1', 'dh-dev')
+    expect(await chat.threadTarget('dev', { peer: 'nobody', conversationId: 'REQ-1' })).toBeNull()
   })
 
   it('ignores an incomplete edge and survives a malformed line', async () => {
@@ -460,6 +466,18 @@ describe('session modes', () => {
     expect(controller.prompted.every((request: any) => request.mode === 'queue')).toBe(true)
   })
 
+  it('queues in single mode even when the delivery asks to steer', async () => {
+    // A shared-session record's tasks are work items, so the transport's own rule
+    // wins: an explicit steer must not interrupt the turn they queue behind.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const qa = human({ id: 'qa', name: 'QA', systemPrompt: 'x', sessionMode: 'single' })
+    await chat.deliver(qa, {
+      conversationId: 'task-a', message: 'one', from: 'pm', deliveryMode: 'steer',
+    })
+    expect(controller.prompted.map((request: any) => request.mode)).toEqual(['queue'])
+  })
+
   it('keeps one Session per thread and steers in thread mode', async () => {
     const controller = controllerStub()
     const { chat } = chatWith(controller)
@@ -641,6 +659,68 @@ describe('addressing a Session directly', () => {
     const delivered = await chat.deliver(human(), { sessionId: 'session-fresh-1', message: 'x' })
     expect(delivered.sessionId).toBe('session-fresh-1')
     expect(controller.sessions.map((entry) => entry.sessionId)).toEqual(['session-fresh-1'])
+  })
+
+  it('files a Session reached by id under its thread, like one opened by name', async () => {
+    // The missed half of the reported bug: a delivery addressed to a Session id
+    // created the Session and wrote the mailbox and the edge, but never the index.
+    // Only the role that was reached by conversation name kept one.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const delivered = await chat.deliver(human({ id: 'dev' }), {
+      sessionId: 'session-dev-1', conversationId: 'REQ-1', message: 'work', from: 'lead',
+    })
+    const index = JSON.parse(readFileSync(store.sessionIndexPath('dev'), 'utf8'))
+    expect(index).toEqual({ 'REQ-1': delivered.sessionId })
+    expect(await chat.lookup('dev', 'REQ-1')).toBe(delivered.sessionId)
+  })
+
+  it('does not rewrite the line when the same Session is addressed again', async () => {
+    // Reuse must file nothing new: the index already says what the second delivery
+    // would write, and rewriting it is how a concurrent writer loses another entry.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const first = await chat.deliver(human({ id: 'dev' }), {
+      sessionId: 'session-dev-1', conversationId: 'REQ-1', message: 'one', from: 'lead',
+    })
+    const path = store.sessionIndexPath('dev')
+    const written = readFileSync(path, 'utf8')
+    const again = await chat.deliver(human({ id: 'dev' }), {
+      sessionId: first.sessionId, conversationId: 'REQ-1', message: 'two', from: 'lead',
+    })
+    expect(again.sessionId).toBe(first.sessionId)
+    expect(readFileSync(path, 'utf8')).toBe(written)
+    expect(JSON.parse(written)).toEqual({ 'REQ-1': first.sessionId })
+    // A later delivery by name reuses the same Session instead of opening a second.
+    expect(await chat.lookup('dev', 'REQ-1')).toBe(first.sessionId)
+  })
+
+  it('reports a thread another Session owns instead of rewriting it', async () => {
+    // A name belongs to the Session that opened the thread. The delivery still
+    // arrives, but the index is not moved and the caller is told why.
+    const controller = controllerStub()
+    const { chat, log } = chatWith(controller)
+    const opened = await chat.ensureSession(human(), 'REQ-9', 'dh-pm')
+    const delivered = await chat.deliver(human(), {
+      sessionId: 'session-elsewhere', conversationId: 'REQ-9', message: 'x',
+    })
+    expect(delivered.sessionId).toBe('session-elsewhere')
+    expect(delivered.notice).toContain('is filed under')
+    expect(await chat.lookup('pm', 'REQ-9')).toBe(opened)
+    expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('is filed under'))).toBe(true)
+  })
+
+  it('fails the delivery when the index cannot be written', async () => {
+    // A write that fails must not look like success: the record would carry a
+    // Session nothing can name again, which is the failure this path exists to stop.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await store.ensureDir(store.dir('dev'))
+    // A directory where the index file belongs: the rename cannot replace it.
+    mkdirSync(store.sessionIndexPath('dev'), { recursive: true })
+    await expect(chat.deliver(human({ id: 'dev' }), {
+      sessionId: 'session-dev-1', conversationId: 'REQ-1', message: 'x',
+    })).rejects.toThrow()
   })
 
   it('reports and replaces a Session it cannot adopt', async () => {

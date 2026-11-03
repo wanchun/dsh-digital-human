@@ -292,6 +292,84 @@ describe('the chat service', () => {
     expect(second.sessionId).not.toBe(first.sessionId)
   })
 
+  it('files the executing role under the requirement when a lead dispatches to it', async () => {
+    // The reported shape: the person's dispatch reached the lead by name, so its
+    // index was written; the lead's dispatch to the developer did not write one, and
+    // that role kept only a mailbox and an edge.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const service = platform.provided.get('digitalHumans')
+    for (const record of [
+      { id: 'pm-assistant', name: '研发PM助手', memory: false },
+      { id: 'lead-assistant', name: '负责人', memory: false, peers: ['dev-assistant'] },
+      { id: 'dev-assistant', name: '开发', memory: false },
+    ]) await service.upsert(record)
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+    const indexOf = async (id: string) => JSON.parse(await readFile(join(home, 'humans', id, 'sessions.json'), 'utf8'))
+
+    const toLead = await service.send('lead-assistant', {
+      message: '派单', from: 'pm-assistant', fromSession: 'session-pm-1', conversationId: THREAD,
+    })
+    expect(await indexOf('lead-assistant')).toEqual({ [THREAD]: toLead.sessionId })
+
+    // The lead dispatches through the tool it actually calls, with its own Session.
+    const send = buildHumanTools({
+      ctx: platform.ctx, service, humanId: 'lead-assistant', memory: false, im: false,
+    }).find((tool) => tool.name === 'digital_human_send')!
+    const exec = { agent: { session: { header: { id: toLead.sessionId } } } }
+    const receipt = await send.execute({ to: 'dev-assistant', requirement: THREAD, message: '开发节点' }, exec)
+    // The developer's Session is filed under the requirement, with its own id.
+    expect(await indexOf('dev-assistant')).toEqual({ [THREAD]: receipt.sessionId })
+    expect(receipt.sessionId).not.toBe(toLead.sessionId)
+
+    // A second dispatch reuses that Session and leaves the index exactly as it was.
+    const written = await readFile(join(home, 'humans', 'dev-assistant', 'sessions.json'), 'utf8')
+    const again = await send.execute({ to: 'dev-assistant', requirement: THREAD, message: '补充' }, exec)
+    expect(again.sessionId).toBe(receipt.sessionId)
+    expect(await readFile(join(home, 'humans', 'dev-assistant', 'sessions.json'), 'utf8')).toBe(written)
+  })
+
+  it('reuses the Session the executing role already has for the thread', async () => {
+    // The second half of the same failure: the lead's own index entry for the thread
+    // used to be read as the developer's address. Adoption refused it, the Host
+    // minted a new Session, and one thread ran in two Sessions with two contexts.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const service = platform.provided.get('digitalHumans')
+    for (const record of [
+      { id: 'pm-assistant', name: '研发PM助手', memory: false },
+      { id: 'lead-assistant', name: '负责人', memory: false, peers: ['dev-assistant'] },
+      { id: 'dev-assistant', name: '开发', memory: false },
+    ]) await service.upsert(record)
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+
+    // The developer is reached by name first, so its Session exists and is filed.
+    const toDev = await service.send('dev-assistant', {
+      message: '准备', from: 'pm-assistant', fromSession: 'session-pm-1', conversationId: THREAD,
+    })
+    const toLead = await service.send('lead-assistant', {
+      message: '派单', from: 'pm-assistant', fromSession: 'session-pm-1', conversationId: THREAD,
+    })
+    const send = buildHumanTools({
+      ctx: platform.ctx, service, humanId: 'lead-assistant', memory: false, im: false,
+    }).find((tool) => tool.name === 'digital_human_send')!
+    const receipt = await send.execute({
+      to: 'dev-assistant', requirement: THREAD, message: '开发节点',
+    }, { agent: { session: { header: { id: toLead.sessionId } } } })
+    expect(receipt.sessionId).toBe(toDev.sessionId)
+    // One Session for the thread, not a second minted from the lead's own id.
+    const devSessions = platform.sessions.filter((entry) => entry.agentPreset === presetIdOf('dev-assistant'))
+    expect(devSessions).toHaveLength(1)
+    expect(JSON.parse(await readFile(join(home, 'humans', 'dev-assistant', 'sessions.json'), 'utf8')))
+      .toEqual({ [THREAD]: toDev.sessionId })
+  })
+
   it('files a session under the Workspace that owns its directory', async () => {
     const platform = makeCtx({
       workspaceController: {
@@ -1655,6 +1733,50 @@ describe('the work-item ledger', () => {
     await expect(service.tasks('off')).resolves.toHaveLength(0)
   })
 })
+describe('the delivery mode of a send', () => {
+  /** The tools one record holds, against the real service. */
+  const toolsOf = (platform: any, humanId: string) => buildHumanTools({
+    ctx: platform.ctx, service: platform.provided.get('digitalHumans'), humanId, memory: false, im: false,
+  })
+  const toolNamed = (tools: any[], name: string) => tools.find((tool) => tool.name === name)!
+
+  it('steers a busy peer by default and queues it only when asked', async () => {
+    // The peer is mid-turn. Default delivery is steer, so the dispatch reaches that
+    // turn at its next step; "queue" is the explicit choice to wait for its end.
+    for (const [delivery, want] of [[undefined, 'steer'], ['queue', 'queue']] as const) {
+      const platform = makeCtx()
+      await applyPlatform(platform.ctx, { home: join(home, String(want)), humans: SEED_HUMANS })
+      const service = platform.provided.get('digitalHumans')
+      await service.send('dev-assistant', {
+        message: 'work', from: 'pm-assistant', conversationId: 'REQ-1',
+      })
+      const tools = toolsOf(platform, 'pm-assistant')
+      await toolNamed(tools, 'digital_human_requirement_create')
+        .execute({ thread: 'REQ-1', name: 'Delivery probe' })
+      await toolNamed(tools, 'digital_human_send').execute({
+        to: 'dev-assistant', message: 'news', requirement: 'REQ-1', ...(delivery ? { delivery } : {}),
+      })
+      expect(platform.prompts.at(-1)!.mode).toBe(want)
+    }
+  })
+
+  it('queues in a shared-session record even when asked to steer', async () => {
+    // A shared-session record queues every task behind its standing turn. The
+    // tool's parameter must not change that.
+    const platform = makeCtx()
+    const pm = { id: 'pm-assistant', name: 'PM', enabled: true, systemPrompt: '', memory: false, peers: ['qa'] }
+    const qa = { id: 'qa', name: 'QA', enabled: true, systemPrompt: '', memory: false, sessionMode: 'single' }
+    await applyPlatform(platform.ctx, { home: join(home, 'single-session'), humans: [pm, qa] })
+    const tools = toolsOf(platform, 'pm-assistant')
+    await toolNamed(tools, 'digital_human_requirement_create')
+      .execute({ thread: 'REQ-1', name: 'Shared probe' })
+    await toolNamed(tools, 'digital_human_send').execute({
+      to: 'qa', message: 'news', requirement: 'REQ-1', delivery: 'steer',
+    })
+    expect(platform.prompts.at(-1)!.mode).toBe('queue')
+  })
+})
+
 describe('escalation to a human', () => {
   /** Let the fire-and-forget ledger writes settle. */
   const tick = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms))

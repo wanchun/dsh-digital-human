@@ -451,8 +451,8 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       + 'requirement\'s Sessions file under one requirement node. Omit the address to reply in the '
       + 'thread this Session already shares with the peer — the transport sends it back to the Session '
       + 'that asked. Pass session_id to choose a Session. '
-      + 'Every send is also a work item: a busy peer queues it, and a reply to its running turn '
-      + 'amends the item already open. The detail says which it became.',
+      + 'Every send is also a work item: a reply to its running turn amends the item already open, '
+      + 'and a new dispatch gets its own. The detail says which it became.',
     parameters: {
       to: {
         required: true,
@@ -498,6 +498,14 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           'What this send means for the work item. "new" assigns a new item even when the peer is busy; '
           + '"amend" appends to the one open item of the conversation; "cancel" retires it and delivers nothing. '
           + 'Omit it to let the transport decide: busy queues a new item, a reply to the running turn amends it.',
+      },
+      delivery: {
+        type: 'string',
+        enum: ['steer', 'queue'],
+        description: 'When the peer reads this message. "steer" (default) injects it at the next step '
+          + 'boundary of the running turn; it does not interrupt a long tool call already executing. '
+          + '"queue" puts it after that turn. When the task direction is wrong, stop the peer with '
+          + 'digital_human_stop first, then send a new dispatch: steer cannot break into a long tool call.',
       },
       task_id: {
         type: 'string',
@@ -626,6 +634,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       // Session that asked for the work rather than to a shared thread name.
       const fromSession = callerSession(exec)
       const mode = args.mode === 'new' || args.mode === 'amend' || args.mode === 'cancel' ? args.mode : undefined
+      // Steer is the default: a peer's news reaches the turn in progress at its next
+      // step, not after it. "queue" is the explicit choice to wait for that turn.
+      const deliveryMode = args.delivery === 'queue' ? 'queue' : 'steer'
       const note = typeof args.note === 'string' && args.note.trim() ? args.note.trim() : undefined
       // Resolve every name and every address before delivering anything: one unknown
       // target must not leave half the recipients holding work items and the others
@@ -653,6 +664,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         typeof args.conversation_id === 'string' ? args.conversation_id : null,
         typeof args.session_id === 'string' ? args.session_id : null,
         mode ?? null,
+        deliveryMode,
         note ?? null,
         typeof args.task_id === 'string' ? args.task_id : null,
         typeof args.deadline === 'string' ? args.deadline : null,
@@ -677,6 +689,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           from: humanId,
           fromSession,
           ...(mode ? { mode } : {}),
+          deliveryMode,
           ...(typeof args.task_id === 'string' && args.task_id.trim() ? { taskId: args.task_id.trim() } : {}),
           ...(note ? { note } : {}),
           ...(typeof args.deadline === 'string' && args.deadline.trim() ? { deadline: args.deadline.trim() } : {}),
@@ -735,7 +748,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
             ? `Delivered to ${peer.name} (${peer.id}) and its turn finished. Read the reply with digital_human_messages.`
             : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`)
             + taskLine
-            + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`,
+            + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`
+            // The transport files every Session under its thread. When it could not,
+            // the receipt says so: a silent miss is what left a role's index empty.
+            + (delivered.notice ? ` Not filed in the conversation index: ${delivered.notice}.` : ''),
           to: peer.id,
           conversationId: delivered.conversationId,
           sessionId: delivered.sessionId,

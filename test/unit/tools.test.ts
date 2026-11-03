@@ -202,6 +202,26 @@ describe('the chat tools', () => {
     expect(byName.to).toBe('dev')
   })
 
+  it('steers by default and queues only when asked', async () => {
+    // Steer is the default: the peer's news reaches the turn in progress at its next
+    // step. "queue" is the explicit choice to wait for that turn to end.
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    await send.execute({ to: 'dev', message: 'a', requirement: REQ })
+    await send.execute({ to: 'dev', message: 'b', requirement: REQ, delivery: 'queue' })
+    await send.execute({ to: 'dev', message: 'c', requirement: REQ, delivery: 'steer' })
+    expect(service.calls.filter((entry) => entry.method === 'send')
+      .map((entry) => entry.args[1].deliveryMode)).toEqual(['steer', 'queue', 'steer'])
+  })
+
+  it('says steer cannot break into a long tool call', async () => {
+    // The model has to know the limit: a wrong direction needs a stop, not a steer.
+    const send = toolOf(build(serviceStub()), 'digital_human_send')
+    const description = send.parameters.properties.delivery.description
+    expect(description).toContain('does not interrupt a long tool call')
+    expect(description).toContain('digital_human_stop first')
+  })
+
   it('refuses a send that names no requirement, delivering nothing', async () => {
     // A peer that gets no requirement directory would file the work wherever its
     // workspace happens to be; the refusal is the contract, not a fallback.

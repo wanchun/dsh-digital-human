@@ -246,7 +246,22 @@ export class HumanChat {
     return next
   }
 
-  async #remember(humanId, conversationId, sessionId) {
+  /**
+   * File one Session under the conversation it serves.
+   *
+   * The only place the name index is written. A Session opened by a conversation
+   * name and a Session reached by its id both come through here, so the index cannot
+   * drift from the traffic: a delivery that skipped it left the record's Session
+   * unnameable, and only the mailbox still knew the thread.
+   *
+   * @param takeOver - whether this delivery owns the thread and may move its name to
+   *   this Session. `false` only fills a gap: a thread another Session already holds
+   *   keeps it, because a message that merely landed in a Session is not its owner.
+   * @returns the Session, and the reason when nothing was written.
+   * @throws when the write itself fails. A delivery must not report success while the
+   *   index does not carry it; that silence is how a role lost its Session.
+   */
+  async #remember(humanId, conversationId, sessionId, { takeOver = true } = {}) {
     const index = await this.#index(humanId)
     // One Session carries one thread: two names for it merge two subjects into one
     // history, and the second thread's replies land in the first thread's mailbox.
@@ -254,11 +269,23 @@ export class HumanChat {
     const owner = Object.keys(index).find((name) => name !== conversationId && index[name] === sessionId)
     if (owner !== undefined) {
       const problem = `conversation "${conversationId}" resolved to ${sessionId}, which already belongs to "${owner}"`
-      this.#log(problem)
-      throw new Error(problem)
+      if (takeOver) {
+        this.#log(problem)
+        throw new Error(problem)
+      }
+      this.#log(`${problem}; the index is left as it is`)
+      return { sessionId, refused: problem }
     }
-    index[conversationId] = sessionId
+    const held = index[conversationId]
+    if (held !== undefined && held !== sessionId && !takeOver) {
+      const problem = `conversation "${conversationId}" is filed under ${held}, not ${sessionId}`
+      this.#log(`${problem}; the thread keeps its Session and this delivery is not filed under it`)
+      return { sessionId, refused: problem }
+    }
     this.#bySession.set(sessionId, { humanId, conversationId })
+    // Already filed under this name: the next write would repeat the same line.
+    if (held === sessionId) return { sessionId }
+    index[conversationId] = sessionId
     await this.#serial(humanId, async () => {
       await this.#store.ensureDir(this.#store.dir(humanId))
       const path = this.#store.sessionIndexPath(humanId)
@@ -273,7 +300,7 @@ export class HumanChat {
       await rename(temp, path)
       this.#indexes.set(humanId, merged)
     })
-    return sessionId
+    return { sessionId }
   }
 
   /** The edge list for one human, in arrival order. */
@@ -317,7 +344,7 @@ export class HumanChat {
    *    continuation stays in the thread it opened;
    * 3. the newest edge with that peer on that thread, from any of this human's
    *    Sessions — a call from another window still finds the thread's home;
-   * 4. the legacy name index, for a thread that only ever existed before edges.
+   * 4. the peer's legacy name index, for a thread that only ever existed before edges.
    *
    * @returns the target and how it was found, or null when nothing is known.
    */
@@ -344,7 +371,10 @@ export class HumanChat {
       : undefined
     if (thread) return { sessionId: thread.peerSession, conversationId: thread.conversation, via: 'thread' as const }
     if (conversationId !== undefined) {
-      const legacy = await this.lookup(humanId, conversationId)
+      // The peer's own index: a thread's legacy name is filed in the record that
+      // answers in it. Reading this record's index would hand back its own Session as
+      // the peer's address, which opened a Session for the peer under a wrong id.
+      const legacy = await this.lookup(peer, conversationId)
       if (typeof legacy === 'string') return { sessionId: legacy, conversationId, via: 'legacy' as const }
     }
     return null
@@ -689,7 +719,8 @@ export class HumanChat {
     const existing = await this.lookup(human.id, conversationId)
     if (existing) {
       try {
-        return this.#remember(human.id, conversationId, await this.#adopt(human, existing, presetId, conversationId))
+        const adopted = await this.#adopt(human, existing, presetId, conversationId)
+        return (await this.#remember(human.id, conversationId, adopted)).sessionId
       } catch (error) {
         // A Session cannot change its preset or its directory, so a record that now
         // declares a different one cannot reuse it. That is the only reason to
@@ -703,7 +734,8 @@ export class HumanChat {
     }
     // The id is passed through: an address that does not exist yet still gets created
     // under it, so the caller's record of it stays true.
-    return this.#remember(human.id, conversationId, await this.#create(human, presetId, existing, conversationId))
+    const created = await this.#create(human, presetId, existing, conversationId)
+    return (await this.#remember(human.id, conversationId, created)).sessionId
   }
 
   /**
@@ -741,7 +773,14 @@ export class HumanChat {
       // Session's own replies would not reach a mailbox, and it would be invisible to
       // a caller asking which Sessions this digital human answers in.
       this.#bySession.set(resolved, { humanId: human.id, conversationId: conversation })
-      return { sessionId: resolved, conversation }
+      // The name index is written on this path too, through the same call a
+      // name-addressed delivery uses. A Session reached by id is filed under the
+      // thread it serves; skipping this is what left a role's Session out of the
+      // index while its mailbox and edge were written. No name means nothing to file,
+      // and a thread another Session owns is reported, never taken over.
+      if (named === undefined) return { sessionId: resolved, conversation }
+      const filed = await this.#remember(human.id, named, resolved, { takeOver: false })
+      return { sessionId: filed.sessionId, conversation, ...(filed.refused ? { notice: filed.refused } : {}) }
     }
     const conversation = requireConversation(text)
     return { sessionId: await this.ensureSession(human, conversation, presetId), conversation }
@@ -983,6 +1022,9 @@ export class HumanChat {
       sessionId: target.sessionId,
       conversationId: conversation,
       accepted: accepted?.accepted === true,
+      // A thread another Session owns is not taken over, and the caller is told: the
+      // receipt is the only place a model reads what the transport did not record.
+      ...(target.notice ? { notice: target.notice } : {}),
     }
   }
 
