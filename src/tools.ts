@@ -12,7 +12,6 @@
 
 import { buildHumanTools } from './lib/tools.js'
 import { memoryPaths, renderMemoryContext } from './lib/memory.js'
-import { loadSkills } from './lib/skills.js'
 import type { Config, Ctx } from './lib/types.js'
 
 /** Cordis plugin name. */
@@ -22,50 +21,21 @@ export const name = 'digital-human-tools'
 const DISABLED_SKILL_BODY = '该技能未在本数字人启用'
 
 /**
- * Mount this digital human's own skills, and shadow the ones it did not enable.
+ * Hide every global skill the record did not enable.
  *
- * `config.skills` is a whitelist. Skills in the plugin's space are opt-in, and a
- * global, project, or bundled skill is visible to every agent unless this preset
- * hides it: the nearest layer wins a duplicate name, so contributing a same-name
- * shadow candidate with `modelInvocable: false` is what turns "not checked" into
- * "not offered to this digital human". The catalog is read, never listed by name.
+ * Skills live only in the deployment's shared `~/.agents/skills` root, where the
+ * skill provider mounts them for every agent. `config.skills` is this digital
+ * human's whitelist: the nearest layer wins a duplicate name, so contributing a
+ * same-name shadow candidate with `modelInvocable: false` is what turns "not
+ * checked" into "not offered to this digital human". The catalog is read, never
+ * listed by name.
  *
- * Registered from the preset scope, so both kinds land in this preset's layer
- * alone. A runtime registration outranks a user (global) entry of the same name,
- * so a private skill can replace a global one for this digital human without
- * touching the deployment's directory.
- *
- * A name with no skill behind it is reported rather than skipped: a record that
- * mounts a skill nobody uploaded is a mistake worth seeing.
+ * Registered from the preset scope, so the shadows land in this preset's layer
+ * alone; the bodies themselves stay where the operator installed them.
  */
-function mountSkills(ctx: Ctx, human: string, config: Config): void {
+function whitelistSkills(ctx: Ctx, human: string, config: Config): void {
   const wanted = Array.isArray(config.skills) ? config.skills.filter((entry) => typeof entry === 'string') : []
-  const register = ctx.skills?.register
-  if (typeof register !== 'function') {
-    if (wanted.length > 0) ctx.logger?.warn?.(`digital human ${human} mounts ${wanted.length} skill(s), but the skill registry is absent`)
-    return
-  }
-  const home = ctx.digitalHumans?.home
-  if (typeof home !== 'string') return
-  const { skills, missing } = loadSkills(home, wanted)
-  const enabled = new Set(wanted)
-  for (const skill of skills) {
-    register.call(ctx.skills, {
-      name: skill.name,
-      description: skill.description || skill.name,
-      ...(skill.whenToUse ? { whenToUse: skill.whenToUse } : {}),
-      content: skill.content,
-      // Required by the Host's definition check when the skill is loaded. Without it
-      // the registration succeeds and every `skill` call fails to load the body.
-      source: 'digital-human',
-      ...(skill.path ? { path: skill.path } : {}),
-    })
-    enabled.add(skill.name)
-  }
-  if (missing.length > 0) {
-    ctx.logger?.warn?.(`digital human ${human} mounts skill(s) that are not in the library: ${missing.join(', ')}`)
-  }
-  shadowUncheckedSkills(ctx, human, enabled)
+  shadowUncheckedSkills(ctx, human, new Set(wanted))
 }
 
 /**
@@ -182,7 +152,7 @@ export function apply(ctx: Ctx, config: Config = {}): void {
   for (const tool of buildHumanTools({ ctx, service: ctx.digitalHumans, humanId: human, memory, im, memoryScope })) {
     ctx.tools.register(tool)
   }
-  mountSkills(ctx, human, config)
+  whitelistSkills(ctx, human, config)
   if (!memory) return
   // A session-scoped record cannot name its file here: the assembly context exposes
   // an opaque scope key, not the Session id, so the per-conversation memory is

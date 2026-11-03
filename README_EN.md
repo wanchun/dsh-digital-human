@@ -89,30 +89,30 @@ Tools: `memory_status` (inspect, with per-section bytes) and `memory_compact`
 
 ### Skill space
 
-The record's `skills` list is a **whitelist**:
+A skill lives in one place only: the global root `~/.agents/skills/`. It is
+installed by hand, and the plugin only reads it. The record's `skills` list is a
+**whitelist**:
 
 ```
-global ~/.agents/skills/  ─┐
-the project's skills/      ─┼─→  not selected: a same-name shadow, invisible to the model
-bundled skills            ─┘
-
-the plugin's skill space  ──→  selected: mounted and usable as usual
-~/.dsh/digital-human/skills/
+~/.agents/skills/<name>/SKILL.md   the only home; installed by hand
+                                   │
+                     selected ─────┴─→ loaded as usual
+                     not selected ────→ a same-name shadow, invisible to the model
 ```
 
-- A skill is a directory: `SKILL.md` plus any resources beside it
-- Mounted through a **preset-scoped** `ctx.skills.register`, so it is visible to
-  that digital human only — the global directory is untouched and no symlinks are
-  needed
+- The page lists every global skill: selected ones highlighted, unselected ones dimmed.
+  The selection is written into the record's `config.skills`.
+- A new record selects every global skill by default.
 - Every skill the record did not select is shadowed by a preset-scoped whitelist
   provider: `modelInvocable: false`, with one sentence as its body
   ("该技能未在本数字人启用")
-- A runtime registration **outranks** a user (global) entry of the same name, so a
-  private skill can replace a global one
-- The page can **upload** (pick a directory; relative paths are kept), **select**
-  and **remove** skills
-- A directory without a readable `SKILL.md` is still listed, so a broken upload is
-  visible; escaping paths, more than 2000 files or more than 32 MB are refused
+- The plugin keeps no second skill copy, and the page has no upload control.
+- The rule for what belongs here: a rule that stops the digital human from working
+  when it is unchecked is **mechanism, not a skill**. `digital-human-comms` is
+  built into the operating context: it is not in the root, not in the list and not
+  in `config.skills`.
+- A persona's `依赖技能：…` line is documentation. The plugin does not parse or
+  validate it.
 
 ### Import and export
 
@@ -120,10 +120,9 @@ One digital human is one `.tar.gz`:
 
 ```
 pm-assistant-202610131954.dh.tar.gz
-├── manifest.json      format, exported time, id, which skills travel
+├── manifest.json      format, exported time, id, whether memory travels
 ├── human.json         the record, with machine-local fields stripped
-├── memory.md          optional
-└── skills/<name>/…    the selected skills, as real directory trees
+└── memory.md          optional
 ```
 
 - The tar container is written by hand and compressed with the built-in
@@ -161,7 +160,7 @@ pm-assistant-202610131954.dh.tar.gz
 ### Host surface
 
 - **RPC** (one exact `/api/digital-human` route): `registry.list/get/save/remove`,
-  `im.bots`, `im.targets`, `skills.list`, `skills.library/upload/remove`,
+  `im.bots`, `im.targets`, `skills.catalog`,
   `workspaces.list`, `permissions.list`
 - **Events**: `session/created` (apply permissions, retry alignment),
   `session/event` (mirror the mailbox, notice a preset switch), `session/disposed`
@@ -190,7 +189,6 @@ the record's own `configSchema`.
 ```
 ~/.dsh/digital-human/
 ├── humans.json                    the registry (records + declared config)
-├── skills/                        the plugin's skill space
 ├── humans/<id>/
 │   ├── memory.md                  # now + # History
 │   ├── sessions.json              address → session id

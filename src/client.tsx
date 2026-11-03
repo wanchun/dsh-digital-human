@@ -109,6 +109,14 @@ const STYLE = `
 .dh-menu { min-width: 380px; max-width: min(760px, 92vw); }
 .dh-menu [role="menuitem"] { font-size: 14px; }
 .dh-choices { display: flex; flex-direction: column; gap: 4px; }
+/* An unchecked skill stays visible but dimmed: the page has to show what exists,
+   and a row the record does not enable is still a fact about the deployment. */
+.dh-skill { display: flex; flex-direction: column; gap: 1px; }
+.dh-skill[data-checked="false"] { opacity: 0.45; }
+.dh-skill-desc {
+  padding-inline-start: 22px; font-size: 12px; line-height: 17px;
+  color: var(--dsw-alias-label-tertiary);
+}
 /* A repeatable name/value pair. The Input primitive puts className on its
    wrapper span and style on the native input, so the wrapper takes the width and
    the input fills it — the same split Field relies on. No backticks in here: this
@@ -682,34 +690,6 @@ function MenuField({ label, value, options, onChange, hint, placeholder }: {
  * persona will actually see. The resolution happens on the Host, so the page
  * never reimplements the precedence rules.
  */
-/** One skill in the plugin's own space, as the Host reports it. */
-interface LibrarySkill {
-  name: string
-  description: string
-  whenToUse: string
-  files: string[]
-  bytes: number
-  named: boolean
-}
-
-/**
- * Derive a skill name from the files being uploaded.
- *
- * The frontmatter is authoritative — it is the name the model will address — and a
- * directory or file name is only the fallback for a skill that declares none.
- */
-function skillNameOf(files: Record<string, string>, folder?: string): string {
-  const entry = Object.keys(files).find((path) => path.split('/').pop()?.toLowerCase() === 'skill.md')
-  const text = entry ? files[entry] : ''
-  const declared = /^name\s*:\s*(.+)$/m.exec(String(text).split('---')[1] ?? '')?.[1]?.trim()
-  if (declared) return declared.replace(/^["']|["']$/g, '').slice(0, 64)
-  // The picked folder is the name a skill is usually filed under; a lone file only
-  // offers its own name, which is at least stable.
-  const first = Object.keys(files)[0] ?? ''
-  const fallback = folder || first.split('/')[0]?.replace(/\.md$/i, '') || 'skill'
-  return fallback.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64)
-}
-
 type HumanView = Human & {
   /** The effective value of each declared field, resolved by the Host. */
   resolved?: { values: Record<string, string>; sources: Record<string, string> }
@@ -731,17 +711,14 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   const [sideErrors, setSideErrors] = React.useState<{
     bots?: string
     skills?: string
-    library?: string
   }>({})
   // The platform's own permission roster, so a renamed or newly contributed preset
   // needs no release here. Empty until the Host answers.
   const [permissionChoices, setPermissionChoices] = React.useState<Array<{ value: string; label: string; description: string }>>([])
   /** Whether the delete button has been armed by a first click. */
   const [confirmingDelete, setConfirmingDelete] = React.useState(false)
+  // Every skill installed in the global root. A record's list is a subset of it.
   const [skills, setSkills] = React.useState<SkillSummary[]>([])
-  // The plugin's own skill space: what can be mounted for this digital human alone.
-  const [library, setLibrary] = React.useState<LibrarySkill[]>([])
-  const uploadRef = React.useRef<HTMLInputElement | null>(null)
   const importRef = React.useRef<HTMLInputElement | null>(null)
   // Always this exact shape. The Host returns `workspaces`; reading a
   // differently named field during render once blanked the whole panel.
@@ -828,20 +805,6 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
 
   React.useEffect(() => {
     const controller = new AbortController()
-    call('skills.library', {}, controller.signal)
-      .then((value) => {
-        if (controller.signal.aborted || !mounted.current) return
-        setLibrary(Array.isArray(value?.skills) ? value.skills : [])
-      })
-      .catch((caught) => {
-        if (controller.signal.aborted || !mounted.current) return
-        setSideErrors((current) => ({ ...current, library: String(caught?.message ?? caught) }))
-      })
-    return () => controller.abort()
-  }, [call])
-
-  React.useEffect(() => {
-    const controller = new AbortController()
     call('permissions.list', {}, controller.signal)
       .then((value) => {
         if (controller.signal.aborted || !mounted.current) return
@@ -853,7 +816,7 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
 
   React.useEffect(() => {
     const controller = new AbortController()
-    call('skills.list', {}, controller.signal)
+    call('skills.catalog', {}, controller.signal)
       .then((value) => { if (!controller.signal.aborted && mounted.current) setSkills(Array.isArray(value?.skills) ? value.skills : []) })
       .catch((caught) => {
         if (controller.signal.aborted || !mounted.current) return
@@ -879,42 +842,6 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   }
 
   const patch = (fields: Partial<Draft>) => setDraft((current) => (current ? { ...current, ...fields } : current))
-
-  /** Reload the plugin's skill space after changing it. */
-  const reloadLibrary = async () => {
-    const value = await call('skills.library', {})
-    if (mounted.current) setLibrary(Array.isArray(value?.skills) ? value.skills : [])
-  }
-
-  /**
-   * Upload the picked files as one skill.
-   *
-   * A directory pick keeps its relative paths, so references travel with the body;
-   * the first path segment is the folder the operator chose, which is not part of
-   * the skill. A skill whose files cannot be read as text is refused by the Host,
-   * because a binary resource would arrive as mojibake rather than as itself.
-   */
-  const uploadSkills = async (picked: FileList | null) => {
-    const files = [...(picked ?? [])]
-    if (files.length === 0) return
-    await act(async () => {
-      const contents: Record<string, string> = {}
-      let folder: string | undefined
-      for (const file of files) {
-        const relative = (file.webkitRelativePath || file.name).split('/')
-        // The first segment is the folder the operator picked, which is not part of
-        // the skill; it is kept aside as the fallback name.
-        if (relative.length > 1) folder = folder ?? relative[0]
-        const path = (relative.length > 1 ? relative.slice(1) : relative).join('/')
-        contents[path] = await file.text()
-      }
-      const name = skillNameOf(contents, folder)
-      await call('skills.upload', { name, files: contents })
-      await reloadLibrary()
-      return `已上传技能 ${name}（${files.length} 个文件）`
-    })
-    if (uploadRef.current) uploadRef.current.value = ''
-  }
 
   /**
    * Download one digital human as a bundle.
@@ -948,24 +875,9 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
       if (answer?.ok !== true) throw new Error(answer?.error?.message ?? '导入失败：宿主没有返回可读的结果')
       const value = answer.value ?? {}
       const ids = Array.isArray(value.ids) ? value.ids : []
-      return `已导入 ${ids.length} 个数字人（${ids.join('、')}）`
-        + `，技能 ${value.skills?.length ?? 0} 个${value.memory ? '，含记忆' : ''}`
+      return `已导入 ${ids.length} 个数字人（${ids.join('、')}）${value.memory ? '，含记忆' : ''}`
     })
     if (importRef.current) importRef.current.value = ''
-  }
-
-  /** Remove one skill from the plugin's skill space. */
-  const removeLibrarySkill = async (name: string) => {
-    await act(async () => {
-      await call('skills.remove', { name })
-      await reloadLibrary()
-      // A record that mounted it would otherwise keep naming a skill that is gone,
-      // and the warning would follow the digital human around.
-      if ((draft?.skills ?? []).includes(name)) {
-        patch({ skills: (draft?.skills ?? []).filter((entry) => entry !== name) })
-      }
-      return `已删除技能 ${name}`
-    })
   }
 
   if (phase === 'loading') {
@@ -979,10 +891,14 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
   // A configured skill the catalog no longer offers must stay visible, or saving
   // the form would silently drop it.
   const catalog = skills.map((entry) => entry.name)
-  const skillChoices = [
+  const unlisted = chosen.filter((name) => !catalog.includes(name))
+  // Every installed skill is offered, checked or not: the page's job is to show
+  // what exists, so a skill the record does not enable is a dimmed row, not a
+  // missing one. A name the record carries but the root does not is listed too, so
+  // it stays visible and can be unchecked.
+  const skillRows = [
     ...skills,
-    ...chosen.filter((name) => !catalog.includes(name))
-      .map((name) => ({ name, description: '这个技能当前不在目录里。' })),
+    ...unlisted.map((name) => ({ name, description: '这个技能当前不在全局技能目录里。' })),
   ]
   // The schema is authored in the record, not edited here, so it is read from the
   // loaded list rather than carried in the draft.
@@ -1051,7 +967,14 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
           size="sm"
           style={{ marginLeft: 'auto' }}
           disabled={busy}
-          onClick={() => { setNotice(null); setError(null); setConfirmingDelete(false); setDraft({ ...BLANK, creating: true }) }}
+          onClick={() => {
+            setNotice(null)
+            setError(null)
+            setConfirmingDelete(false)
+            // A new record starts with every global skill enabled: the operator
+            // unchecks what this role must not use, instead of hunting for what it needs.
+            setDraft({ ...BLANK, creating: true, skills: skills.map((entry) => entry.name) })
+          }}
         >
           新建
         </Button>
@@ -1164,68 +1087,47 @@ function DigitalHumansPage({ rpc }: { rpc: RpcCall }) {
 
           <div className="dh-section">
             <span className="dh-section-title">技能</span>
-            <input
-              ref={uploadRef}
-              type="file"
-              aria-label="选择技能文件"
-              multiple
-              // A directory upload keeps the relative paths, which is what a skill
-              // with references needs; a single SKILL.md works too.
-              {...({ webkitdirectory: 'true' } as Record<string, string>)}
-              style={{ display: 'none' }}
-              onChange={(event) => { void uploadSkills(event.target.files) }}
-            />
-            <div className="dh-actions">
-              <Button variant="outline" size="sm" disabled={busy} onClick={() => uploadRef.current?.click()}>
-                上传技能
-              </Button>
-              <span className="dh-hint">
-                放进插件技能空间，只有本数字人勾选后才加载；只收文本文件。
-              </span>
-            </div>
-            {library.length === 0
+            {skillRows.length === 0
               ? (
                 <p className="dh-empty">
-                  {sideErrors.library
-                    ? `技能空间读取失败：${sideErrors.library}`
-                    : '技能空间是空的。上传一个技能，再勾选启用。'}
+                  {sideErrors.skills
+                    ? `技能目录读取失败：${sideErrors.skills}`
+                    : '全局技能目录里没有技能。把技能放进 ~/.agents/skills/<名字>/SKILL.md，再刷新。'}
                 </p>
               )
               : (
                 <div className="dh-choices">
-                  {library.map((entry) => (
-                    <div className="dh-row" key={entry.name}>
-                      <Checkbox
-                        checked={chosen.includes(entry.name)}
-                        label={`${entry.name}（${entry.files.length} 个文件）`}
-                        title={entry.description || entry.name}
-                        onChange={(next) => patch({
-                          skills: next ? [...chosen, entry.name] : chosen.filter((name) => name !== entry.name),
-                        })}
-                      />
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`移除技能 ${entry.name}`}
-                        disabled={busy}
-                        onClick={() => { void removeLibrarySkill(entry.name) }}
-                      >
-                        移除
-                      </Button>
-                    </div>
-                  ))}
+                  {skillRows.map((entry) => {
+                    const checked = chosen.includes(entry.name)
+                    return (
+                      // An unchecked row is dimmed rather than dropped: the page shows
+                      // what exists, and a grey row is what "not enabled here" looks like.
+                      <div className="dh-skill" key={entry.name} data-checked={checked ? 'true' : 'false'}>
+                        <Checkbox
+                          checked={checked}
+                          label={entry.name}
+                          title={entry.description || entry.name}
+                          onChange={(next) => patch({
+                            skills: next ? [...chosen, entry.name] : chosen.filter((name) => name !== entry.name),
+                          })}
+                        />
+                        {entry.description ? <span className="dh-skill-desc">{entry.description}</span> : null}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
-            <span className="dh-hint">
-              {sideErrors.skills
-                ? `技能目录读取失败：${sideErrors.skills}`
-                : '勾选即启用：这个数字人只加载勾选的技能；全局、项目与内置的同名技能在本数字人里会被隐藏，未勾选的也不会加载。'}
-            </span>
-            {!sideErrors.library && chosen.some((name) => !library.some((entry) => entry.name === name))
+            {sideErrors.skills
+              ? null
+              : (
+                <span className="dh-hint">
+                  勾选即启用：这个数字人只加载勾选的技能，未勾选的在本数字人里不可见。新建记录默认勾选全部。
+                </span>
+              )}
+            {unlisted.length > 0
               ? (
                 <span className="dh-hint">
-                  {`已勾选但技能空间里没有的：${chosen.filter((name) => !library.some((entry) => entry.name === name)).join('、')}`
-                    + '。这些不会从技能空间加载 —— 上传它们，或者从勾选里去掉。'}
+                  {`已勾选但全局技能目录里没有的：${unlisted.join('、')}。这些不会被加载 —— 把技能放进去，或者从勾选里去掉。`}
                 </span>
               )
               : null}

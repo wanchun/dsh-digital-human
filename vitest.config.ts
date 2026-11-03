@@ -38,6 +38,9 @@ export default defineConfig({
   test: {
     include: ['test/unit/**/*.test.{ts,tsx}'],
     environment: 'node',
+    // The global skill root belongs to the machine, so the tests point it at an
+    // empty temporary directory instead of reading the operator's own skills.
+    setupFiles: [resolve(here, 'test/unit/setup.ts')],
     // The client half is a browser module: its test file opts into a DOM with a
     // `@vitest-environment jsdom` docblock, and the rest stay on plain node.
     coverage: {

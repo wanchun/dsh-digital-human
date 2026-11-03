@@ -199,21 +199,35 @@ describe('partial saves', () => {
 })
 
 describe('the skills route', () => {
-  it('maps what the skills service reports', async () => {
-    const platform = makeCtx({ skills: { list: async () => [{ name: 'qs', description: 'd', whenToUse: 'w', source: 's' }] } })
-    const connection = connectionStub()
-    platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-skills', humans: SEED_HUMANS })
-    const answer = await (await connection.routes[0].fetch(post(call('skills.list')))).json()
-    expect(answer.result.value.skills[0]).toEqual({ name: 'qs', description: 'd', whenToUse: 'w', source: 's' })
+  /** Install one skill into a temporary global root, the way an operator does. */
+  const install = (root: string, name: string, description: string) => {
+    mkdirSync(join(root, name), { recursive: true })
+    writeFileSync(join(root, name, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n# Body\n`)
+  }
+
+  it('reports the global catalogue, not the live skill service', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dh-catalog-'))
+    try {
+      install(root, 'qs', '千手平台助手')
+      const platform = makeCtx()
+      const connection = connectionStub()
+      platform.ctx.provide('connection', connection)
+      await applyPlatform(platform.ctx, { home: '/tmp/dh-skills', humans: SEED_HUMANS, skillsDir: root })
+      const answer = await (await connection.routes[0].fetch(post(call('skills.catalog')))).json()
+      expect(answer.result.value.skills).toEqual([{ name: 'qs', description: '千手平台助手' }])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
-  it('tolerates a service that answers with something else', async () => {
-    const platform = makeCtx({ skills: { list: async () => 'nope' } })
+  it('answers with an empty list when the global root does not exist', async () => {
+    const platform = makeCtx()
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home: '/tmp/dh-skills2', humans: SEED_HUMANS })
-    const answer = await (await connection.routes[0].fetch(post(call('skills.list')))).json()
+    await applyPlatform(platform.ctx, {
+      home: '/tmp/dh-skills2', humans: SEED_HUMANS, skillsDir: '/tmp/dh-skills2/missing',
+    })
+    const answer = await (await connection.routes[0].fetch(post(call('skills.catalog')))).json()
     expect(answer.result.value.skills).toEqual([])
   })
 
@@ -386,7 +400,7 @@ describe('the client renders every entry point', () => {
     const defaults: Record<string, any> = {
       'im.bots': { bots: [] },
       'workspaces.list': { defaultTitle: '数字人', defaultPath: null, workspaces: [] },
-      'skills.list': { skills: [] },
+      'skills.catalog': { skills: [] },
       'registry.remove': { removed: true },
       'registry.save': { human, presetId: 'dh-pm' },
     }

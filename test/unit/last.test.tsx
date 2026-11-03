@@ -205,7 +205,7 @@ describe('the page in its last states', () => {
       'registry.list': { home: '/h', file: '/h/humans.json', humans: [human] },
       'im.bots': { bots: [] },
       'workspaces.list': { defaultTitle: '数字人', defaultPath: null, workspaces: [] },
-      'skills.list': { skills: [] },
+      'skills.catalog': { skills: [] },
       'permissions.list': { default: '', presets: [] },
       'registry.save': { human, presetId: 'dh-pm' },
       'registry.remove': { removed: true },

@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -14,11 +14,14 @@ import { SEED_HUMANS } from '../fixtures/seed.mjs'
 import { readBundle } from '../../src/lib/bundle'
 
 let home = ''
+/** The global skill root a test installs its own skills into. */
+let skillRoot = ''
 /** The directory the stub Workspace resolves to. */
 const WORKSPACE_PATH = '/w'
 
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), 'dh-entry-'))
+  skillRoot = join(home, 'global-skills')
 })
 
 afterEach(async () => {
@@ -108,8 +111,7 @@ function makeCtx(services: Record<string, unknown> = {}) {
       },
     },
     systemPrompt: { context: (entry: any) => { contexts.push(entry); return () => {} } },
-    // The skill registry is what a preset-scoped registration lands in, so the stub
-    // records what was mounted rather than swallowing it.
+    // The preset-scoped whitelist reads this registry and contributes shadows to it.
     skills: { register: (skill: any) => { mounted.push(skill); return () => {} } },
   }
   return { ctx, presets, tools, provided, contexts, listeners, sessions, prompts, services, mounted }
@@ -696,7 +698,7 @@ describe('the management route', () => {
     const { route } = await platformWithRoute()
     expect((await (await route.fetch(post(call('im.bots')))).json()).result.value.bots).toEqual([])
     expect((await (await route.fetch(post(call('im.targets', { botId: 'x' })))).json()).result.value.targets).toEqual([])
-    expect((await (await route.fetch(post(call('skills.list')))).json()).result.value.skills).toEqual([])
+    expect((await (await route.fetch(post(call('skills.catalog')))).json()).result.value.skills).toEqual([])
     expect(Array.isArray((await (await route.fetch(post(call('workspaces.list')))).json()).result.value.workspaces)).toBe(true)
   })
 
@@ -746,50 +748,74 @@ describe('the management route', () => {
   })
 })
 
-describe('the skill-space route', () => {
-  const withRoute = async () => {
+describe('the skill catalog route', () => {
+  /** A global skill root of the test's own, installed by hand. */
+  const install = (name: string, description: string) => {
+    const dir = join(skillRoot, name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n# Body\n`)
+  }
+  const withRoute = async (config: Record<string, unknown> = {}) => {
     const platform = makeCtx()
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS, ...config })
     return { platform, connection, route: connection.routes[0] }
   }
 
-  it('lists an empty library', async () => {
-    const { route } = await withRoute()
-    const answer = await (await route.fetch(post(call('skills.library')))).json()
+  it('lists an empty global root', async () => {
+    const { route } = await withRoute({ skillsDir: join(home, 'no-skills') })
+    const answer = await (await route.fetch(post(call('skills.catalog')))).json()
     expect(answer.result.value.skills).toEqual([])
   })
 
-  it('uploads a skill, then lists it', async () => {
-    const { route } = await withRoute()
-    const saved = await (await route.fetch(post(call('skills.upload', {
-      name: 'qs',
-      files: { 'SKILL.md': '---\nname: qs\ndescription: d\n---\n# Body\n' },
+  it('lists every installed skill, and only its name and description', async () => {
+    install('qs', 'query the platform')
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    const answer = await (await route.fetch(post(call('skills.catalog')))).json()
+    expect(answer.result.value.skills).toEqual([{ name: 'qs', description: 'query the platform' }])
+  })
+
+  it('reads the root on every call, so a hand-installed skill needs no restart', async () => {
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    expect((await (await route.fetch(post(call('skills.catalog')))).json()).result.value.skills).toEqual([])
+    install('late', 'installed after the platform started')
+    expect((await (await route.fetch(post(call('skills.catalog')))).json()).result.value.skills).toEqual([
+      { name: 'late', description: 'installed after the platform started' },
+    ])
+  })
+
+  it('refuses the upload and removal methods that no longer exist', async () => {
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    for (const method of ['skills.upload', 'skills.remove', 'skills.library', 'skills.list']) {
+      const answer = await (await route.fetch(post(call(method)))).json()
+      expect(answer.result.ok, method).toBe(false)
+      expect(answer.result.error.message).toContain('unsupported method')
+    }
+  })
+
+  it('gives a new record every installed skill, and keeps an explicit list as given', async () => {
+    install('qs', 'query the platform')
+    install('git', 'version control')
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    const created = await (await route.fetch(post(call('registry.save', {
+      id: 'all-skills', partial: false, patch: { name: 'All' },
     })))).json()
-    expect(saved.result.ok).toBe(true)
-    expect(saved.result.value.skill.name).toBe('qs')
-    const listed = await (await route.fetch(post(call('skills.library')))).json()
-    expect(listed.result.value.skills[0]).toMatchObject({ name: 'qs', description: 'd' })
+    expect(created.result.value.human.skills).toEqual(['git', 'qs'])
+    const chosen = await (await route.fetch(post(call('registry.save', {
+      id: 'one-skill', partial: false, patch: { name: 'One', skills: [] },
+    })))).json()
+    expect(chosen.result.value.human.skills).toEqual([])
   })
 
-  it('refuses an upload with no files, and one with a name it will not use', async () => {
-    const { route } = await withRoute()
-    const noFiles = await (await route.fetch(post(call('skills.upload', { name: 'x' })))).json()
-    expect(noFiles.result.ok).toBe(false)
-    expect(noFiles.result.error.message).toContain('files must be an object')
-    const badName = await (await route.fetch(post(call('skills.upload', { name: '../x', files: { 'a.md': 'x' } })))).json()
-    expect(badName.result.ok).toBe(false)
-    expect(badName.result.error.message).toContain('skill name')
-  })
-
-  it('removes a skill, and reports one that is not there', async () => {
-    const { route } = await withRoute()
-    await route.fetch(post(call('skills.upload', { name: 'qs', files: { 'SKILL.md': 'x' } })))
-    const removed = await (await route.fetch(post(call('skills.remove', { name: 'qs' })))).json()
-    expect(removed.result.value.removed).toBe(true)
-    const again = await (await route.fetch(post(call('skills.remove', { name: 'qs' })))).json()
-    expect(again.result.value.removed).toBe(false)
+  it('does not change the skills of a record that already exists', async () => {
+    install('qs', 'query the platform')
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    await route.fetch(post(call('registry.save', { id: 'kept', partial: false, patch: { name: 'Kept', skills: [] } })))
+    const saved = await (await route.fetch(post(call('registry.save', {
+      id: 'kept', partial: true, patch: { name: 'Kept 2' },
+    })))).json()
+    expect(saved.result.value.human.skills).toEqual([])
   })
 })
 
@@ -859,15 +885,12 @@ describe('the bundle route', () => {
     expect(platform.presets.has('dh-pm-copy')).toBe(true)
   })
 
-  it('refuses an id it will not use, and keeps an existing skill when told to', async () => {
+  it('refuses an id it will not use', async () => {
     const { route } = await withRoutes()
     const exported = Buffer.from(await (await route.fetch(new Request('http://x/api/digital-human/bundle?id=pm-assistant'))).arrayBuffer())
     const bad = await route.fetch(post(exported, '?id=../evil'))
     expect(bad.status).toBe(400)
     expect((await bad.json()).error.message).toContain('id must match')
-    const kept = await route.fetch(post(exported, '?id=pm-copy&overwrite=false'))
-    expect(kept.status).toBe(200)
-    expect((await kept.json()).value.ids).toEqual(['pm-copy'])
   })
 
   it('exports the whole registry as one bundle', async () => {
@@ -1158,41 +1181,17 @@ describe('the preset-scoped tools row', () => {
     expect(answer.detail).toContain(paths.file)
   })
 
-  it('mounts the skills the record names, from the plugin skill space', async () => {
-    // The library is shared by every digital human; the record's list is what makes a
-    // skill visible to one of them, because a preset-scoped registration lands in
-    // that preset's layer alone.
-    const { writeSkill } = await import('../../src/lib/skills')
-    await writeSkill(home, 'qs', {
-      'SKILL.md': '---\nname: qs\ndescription: query the platform\nwhenToUse: when asked\n---\n\n# Body\n',
-    })
-    const platform = makeCtx()
-    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
-    platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
-    await platform.provided.get('digitalHumans').upsert({ id: 'sk', name: 'Sk', skills: ['qs'], memory: false })
-    applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
-    expect(platform.mounted).toHaveLength(1)
-    // `source` is what the Host's load-time definition check requires: without it the
-    // registration succeeds and every later `skill` call fails to read the body.
-    expect(platform.mounted[0]).toMatchObject({ name: 'qs', description: 'query the platform', whenToUse: 'when asked', source: 'digital-human' })
-    expect(platform.mounted[0].content).toContain('# Body')
-  })
-
   it('shadows every catalog skill the record did not enable', async () => {
-    const { writeSkill } = await import('../../src/lib/skills')
-    await writeSkill(home, 'qs', {
-      'SKILL.md': '---\nname: qs\ndescription: query the platform\n---\n\n# Body\n',
-    })
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
     // The catalog the whitelist compares against: one ordinary skill, one already
-    // hidden, and the mounted one.
+    // hidden, and the one this record enables.
     platform.ctx.skills.snapshot = async () => ({
       skills: [
         { name: 'git', description: 'version control', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } },
         { name: 'quiet', description: 'already hidden', source: 'user-agents', invocation: { modelInvocable: false, userInvocable: true } },
-        { name: 'qs', description: 'mounted here', source: 'digital-human', invocation: { modelInvocable: true, userInvocable: true } },
+        { name: 'qs', description: 'enabled here', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } },
       ],
       complete: true,
     })
@@ -1222,8 +1221,6 @@ describe('the preset-scoped tools row', () => {
   })
 
   it('reads the catalog with the caller scope and skips its own nested read', async () => {
-    const { writeSkill } = await import('../../src/lib/skills')
-    await writeSkill(home, 'qs', { 'SKILL.md': '---\nname: qs\ndescription: q\n---\n\n# Body\n' })
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
@@ -1247,9 +1244,7 @@ describe('the preset-scoped tools row', () => {
     expect(seen[0][Object.getOwnPropertySymbols(seen[0])[0]]).toBe(true)
   })
 
-  it('keeps the enabled skills when the whitelist provider cannot register', async () => {
-    const { writeSkill } = await import('../../src/lib/skills')
-    await writeSkill(home, 'qs', { 'SKILL.md': '---\nname: qs\ndescription: q\n---\n\n# Body\n' })
+  it('skips the whitelist when its provider cannot register', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
@@ -1257,47 +1252,50 @@ describe('the preset-scoped tools row', () => {
     platform.ctx.logger = { warn, info: () => {} }
     platform.ctx.skills.snapshot = async () => ({ skills: [], complete: true })
     platform.ctx.skills.registerProvider = () => { throw new Error('no provider') }
-    applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
-    expect(platform.mounted.map((entry) => entry.name)).toEqual(['qs'])
+    expect(() => applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })).not.toThrow()
     expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('no provider'))).toBe(true)
   })
 
-  it('mounts nothing when the record names none, and reports one that is gone', async () => {
+  it('shadows every visible skill when the record names none', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    platform.ctx.skills.snapshot = async () => ({
+      skills: [{ name: 'git', description: 'vcs', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } }],
+      complete: true,
+    })
+    const providers: any[] = []
+    platform.ctx.skills.registerProvider = (create: any) => {
+      providers.push(create({ signal: new AbortController().signal, invalidate: () => {} }))
+      return () => {}
+    }
     applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false })
-    expect(platform.mounted).toEqual([])
-    // A name with no skill behind it is reported rather than silently skipped.
-    const warn = vi.fn()
-    platform.ctx.logger = { warn, info: () => {} }
-    applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: ['never-uploaded'] })
-    expect(platform.mounted).toEqual([])
-    expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('never-uploaded'))).toBe(true)
+    expect((await providers[0].list({})).map((entry: any) => entry.name)).toEqual(['git'])
   })
 
-  it('ignores a skills config that is not a list, and a registry with no home', async () => {
+  it('treats a skills config that is not a list as an empty whitelist', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    platform.ctx.skills.snapshot = async () => ({
+      skills: [{ name: 'git', description: 'vcs', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } }],
+      complete: true,
+    })
+    const providers: any[] = []
+    platform.ctx.skills.registerProvider = (create: any) => {
+      providers.push(create({ signal: new AbortController().signal, invalidate: () => {} }))
+      return () => {}
+    }
     applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: 'qs' })
-    expect(platform.mounted).toEqual([])
-    // Without a registry root there is nowhere to read skills from, so mounting is
-    // skipped rather than guessed at.
-    platform.ctx.digitalHumans = { ...platform.provided.get('digitalHumans'), home: undefined }
-    expect(() => applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: ['qs'] })).not.toThrow()
-    expect(platform.mounted).toEqual([])
+    expect((await providers[0].list({})).map((entry: any) => entry.name)).toEqual(['git'])
   })
 
   it('survives an absent skill registry', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
-    const warn = vi.fn()
-    platform.ctx.logger = { warn, info: () => {} }
     platform.ctx.skills = undefined
     expect(() => applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: ['qs'] })).not.toThrow()
-    expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('skill registry is absent'))).toBe(true)
   })
 
   it('omits the memory context and the memory tools when memory is off', async () => {

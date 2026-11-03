@@ -370,10 +370,7 @@ describe('the page reports what the host told it', () => {
       'registry.list': { home: '/h', file: '/h/humans.json', humans: [human] },
       'im.bots': { bots: [] },
       'workspaces.list': { defaultTitle: '数字人', defaultPath: null, workspaces: [] },
-      'skills.list': { skills: [] },
-      'skills.library': () => ({
-            skills: [{ name: 'qs', description: 'q', whenToUse: '', files: ['SKILL.md'], bytes: 10, named: true }],
-      }),
+      'skills.catalog': { skills: [{ name: 'qs', description: 'q' }] },
       'registry.save': { human, presetId: 'dh-pm' },
       'registry.remove': { removed: true },
     }

@@ -80,6 +80,8 @@ function assertTool(tool) {
 }
 
 const home = await mkdtemp(join(tmpdir(), 'dh-schema-'))
+// The global skill root belongs to the machine; a schema check must not read it.
+process.env.DSH_AGENTS_HOME = join(home, 'agents')
 
 const provided = new Map()
 const dshIm = {

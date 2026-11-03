@@ -29,7 +29,7 @@ import {
 } from './lib/escalation.js'
 import { buildPresetDefinition, presetIdOf, resolveConfigValues } from './lib/presets.js'
 import { buildRegistryTool } from './lib/tools.js'
-import { listLibrary, removeSkill, writeSkill } from './lib/skills.js'
+import { globalSkillsDir, readSkillCatalog } from './lib/skills.js'
 import { packHumans, readBundle, unpackHumans } from './lib/bundle.js'
 import { applyTitlePlan } from './lib/titles.js'
 import { RPC_PATH } from './lib/rpc.js'
@@ -158,6 +158,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // Empty unless the caller supplies examples. A fresh install grows no digital
   // humans: they are configured in the page or imported as a bundle.
   const seed: Human[] = Array.isArray(config.humans) ? config.humans : []
+  // The one root skills live in. Read on every use, never cached: an operator
+  // installs a skill by hand, so the page must see it without a restart.
+  const skillsRoot = globalSkillsDir(typeof config.skillsDir === 'string' ? config.skillsDir : undefined)
   const store = new HumanStore(home)
   const log = (message: string): void => { ctx.logger?.warn?.(`digital-human: ${message}`) }
   /**
@@ -691,8 +694,16 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     /** Create or update one digital human, then re-register presets. */
     async upsert(patch, { partial = false } = {}) {
       if (!patch?.id) throw new Error('id is required')
+      const existing = await store.get(patch.id, seed)
       const merged = partial ? await merge(patch.id, patch) : patch
-      const saved = await store.upsert(merged, seed)
+      // A new record starts with every global skill enabled. Skills are installed by
+      // hand, so starting empty would hide all of them and nobody would learn they
+      // exist; an explicit list — including an empty one — is the operator's answer
+      // and is kept as given.
+      const filled = existing || Array.isArray(merged.skills)
+        ? merged
+        : { ...merged, skills: readSkillCatalog(skillsRoot).map((skill) => skill.name) }
+      const saved = await store.upsert(filled, seed)
       // refresh() owns both the owner claim and the IM alignment, so the record to
       // report is the one it left behind, not the pre-claim write.
       await refresh()
@@ -1039,30 +1050,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         })),
       })
     }
-    if (method === 'skills.library') {
-      // The plugin's own skill space: what a digital human can be given, as opposed
-      // to what the deployment mounts for everyone.
-      return ok({ skills: listLibrary(home) })
-    }
-    if (method === 'skills.upload') {
-      const name = String(payload?.name ?? '').trim()
-      const files = payload?.files
-      if (!files || typeof files !== 'object' || Array.isArray(files)) {
-        return bad('files must be an object of relative path to text')
-      }
-      try {
-        const skill = await writeSkill(home, name, files as Record<string, string>)
-        // Presets carry the mounted list, so they are re-registered to pick it up.
-        await refresh()
-        return ok({ skill })
-      } catch (error) {
-        return bad(error.message)
-      }
-    }
-    if (method === 'skills.remove') {
-      const removed = await removeSkill(home, String(payload?.name ?? '').trim())
-      if (removed) await refresh()
-      return ok({ removed })
+    if (method === 'skills.catalog') {
+      // Every skill the deployment has installed, as one flat list. Skills have a
+      // single home, so this read is the whole catalog and the page writes nothing
+      // back: an operator installs one by hand, under the global skill root.
+      return ok({ skills: readSkillCatalog(skillsRoot) })
     }
     if (method === 'permissions.list') {
       // Read from the platform, never from a list copied into the page: a renamed or
@@ -1076,19 +1068,6 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           value: String(option?.value ?? ''),
           label: String(option?.name ?? option?.value ?? ''),
           description: typeof option?.description === 'string' ? option.description : '',
-        })),
-      })
-    }
-    if (method === 'skills.list') {
-      const skills = ctx.get('skills')
-      if (!skills || typeof skills.list !== 'function') return ok({ skills: [] })
-      const entries = await skills.list()
-      return ok({
-        skills: (Array.isArray(entries) ? entries : []).map((entry) => ({
-          name: entry.name,
-          description: entry.description ?? '',
-          whenToUse: entry.whenToUse ?? '',
-          source: entry.source ?? '',
         })),
       })
     }
@@ -1186,7 +1165,6 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           }
           const result = await unpackHumans(home, archive, {
             id: url.searchParams.get('id') ?? undefined,
-            overwrite: url.searchParams.get('overwrite') !== 'false',
           })
           for (const record of result.records) await store.upsert(record as HumanPatch, seed)
           await refresh()

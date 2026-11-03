@@ -120,6 +120,9 @@ function makeCtx({ dshIm } = {}) {
 }
 
 const home = await mkdtemp(join(tmpdir(), 'dh-apply-'))
+// Skills live in the operator's global root; point it inside this run so a record
+// created here never inherits the skills installed on the machine.
+process.env.DSH_AGENTS_HOME = join(home, 'agents')
 
 console.log('1) platform row mounts')
 const platform = makeCtx()

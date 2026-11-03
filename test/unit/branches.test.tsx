@@ -234,10 +234,7 @@ describe('the page in its remaining states', () => {
       'registry.list': { home: '/h', file: '/h/humans.json', humans: [human] },
       'im.bots': { bots: [] },
       'workspaces.list': { defaultTitle: '数字人', defaultPath: null, workspaces: [] },
-      'skills.list': { skills: [] },
-      'skills.library': () => ({
-            skills: [{ name: 'qs', description: 'q', whenToUse: '', files: ['SKILL.md'], bytes: 10, named: true }],
-      }),
+      'skills.catalog': { skills: [{ name: 'qs', description: 'q' }] },
       'registry.save': { human, presetId: 'dh-pm' },
       'registry.remove': { removed: true },
     }
@@ -288,7 +285,7 @@ describe('the page in its remaining states', () => {
   })
 
   it('reports a skill load that failed', async () => {
-    mount({ 'skills.list': () => new Error('skills down') })
+    mount({ 'skills.catalog': () => new Error('skills down') })
     await open()
     expect(screen.getByText(/技能目录读取失败：skills down/)).toBeTruthy()
   })
@@ -383,7 +380,7 @@ describe('the permission roster the page offers', () => {
       'registry.list': { home: '/h', file: '/h/humans.json', humans: [human] },
       'im.bots': { bots: [] },
       'workspaces.list': { defaultTitle: '数字人', defaultPath: null, workspaces: [] },
-      'skills.list': { skills: [] },
+      'skills.catalog': { skills: [] },
       'permissions.list': { default: 'x', presets: [{ value: 'custom-one', label: '自定义一', description: '说明' }] },
     }
     const rpc = vi.fn(async (method: string) => {

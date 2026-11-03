@@ -350,10 +350,24 @@ export function renderOperatingContext(human, store, peerDescriptions = {}) {
       const description = String(peerDescriptions?.[peer] ?? '').trim()
       return description ? `- \`${peer}\`（${description}）` : `- \`${peer}\``
     })
-    lines.push('- Your peers are:', ...roster, '  Hand work to one with \`digital_human_send\`, then read its reply with \`digital_human_messages\` (or poll \`digital_human_status\`). A message from a peer arrives as a normal turn in this session, prefixed by a \`<dsh_peer_source>\` block naming the sender and the Session it came from — reply with that \`session\` as \`session_id\`, so the answer reaches the Session that asked for the work, and use the same \`conversation_id\` throughout so one subject stays in one thread.')
+    lines.push('- Your peers are:', ...roster)
   } else {
     lines.push('- Use `digital_human_list` to see which digital humans you may reach.')
   }
+  // The peer protocol is the platform's, so it travels in the prompt instead of a
+  // skill: a rule a record cannot work without is mechanism, and a mechanism cannot
+  // be unchecked. Addresses, receipts, and failure handling are stated once, here.
+  lines.push(
+    '- 与同伴协作的规则（平台内置，不是可勾选的技能）：',
+    '  - 地址分两层。线程名 `conversation_id` 人类可读，一个需求版本一个，只用 `[A-Za-z0-9._-]`。会话地址 `session_id` 是接收方的那条会话。',
+    '  - 首次派活只带 `conversation_id`。返回的 `sessionId` 记进记忆；后续派活带 `session_id`，或带 `conversation_id`。',
+    '  - 发用 `digital_human_send`。取回复用 `digital_human_messages`。查状态用 `digital_human_status`。停用 `digital_human_stop`。',
+    '  - 同伴的消息以普通回合到达，前面有 `<dsh_peer_source>` 头，写明发送方与它的会话。回消息时 `session_id` 抄头里的 `session`，`conversation_id` 抄头里的 `conversation`，一字不改。',
+    '  - 回执只写三项：结论、证据路径、下一步。不复述过程。',
+    '  - 发完只做有界确认：等 30 到 60 秒，最多查 2 次状态，然后结束本轮。不轮询，不同步等对方做完。超时不重发，记入记忆「待确认送达」，下次顺手复核。',
+    '  - 失败处置：工具或命令临时失败最多重试 2 次。参数缺失、外部依赖卡住时不要自愈重试，直接报同伴。报同伴或报负责人的消息带四要素：命令、原始报错、已试路径、需要对方做什么。错误不静默跳过；同一件事不重复上报。',
+    '  - 返回值里的 `sessionId` 与记录不一致时，立刻回写并说明，不要默默沿用旧值。',
+  )
   if (human.im.botId) {
     lines.push(`- Your outbound IM target is bot \`${human.im.botId}\`${human.im.targetId ? `, target \`${human.im.targetId}\`` : ''}. Use the \`notify_bot\` tool to push a message there.`)
   }
@@ -390,10 +404,9 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
   const rows = withoutPersona(BASELINE_ROWS).map((row) => {
     if (row?.id === 'tool-bash' && process.platform === 'win32') return { ...row, disabled: true }
     if (row?.id === 'tool-pwsh' && process.platform !== 'win32') return { ...row, disabled: true }
-    // `skill-filesystem` is left exactly as the deployment configured it, so the
-    // global and project roots keep loading by default. The plugin's own skill space
-    // is a separate, opt-in layer: a skill there is mounted for this digital human
-    // only when the record names it.
+    // `skill-filesystem` is left exactly as the deployment configured it: it mounts
+    // the global root every agent shares, and this preset does not move it. The
+    // whitelist decides which of those skills this digital human may see.
     return row
   })
   const persona = {
@@ -425,7 +438,7 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
         // The record is in hand here, so the memory switch travels with the row.
         // The tools row cannot look it up itself: its `apply` is synchronous, and
         // the registry it would have to read is asynchronous.
-        // The mounted skills travel with the row for the same reason the memory
+        // The enabled skills travel with the row for the same reason the memory
         // switch does: `apply` is synchronous, and the registry is not.
         config: {
           human: human.id,

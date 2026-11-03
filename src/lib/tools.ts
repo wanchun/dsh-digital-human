@@ -1430,7 +1430,7 @@ export function buildRegistryTool({ service }) {
       description: { type: 'string', description: 'One-line summary of the role.' },
       system_prompt: { type: 'string', description: 'The persona: this becomes the agent preset prefix.' },
       workspace: { type: 'string', description: 'Absolute working directory for its sessions.' },
-      skills: { type: 'string', description: 'Comma-separated extra skill directories to mount.' },
+      skills: { type: 'string', description: 'Comma-separated skill names to enable. A new record enables every global skill by default.' },
       peers: { type: 'string', description: 'Comma-separated ids of digital humans it may message.' },
       bot_id: { type: 'string', description: 'IM bot id bound to it (dsh-im botId).' },
       target_id: { type: 'string', description: 'Default IM target id for notify_bot.' },

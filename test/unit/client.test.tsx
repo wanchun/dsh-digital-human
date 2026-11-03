@@ -77,10 +77,7 @@ const defaultAnswers = () => ({
   'registry.list': () => listValue([human(), human({ id: 'dev-assistant', name: '开发助手', im: { botId: '', targetId: '', owner: '' } })]),
   'im.bots': () => ({ bots: [{ botId: 'wecom_1', channel: 'wecom', alias: 'PM', workspace: '/w' }] }),
   'workspaces.list': () => ({ defaultTitle: '数字人', defaultPath: '/w', workspaces: [{ workspaceId: 'w', title: '数字人', path: '/w' }] }),
-  'skills.list': () => ({ skills: [{ name: 'qs', description: 'q' }] }),
-  'skills.library': () => ({
-    skills: [{ name: 'qs', description: 'q', whenToUse: '', files: ['SKILL.md'], bytes: 10, named: true }],
-  }),
+  'skills.catalog': () => ({ skills: [{ name: 'qs', description: 'q' }] }),
   'permissions.list': () => ({
     default: 'danger-full-access',
     presets: [
@@ -277,11 +274,11 @@ describe('the detail form', () => {
     expect(peer.checked).toBe(false)
   })
 
-  it('picks a skill from the plugin skill space', async () => {
-    // Only what is checked is mounted, and only from the plugin's own space: the
-    // global catalogue loads for every digital human without being chosen.
-    // The exact label, because the skill's own remove button also carries the name.
-    const skill = await screen.findByLabelText('qs（1 个文件）') as HTMLInputElement
+  it('checks a skill the global catalogue offers', async () => {
+    // Every installed skill is offered; checking one is what puts it in the record's
+    // whitelist, which is the only switch that decides whether the model sees it.
+    const skill = await screen.findByLabelText('qs') as HTMLInputElement
+    expect(skill.checked).toBe(false)
     fireEvent.click(skill)
     expect(skill.checked).toBe(true)
   })
@@ -459,7 +456,7 @@ describe('an empty profile', () => {
     view = mount({
       ...defaultAnswers(),
       'im.bots': () => new Error('no im'),
-      'skills.list': () => new Error('no skills'),
+      'skills.catalog': () => new Error('no skills'),
     })
     await settle()
     fireEvent.click(screen.getByText('研发PM助手'))

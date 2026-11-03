@@ -92,9 +92,9 @@ export interface Human {
   /**
    * The skills this digital human enables, by name: a whitelist.
    *
-   * A name here mounts the plugin-space skill of that name. Every other skill the
-   * global catalog offers — the global directory, the project's, the bundled set —
-   * is shadowed in this digital human's preset layer, so the model cannot see it.
+   * Skills live only in the global root (`~/.agents/skills`); a name here enables
+   * the skill of that name. Every other skill the catalog offers is shadowed in
+   * this digital human's preset layer, so the model cannot see it.
    */
   skills: string[]
   peers: string[]
@@ -242,6 +242,13 @@ export interface Ctx {
 /** Plugin configuration, as the loader passes it. */
 export interface Config {
   home?: string
+  /**
+   * The global skill root, when the deployment's is not the default.
+   *
+   * Defaults to `$DSH_AGENTS_HOME/skills`, then `~/.agents/skills`. The plugin
+   * reads this root and never writes it: an operator installs a skill by hand.
+   */
+  skillsDir?: string
   /**
    * Records to start from, for a caller that supplies its own examples.
    *

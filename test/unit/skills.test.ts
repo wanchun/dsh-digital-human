@@ -1,32 +1,29 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
   SKILLS_DIR,
-  libraryDir,
-  listLibrary,
-  loadSkills,
+  globalSkillsDir,
+  isBuiltinSkill,
   parseFrontmatter,
-  removeSkill,
-  validSkillName,
-  writeSkill,
+  readSkillCatalog,
 } from '../../src/lib/skills'
 
-let home = ''
+let root = ''
 
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), 'dh-skills-'))
+  root = mkdtempSync(join(tmpdir(), 'dh-skills-'))
 })
 
 afterEach(() => {
-  rmSync(home, { recursive: true, force: true })
+  rmSync(root, { recursive: true, force: true })
 })
 
-/** Write one skill directory by hand. */
+/** Write one skill directory by hand, the way an operator installs it. */
 const put = (name: string, files: Record<string, string>) => {
-  const dir = join(libraryDir(home), name)
+  const dir = join(root, name)
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(join(dir, path.split('/').slice(0, -1).join('/') || '.'), { recursive: true })
     writeFileSync(join(dir, path), content, 'utf8')
@@ -73,194 +70,64 @@ describe('parseFrontmatter', () => {
   })
 })
 
-describe('validSkillName', () => {
-  it('accepts the shapes a directory can carry', () => {
-    for (const name of ['qs', 'qs-assistant', 'a.b_c-1']) expect(validSkillName(name), name).toBe(true)
+describe('globalSkillsDir', () => {
+  it('takes an explicit root as the skills directory itself', () => {
+    expect(globalSkillsDir('/tmp/skills', {})).toBe('/tmp/skills')
   })
 
-  it('refuses anything that could escape the library', () => {
-    for (const name of ['', '..', 'a/b', '/abs', 'a b', '.hidden', 'x'.repeat(65), 7, undefined]) {
-      expect(validSkillName(name), String(name)).toBe(false)
-    }
+  it('reads DSH_AGENTS_HOME, and ignores a blank one', () => {
+    expect(globalSkillsDir(undefined, { DSH_AGENTS_HOME: '/tmp/agents' })).toBe(join('/tmp/agents', SKILLS_DIR))
+    expect(globalSkillsDir(undefined, { DSH_AGENTS_HOME: '   ' })).toBe(join(homedir(), '.agents', SKILLS_DIR))
+    expect(globalSkillsDir('  ', {})).toBe(join(homedir(), '.agents', SKILLS_DIR))
+  })
+
+  it('falls back to ~/.agents/skills', () => {
+    expect(globalSkillsDir(undefined, {})).toBe(join(homedir(), '.agents', SKILLS_DIR))
   })
 })
 
-describe('listLibrary', () => {
-  it('is empty when nothing was uploaded', () => {
-    expect(listLibrary(home)).toEqual([])
+describe('readSkillCatalog', () => {
+  it('is empty when the root does not exist', () => {
+    expect(readSkillCatalog(join(root, 'never-installed'))).toEqual([])
   })
 
-  it('reports a skill with its files, size and frontmatter', () => {
-    put('qs-assistant', { 'SKILL.md': skillMd({ name: 'qs-assistant', description: 'd' }), 'references/cli.md': 'x'.repeat(10) })
-    const [found] = listLibrary(home)
-    expect(found).toMatchObject({ name: 'qs-assistant', description: 'd', named: true })
-    expect(found.files).toEqual(['SKILL.md', 'references/cli.md'])
-    expect(found.bytes).toBeGreaterThan(10)
+  it('reports a skill with its frontmatter', () => {
+    put('qs-assistant', { 'SKILL.md': skillMd({ name: 'qs-assistant', description: 'd' }), 'references/cli.md': 'x' })
+    expect(readSkillCatalog(root)).toEqual([{ name: 'qs-assistant', description: 'd' }])
   })
 
-  it('reports a directory whose SKILL.md is missing, named by its directory', () => {
-    // An upload that went wrong must be visible, so it can be removed.
-    put('broken', { 'notes.md': 'no frontmatter here' })
-    expect(listLibrary(home)[0]).toMatchObject({ name: 'broken', description: '', named: false })
+  it('ignores an empty directory, a directory with no SKILL.md, and a stray file', () => {
+    mkdirSync(join(root, 'empty'))
+    put('notes-only', { 'notes.md': 'no frontmatter here' })
+    writeFileSync(join(root, 'loose.md'), 'x')
+    expect(readSkillCatalog(root)).toEqual([])
   })
 
-  it('ignores a stray file at the top level', () => {
-    mkdirSync(libraryDir(home), { recursive: true })
-    writeFileSync(join(libraryDir(home), 'loose.md'), 'x')
-    expect(listLibrary(home)).toEqual([])
-  })
-
-  it('sorts by name', () => {
+  it('sorts by name and falls back to the directory name', () => {
     put('zeta', { 'SKILL.md': skillMd({ name: 'zeta' }) })
-    put('alpha', { 'SKILL.md': skillMd({ name: 'alpha' }) })
-    expect(listLibrary(home).map((entry) => entry.name)).toEqual(['alpha', 'zeta'])
-  })
-
-  it('falls back to the directory name when the frontmatter names nothing', () => {
     put('dir-name', { 'SKILL.md': '# no frontmatter\n' })
-    expect(listLibrary(home)[0]).toMatchObject({ name: 'dir-name', named: false })
-  })
-})
-
-describe('loadSkills', () => {
-  it('loads a body and reports the names that are gone', () => {
-    put('qs', { 'SKILL.md': skillMd({ name: 'qs', description: 'd' }, '# Body\n') })
-    const { skills, missing } = loadSkills(home, ['qs', 'never-uploaded'])
-    expect(skills).toHaveLength(1)
-    expect(skills[0].content).toContain('# Body')
-    expect(skills[0].path.endsWith('SKILL.md')).toBe(true)
-    // Reported rather than skipped: a record mounting a skill nobody uploaded is a
-    // mistake worth seeing.
-    expect(missing).toEqual(['never-uploaded'])
+    expect(readSkillCatalog(root).map((entry) => entry.name)).toEqual(['dir-name', 'zeta'])
   })
 
-  it('reports a name that could not be a directory', () => {
-    expect(loadSkills(home, ['../etc']).missing).toEqual(['../etc'])
-  })
-
-  it('survives a skill whose files cannot be listed', () => {
-    put('qs', { 'SKILL.md': skillMd({ name: 'qs' }) })
-    const { skills } = loadSkills(home, ['qs'])
-    expect(skills[0].files).toEqual(['SKILL.md'])
-  })
-})
-
-describe('writeSkill', () => {
-  it('writes a skill and reports it', async () => {
-    await writeSkill(home, 'qs', { 'SKILL.md': skillMd({ name: 'qs', description: 'd' }) })
-    expect(readFileSync(join(libraryDir(home), 'qs', 'SKILL.md'), 'utf8')).toContain('name: qs')
-    expect(listLibrary(home)[0].name).toBe('qs')
-  })
-
-  it('creates nested resource directories', async () => {
-    await writeSkill(home, 'qs', { 'SKILL.md': skillMd({ name: 'qs' }), 'references/a/b.md': 'deep' })
-    expect(existsSync(join(libraryDir(home), 'qs', 'references', 'a', 'b.md'))).toBe(true)
-  })
-
-  it('replaces a skill that is already there, leaving nothing of the old one', async () => {
-    await writeSkill(home, 'qs', { 'SKILL.md': skillMd({ name: 'qs' }), 'old.md': 'gone' })
-    await writeSkill(home, 'qs', { 'SKILL.md': skillMd({ name: 'qs' }) })
-    expect(existsSync(join(libraryDir(home), 'qs', 'old.md'))).toBe(false)
-  })
-
-  it('refuses a name that would escape the library', async () => {
-    await expect(writeSkill(home, '../evil', { 'SKILL.md': 'x' })).rejects.toThrow(/skill name/)
-  })
-
-  it('refuses a file path that would escape the skill', async () => {
-    await expect(writeSkill(home, 'qs', { '../outside.md': 'x' })).rejects.toThrow(/inside the skill/)
-    await expect(writeSkill(home, 'qs', { '/abs.md': 'x' })).rejects.toThrow(/inside the skill/)
-  })
-
-  it('refuses an empty skill and a non-text file', async () => {
-    await expect(writeSkill(home, 'qs', {})).rejects.toThrow(/at least one file/)
-    await expect(writeSkill(home, 'qs', { 'a.bin': 7 as unknown as string })).rejects.toThrow(/must be text/)
-  })
-
-  it('normalises a backslash and a leading ./ in the path', async () => {
-    await writeSkill(home, 'qs', { './references\\cli.md': 'x' })
-    expect(existsSync(join(libraryDir(home), 'qs', 'references', 'cli.md'))).toBe(true)
-  })
-
-  it('leaves no staging directory behind', async () => {
-    await writeSkill(home, 'qs', { 'SKILL.md': 'x' })
-    const names = listLibrary(home).map((entry) => entry.name)
-    expect(names).toEqual(['qs'])
-    expect(names.some((name) => name.includes('.tmp'))).toBe(false)
-  })
-})
-
-describe('the limits a skill must stay inside', () => {
-  it('refuses a skill with too many files', async () => {
-    const files: Record<string, string> = {}
-    for (let at = 0; at <= 2000; at++) files[`f${at}.md`] = 'x'
-    await expect(writeSkill(home, 'huge', files)).rejects.toThrow(/at most 2000 files/)
-  })
-
-  it('refuses a skill that is too large', async () => {
-    await expect(writeSkill(home, 'big', { 'SKILL.md': 'x'.repeat(32 * 1024 * 1024 + 1) }))
-      .rejects.toThrow(/at most .* bytes/)
-  })
-})
-
-describe('a skill the filesystem will not cooperate with', () => {
-  it('reports a skill whose files cannot be listed', () => {
-    // A dangling symlink makes the walk throw; the skill is still reported so it can
-    // be removed from the page.
-    const dir = put('odd', { 'SKILL.md': skillMd({ name: 'odd' }) })
-    const { symlinkSync } = require('node:fs')
-    symlinkSync(join(dir, 'missing-target'), join(dir, 'dangling'))
-    expect(listLibrary(home).map((entry) => entry.name)).toContain('odd')
-  })
-
-  it('reports a SKILL.md that cannot be read', () => {
+  it('skips a SKILL.md that cannot be read', () => {
     const dir = put('unreadable', { 'SKILL.md': skillMd({ name: 'unreadable' }) })
     rmSync(join(dir, 'SKILL.md'))
     mkdirSync(join(dir, 'SKILL.md'))
-    const found = listLibrary(home).find((entry) => entry.name === 'unreadable')
-    expect(found).toMatchObject({ name: 'unreadable', named: false })
-  })
-
-  it('loads a skill whose listing is partial', () => {
-    const dir = put('partial', { 'SKILL.md': skillMd({ name: 'partial' }) })
-    const { symlinkSync } = require('node:fs')
-    symlinkSync(join(dir, 'nowhere'), join(dir, 'broken'))
-    const { skills } = loadSkills(home, ['partial'])
-    expect(skills[0].content).toContain('# Title')
+    expect(readSkillCatalog(root)).toEqual([])
   })
 })
 
-describe('a skill whose frontmatter disagrees with its directory', () => {
-  it('is reported under the frontmatter name, not the directory', async () => {
-    // The directory is only a container; the name the model sees comes from the file.
-    const written = await writeSkill(home, 'dir-name', { 'SKILL.md': skillMd({ name: 'declared' }) })
-    expect(listLibrary(home).map((entry) => entry.name)).toEqual(['declared'])
-    expect(written).toBeDefined()
-  })
-})
-
-describe('frontmatter keys the parser does not use', () => {
-  it('ignores a continuation line under an unrelated key', () => {
-    const text = ['---', 'license: MIT', '  continued', 'name: a', '---', ''].join('\n')
-    expect(parseFrontmatter(text).name).toBe('a')
-  })
-})
-
-describe('removeSkill', () => {
-  it('removes one skill and reports it', async () => {
-    await writeSkill(home, 'qs', { 'SKILL.md': 'x' })
-    expect(await removeSkill(home, 'qs')).toBe(true)
-    expect(listLibrary(home)).toEqual([])
+describe('the built-in rules', () => {
+  it('names the plugin protocol, and is not otherwise a skill', () => {
+    expect(isBuiltinSkill('digital-human-comms')).toBe(true)
+    expect(isBuiltinSkill('qs-assistant')).toBe(false)
   })
 
-  it('reports a skill that is not there, and a name it will not use', async () => {
-    expect(await removeSkill(home, 'absent')).toBe(false)
-    expect(await removeSkill(home, '../etc')).toBe(false)
-  })
-})
-
-describe('the library directory', () => {
-  it('sits under the registry root', () => {
-    expect(libraryDir('/home/dh')).toBe(join('/home/dh', SKILLS_DIR))
+  it('never offers a built-in name in the catalog', () => {
+    // The rules travel in the operating context, so the name is not a choice an
+    // operator can make; the directory is ignored even when it is still installed.
+    put('digital-human-comms', { 'SKILL.md': skillMd({ name: 'digital-human-comms', description: 'protocol' }) })
+    put('qs', { 'SKILL.md': skillMd({ name: 'qs' }) })
+    expect(readSkillCatalog(root).map((entry) => entry.name)).toEqual(['qs'])
   })
 })
