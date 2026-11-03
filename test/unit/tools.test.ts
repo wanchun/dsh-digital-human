@@ -143,6 +143,7 @@ describe('the chat tools', () => {
       'digital_human_conversations', 'digital_human_list', 'digital_human_usage', 'notify_bot', 'list_bot_targets',
       'set_session_title', 'memory_status', 'memory_compact', 'digital_human_requirement_create',
       'digital_human_requirement_read', 'digital_human_requirement_update', 'digital_human_requirement_attach',
+      'digital_human_requirement_archive',
     ])
   })
 
@@ -826,6 +827,64 @@ describe('the requirement tools', () => {
     expect(existsSync(join(result.path, 'params.md'))).toBe(true)
     // The generic gaps check calls every renderer, so this one must exist.
     expect(create.output.render({}, result)).toEqual([{ type: 'text', text: JSON.stringify(result) }])
+  })
+
+  it('archives a requirement: moves every file, appends the index, sets the phase', async () => {
+    const tools = build()
+    // A requirement holds its own documents and its state; archiving keeps both.
+    writeFileSync(join(requirementDir, 'nodes.md'), 'evidence')
+    mkdirSync(join(requirementDir, 'nodes'))
+    writeFileSync(join(requirementDir, 'nodes', 'dev.md'), 'x')
+    await toolOf(tools, 'digital_human_requirement_update').execute({ requirement: REQ, node: 'dev', status: 'done' })
+    const archive = toolOf(tools, 'digital_human_requirement_archive')
+    const result = await archive.execute({ requirement: REQ })
+    const archived = join(home, 'workspace', '_archive', REQ + '-20260101')
+    expect(result.dir).toBe(REQ + '-20260101')
+    expect(result.index).toBe(join(home, 'workspace', '_archive', 'index.md'))
+    expect(typeof result.archivedAt).toBe('string')
+    // A move, not a delete: every file kept its name and its bytes.
+    expect(existsSync(requirementDir)).toBe(false)
+    expect(readFileSync(join(archived, 'meta.json'), 'utf8')).toContain(REQ)
+    expect(readFileSync(join(archived, 'nodes.md'), 'utf8')).toBe('evidence')
+    expect(readFileSync(join(archived, 'nodes', 'dev.md'), 'utf8')).toBe('x')
+    const state = JSON.parse(readFileSync(join(archived, 'state.json'), 'utf8'))
+    expect(state.phase).toBe('archived')
+    expect(state.events.at(-1)).toContain('archived to')
+    // The first archive creates the index with its header, then one row.
+    const index = readFileSync(result.index, 'utf8')
+    expect(index.split('\n')[0]).toBe('| 需求名 | 线程名 | 归档时间 | 节点数 | 最后阶段 |')
+    expect(index).toContain(`| ${REQ_NAME} | ${REQ} | ${result.archivedAt} | 1 | planning |`)
+    expect(result.detail).toContain(archived)
+    expect(undeclaredKeys(archive.output.schema, result)).toEqual([])
+    expect(archive.output.render({}, result)).toEqual([{ type: 'text', text: result.detail }])
+    // A second archive appends a row and does not write the header again.
+    await toolOf(tools, 'digital_human_requirement_create').execute({ thread: 'REQ-2', name: '交付验证' })
+    const appended = await archive.execute({ requirement: 'REQ-2' })
+    const rows = readFileSync(appended.index, 'utf8').trim().split('\n')
+    expect(rows.filter((row) => row.startsWith('| 需求名'))).toHaveLength(1)
+    expect(rows.at(-1)).toContain('| 交付验证 | REQ-2 |')
+    // An archived requirement left reqs/, so its name no longer resolves there.
+    await expect(archive.execute({ requirement: REQ })).rejects.toThrow(/unknown requirement/)
+  })
+
+  it('refuses to archive onto a directory that already exists', async () => {
+    const target = join(home, 'workspace', '_archive', REQ + '-20260101')
+    mkdirSync(target, { recursive: true })
+    writeFileSync(join(target, 'kept.md'), 'old')
+    const archive = toolOf(build(), 'digital_human_requirement_archive')
+    await expect(archive.execute({ requirement: REQ })).rejects.toThrow(/archive target already exists/)
+    // Nothing moved, nothing overwritten, no index written.
+    expect(existsSync(join(requirementDir, 'meta.json'))).toBe(true)
+    expect(readFileSync(join(target, 'kept.md'), 'utf8')).toBe('old')
+    expect(existsSync(join(home, 'workspace', '_archive', 'index.md'))).toBe(false)
+  })
+
+  it('refuses an archive it cannot resolve, instead of moving the wrong directory', async () => {
+    const archive = toolOf(build(), 'digital_human_requirement_archive')
+    await expect(archive.execute({ requirement: 'ghost' })).rejects.toThrow(/unknown requirement: "ghost"/)
+    await expect(archive.execute({})).rejects.toThrow(/requires a requirement/)
+    expect(existsSync(requirementDir)).toBe(true)
+    expect(existsSync(join(home, 'workspace', '_archive'))).toBe(false)
   })
 })
 

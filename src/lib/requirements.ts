@@ -11,8 +11,8 @@
  * requirement without one falls back to its thread name.
  */
 
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 
 /** One requirement directory, as `meta.json` describes it. */
 export interface RequirementDir {
@@ -24,6 +24,15 @@ export interface RequirementDir {
 
 /** Directory under the requirement root that holds one directory per requirement. */
 export const REQUIREMENTS_DIR = 'reqs'
+
+/** Directory under the requirement root that holds archived requirements and their index. */
+export const ARCHIVE_DIR = '_archive'
+
+/** Header of the archive index, written once by the first archive. */
+const ARCHIVE_INDEX_HEADER = [
+  '| 需求名 | 线程名 | 归档时间 | 节点数 | 最后阶段 |',
+  '|---|---|---|---|---|',
+]
 
 /**
  * Read every `reqs/<dir>/meta.json` under one requirement root.
@@ -201,4 +210,58 @@ export function findRequirementDir(root: string, key: string): string | undefine
     return undefined
   }
   return undefined
+}
+
+/** One archived requirement, as the archive left it. */
+export interface ArchivedRequirement {
+  /** Directory name the requirement now has under `_archive/`. */
+  dir: string
+  /** When the move happened, as an ISO 8601 timestamp. */
+  archivedAt: string
+  /** Absolute path of the index that holds the new row. */
+  index: string
+}
+
+/**
+ * Move one requirement directory into the archive root and record the move.
+ *
+ * The move keeps every file: a requirement holds the evidence of its own work, so
+ * archiving is a change of location, never a cleanup. The state is written in the
+ * new location with phase `archived`, and one row is appended to
+ * `_archive/index.md`, which is created with its header on the first archive.
+ *
+ * @param root - the requirement root, the parent of `reqs/`.
+ * @param sourcePath - the requirement directory to move.
+ * @param names - the thread name and display name the row and state fall back to.
+ * @returns the archived directory name, the timestamp, and the index path.
+ */
+export function archiveRequirement(
+  root: string,
+  sourcePath: string,
+  names: { thread: string; name: string },
+): ArchivedRequirement {
+  const archiveRoot = join(root, ARCHIVE_DIR)
+  const dir = basename(sourcePath)
+  const target = join(archiveRoot, dir)
+  // A second archive of the same name would overwrite the documents of the first.
+  if (existsSync(target)) {
+    throw new Error(
+      `archive target already exists: ${target}. Nothing was moved. Rename or remove the archived copy first.`,
+    )
+  }
+  // Read the state before the move: the row records the phase the requirement
+  // ended in, and the archived state keeps every node it reached.
+  const state = readState(sourcePath, names)
+  const lastPhase = state.phase
+  const archivedAt = new Date().toISOString()
+  mkdirSync(archiveRoot, { recursive: true })
+  renameSync(sourcePath, target)
+  state.phase = 'archived'
+  state.events = [...state.events, `${archivedAt} archived to ${target}`]
+  writeState(target, state)
+  const index = join(archiveRoot, 'index.md')
+  const header = existsSync(index) ? '' : ARCHIVE_INDEX_HEADER.join('\n') + '\n'
+  const row = `| ${state.name} | ${state.thread} | ${archivedAt} | ${Object.keys(state.nodes).length} | ${lastPhase} |`
+  appendFileSync(index, header + row + '\n', 'utf8')
+  return { dir, archivedAt, index }
 }

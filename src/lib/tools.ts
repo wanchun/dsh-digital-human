@@ -17,7 +17,7 @@ import { basename, join } from 'node:path'
 import { requireConversation } from './chat.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
-import { attachFile, createRequirement, findRequirementDir, readRequirementDirs, readState, renderDigest, writeState } from './requirements.js'
+import { ARCHIVE_DIR, archiveRequirement, attachFile, createRequirement, findRequirementDir, readRequirementDirs, readState, renderDigest, writeState } from './requirements.js'
 import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
 import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
@@ -430,7 +430,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       tool,
       missing: `${tool} requires a requirement: pass the requirement thread name or directory name.`,
     })
-    return { dir, fallback: requirementFallback(root, dir, reference) }
+    return { root, dir, fallback: requirementFallback(root, dir, reference) }
   }
   // Fingerprint of a send that already landed, so a retry after a failed report does
   // not assign the same work a second time.
@@ -1361,6 +1361,46 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     },
   }
 
+  /** Move one finished requirement into the archive root and index it. */
+  const requirementArchive = {
+    name: 'digital_human_requirement_archive',
+    description:
+      'Archive one finished requirement: move reqs/<dir>/ to _archive/<dir>/ keeping every file, append one row '
+      + 'to _archive/index.md, and set its state phase to "archived". Nothing is deleted. A target directory that '
+      + 'already exists is refused, never overwritten.',
+    parameters: {
+      requirement: {
+        type: 'string',
+        required: true,
+        description: 'Requirement thread name or directory name, for example a name reported by digital_human_requirement_read.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          detail: { type: 'string', required: true },
+          dir: { type: 'string', required: true },
+          archivedAt: { type: 'string', required: true },
+          index: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => renderText(value),
+    },
+    async execute(args) {
+      const { root, dir: source, fallback } = await requirementContext(
+        args.requirement,
+        'digital_human_requirement_archive',
+      )
+      const archived = archiveRequirement(root, source, fallback)
+      return {
+        detail: `Archived ${archived.dir} to ${join(root, ARCHIVE_DIR, archived.dir)}; appended one row to ${archived.index}.`,
+        ...archived,
+      }
+    },
+  }
+
   const tools: any[] = [send, status, stop, messages, conversations, roster, usage]
   // A digital human with no bot speaks to its peers only: the chat tools land in a
   // Session, while these two can only reach an IM contact. The title tool is not one
@@ -1401,7 +1441,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       return { dir: created.dir, path: created.path }
     },
   })
-  tools.push(requirementRead, requirementUpdate, requirementAttach)
+  tools.push(requirementRead, requirementUpdate, requirementAttach, requirementArchive)
 
   return tools.map(normalizeTool)
 }
