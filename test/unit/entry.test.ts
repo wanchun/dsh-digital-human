@@ -441,6 +441,47 @@ describe('the management route', () => {
     ])
   })
 
+  it('files every role of one requirement under the requirement, not a role suffix', async () => {
+    // The requirement's thread is the one conversation its roles share. A Session
+    // filed under the directory name is the same requirement, so it groups with the
+    // rest instead of opening a second node.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const store = new HumanStore(home)
+    const roles = [
+      { id: 'lead-assistant', name: '负责人', order: 10, conversation: THREAD },
+      { id: 'dev-assistant', name: '开发', order: 20, conversation: THREAD },
+      { id: 'qa-assistant', name: '自测', order: 30, conversation: THREAD },
+      { id: 'deploy-assistant', name: '部署', order: 40, conversation: DIR },
+    ]
+    for (const role of roles) {
+      await store.upsert({
+        id: role.id, name: role.name, enabled: true, order: role.order, sessionKey: 'requirement',
+      } as any)
+      await writeFile(join(home, 'humans', role.id, 'sessions.json'), JSON.stringify({ [role.conversation]: `session-${role.id}` }))
+    }
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    expect(tree).toHaveLength(4)
+    for (const role of tree) {
+      expect(role.requirements).toEqual([
+        { conversation: THREAD, dir: DIR, name: 'cas文档同步', sessions: [{ sessionId: `session-${role.humanId}` }] },
+      ])
+    }
+    // Four roles, four Sessions, one requirement: the view merges them by `conversation`.
+    expect(tree.map((role) => role.requirements[0].sessions[0].sessionId).sort()).toEqual([
+      'session-deploy-assistant', 'session-dev-assistant', 'session-lead-assistant', 'session-qa-assistant',
+    ])
+  })
+
   it('resolves one session to its digital human icon', async () => {
     const { route, platform } = await platformWithRoute()
     const icon = 'data:image/png;base64,iVBORw0KGgo='

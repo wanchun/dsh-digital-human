@@ -909,6 +909,13 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       // The requirement root is the directory the digital humans share: `reqs/`
       // sits in it, and each directory's `meta.json` names its thread.
       const requirementDirs = readRequirementDirs(defaultWorkspace?.path ?? defaultWorkspacePath(home))
+      // A Session is filed by a conversation name, and the requirement it belongs to
+      // may be named by the thread or by the directory. Both resolve to the thread,
+      // so one requirement is one node even when its Sessions were filed two ways.
+      const threadByDir = new Map<string, string>()
+      for (const [thread, meta] of requirementDirs) threadByDir.set(meta.dir, thread)
+      const requirementOf = (conversation: string) =>
+        requirementDirs.has(conversation) ? conversation : threadByDir.get(conversation) ?? ''
       const tree: Array<{
         humanId: string
         name: string
@@ -929,7 +936,10 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         for (const address of addresses) {
           // An address the index does not name is a Session reached by id; it has no
           // thread, and the view decides whether that is a chat or not a requirement.
-          const key = address.conversationId ?? ''
+          // A named one is grouped by the requirement it belongs to, not by the label
+          // it was filed under: the thread and the directory are the same requirement.
+          const conversation = address.conversationId ?? ''
+          const key = requirementOf(conversation) || conversation
           const bucket = byRequirement.get(key) ?? []
           bucket.push({ sessionId: address.sessionId })
           byRequirement.set(key, bucket)

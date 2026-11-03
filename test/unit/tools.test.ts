@@ -169,13 +169,14 @@ describe('the chat tools', () => {
   it('sends to a peer by name or id, and reports the conversation it used', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    const result = await send.execute({ to: 'dev', message: 'do it', conversation_id: 'main', requirement: REQ })
-    expect(result).toMatchObject({ to: 'dev', conversationId: 'main', accepted: true, finished: false })
+    const result = await send.execute({ to: 'dev', message: 'do it', requirement: REQ })
+    expect(result).toMatchObject({ to: 'dev', conversationId: REQ, accepted: true, finished: false })
     const delivered = service.calls.find((entry) => entry.method === 'send')!.args[1]
-    expect(delivered).toMatchObject({ conversationId: 'main', from: 'pm' })
+    // The requirement's thread is the address: every role is reached there.
+    expect(delivered).toMatchObject({ conversationId: REQ, from: 'pm' })
     // The requirement directory rides ahead of the body, so the peer works inside it.
     expect(delivered.message).toBe(`需求目录：${requirementDir}\n\ndo it`)
-    const byName = await send.execute({ to: '开发助手', message: 'x', conversation_id: 'main', requirement: REQ })
+    const byName = await send.execute({ to: '开发助手', message: 'x', requirement: REQ })
     expect(byName.to).toBe('dev')
   })
 
@@ -201,7 +202,7 @@ describe('the chat tools', () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
     await send.execute({
-      to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ + '-20260101',
+      to: 'dev', message: 'x', requirement: REQ + '-20260101',
     })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
       .toBe(`需求目录：${requirementDir}\n\nx`)
@@ -213,7 +214,6 @@ describe('the chat tools', () => {
     await send.execute({
       to: 'dev',
       message: '请处理',
-      conversation_id: 'main',
       requirement: REQ,
       task_id: 'w-01',
       node: '开发',
@@ -249,7 +249,7 @@ describe('the chat tools', () => {
   it('sends a structured dispatch with no body', async () => {
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({
-      to: 'dev', conversation_id: 'main', requirement: REQ,
+      to: 'dev', requirement: REQ,
       facts: { subsystem: 'RCS-CSA' },
       context: '已接单；上一步结论见 nodes/intake.md',
     })
@@ -265,7 +265,7 @@ describe('the chat tools', () => {
   it('accepts facts as one line when the caller has no structure to give', async () => {
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({
-      to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ,
+      to: 'dev', message: 'x', requirement: REQ,
       facts: '子系统 RCS-CSA；版本 1.16.0',
     })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
@@ -280,7 +280,7 @@ describe('the chat tools', () => {
       const service = serviceStub()
       const send = toolOf(build(service), 'digital_human_send')
       await expect(send.execute({
-        to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ,
+        to: 'dev', message: 'x', requirement: REQ,
         [field]: ['do this', 'then that'],
       })).rejects.toThrow(new RegExp(`refuses ${field}（${label}）：派单只传事实`))
       expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
@@ -291,7 +291,7 @@ describe('the chat tools', () => {
     for (const field of ['step_list', 'instructions', 'precautions', 'command']) {
       const service = serviceStub()
       await expect(toolOf(build(service), 'digital_human_send').execute({
-        to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ, [field]: 'x',
+        to: 'dev', message: 'x', requirement: REQ, [field]: 'x',
       })).rejects.toThrow(/派单只传事实，不传做法/)
       expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
     }
@@ -302,7 +302,7 @@ describe('the chat tools', () => {
     // rewrite the payload for no gain.
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({
-      to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ, steps: [],
+      to: 'dev', message: 'x', requirement: REQ, steps: [],
     })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
       .toBe(`需求目录：${requirementDir}\n\nx`)
@@ -311,7 +311,7 @@ describe('the chat tools', () => {
   it('waits for a reply when asked, and reports the outcome', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    const result = await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1, requirement: REQ })
+    const result = await send.execute({ to: 'dev', message: 'x', wait_seconds: 1, requirement: REQ })
     expect(result.finished).toBe(true)
     expect(result.detail).toContain('turn finished')
   })
@@ -319,7 +319,7 @@ describe('the chat tools', () => {
   it('reports a reply that is still running', async () => {
     const service = serviceStub({ status: async () => ({ exists: true, isGenerating: true }) })
     const send = toolOf(build(service), 'digital_human_send')
-    const result = await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1, requirement: REQ })
+    const result = await send.execute({ to: 'dev', message: 'x', wait_seconds: 1, requirement: REQ })
     expect(result.finished).toBe(false)
     expect(result.detail).toContain('not ready')
   })
@@ -327,7 +327,7 @@ describe('the chat tools', () => {
   it('carries the caller Session when the Host supplies one', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ }, { agent: { session: { header: { id: 'session-me-1' } } } })
+    await send.execute({ to: 'dev', message: 'x', requirement: REQ }, { agent: { session: { header: { id: 'session-me-1' } } } })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].fromSession).toBe('session-me-1')
   })
 
@@ -337,7 +337,7 @@ describe('the chat tools', () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
     for (const exec of [undefined, {}, { agent: {} }, { agent: { session: { header: {} } } }, { agent: { session: { header: { id: 7 } } } }]) {
-      await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ }, exec)
+      await send.execute({ to: 'dev', message: 'x', requirement: REQ }, exec)
     }
     expect(service.calls.filter((entry) => entry.method === 'send')
       .every((entry) => entry.args[1].fromSession === undefined)).toBe(true)
@@ -347,10 +347,10 @@ describe('the chat tools', () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
     const deadline = '2026-11-01T00:00:00.000Z'
-    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline, requirement: REQ })
+    await send.execute({ to: 'dev', message: 'x', deadline, requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1]).toMatchObject({ deadline })
     // A blank value is "no deadline", not a deadline of empty string.
-    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline: '  ', requirement: REQ })
+    await send.execute({ to: 'dev', message: 'x', deadline: '  ', requirement: REQ })
     expect(service.calls.filter((entry) => entry.method === 'send')[1].args[1].deadline).toBeUndefined()
   })
 
@@ -364,14 +364,14 @@ describe('the chat tools', () => {
   it('ignores a Session address that is not a string', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', session_id: 7, requirement: REQ })
+    await send.execute({ to: 'dev', message: 'x', session_id: 7, requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
   })
 
   it('reports the Session it delivered into', async () => {
     const service = serviceStub()
     const detail = (await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ })).detail
+      .execute({ to: 'dev', message: 'x', requirement: REQ })).detail
     expect(detail).toContain('session-1')
   })
 
@@ -403,14 +403,14 @@ describe('the chat tools', () => {
 
   it('refuses to reach a digital human outside the declared peers', async () => {
     const send = toolOf(build(serviceStub()), 'digital_human_send')
-    await expect(send.execute({ to: 'off', message: 'x', conversation_id: 'main', requirement: REQ }))
+    await expect(send.execute({ to: 'off', message: 'x', requirement: REQ }))
       .rejects.toThrow(/may only message/)
   })
 
   it('lets a record with no peers declared reach anyone', async () => {
     const service = serviceStub()
     await toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
-      .execute({ to: 'pm', message: 'x', conversation_id: 'main', requirement: REQ })
+      .execute({ to: 'pm', message: 'x', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[0]).toBe('pm')
   })
 
@@ -489,7 +489,7 @@ describe('the chat tools', () => {
   it('refuses the whole array when one target is unknown, delivering nothing', async () => {
     const service = serviceStub()
     const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
-    await expect(send.execute({ to: ['pm', 'ghost'], message: 'x', conversation_id: 'main', requirement: REQ }))
+    await expect(send.execute({ to: ['pm', 'ghost'], message: 'x', requirement: REQ }))
       .rejects.toThrow(/unknown digital human/)
     expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
   })
@@ -525,9 +525,9 @@ describe('the chat tools', () => {
   it('still addresses by conversation when the transport cannot resolve edges', async () => {
     const service = serviceStub({ threadTarget: undefined })
     await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ })
+      .execute({ to: 'dev', message: 'x', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
-      .toMatchObject({ conversationId: 'main', sessionId: undefined })
+      .toMatchObject({ conversationId: REQ, sessionId: undefined })
   })
 
   it('polls by conversation when the delivery reports no Session', async () => {
@@ -538,9 +538,9 @@ describe('the chat tools', () => {
       },
     })
     const result = await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1, requirement: REQ })
+      .execute({ to: 'dev', message: 'x', wait_seconds: 1, requirement: REQ })
     expect(result.finished).toBe(true)
-    expect(service.calls.find((entry) => entry.method === 'status')!.args[1]).toBe('main')
+    expect(service.calls.find((entry) => entry.method === 'status')!.args[1]).toBe(REQ)
   })
 
   it('reports an idle peer and a turn that was not stopped', async () => {
@@ -567,19 +567,32 @@ describe('the chat tools', () => {
     expect(read.detail).toContain('开发助手 → pm')
   })
 
-  it('refuses a send that names no address at all', async () => {
-    // Omitting both would pour every subject into the one shared `main` thread, and
-    // the split would be silent and permanent.
+  it('opens the requirement thread when the send names no address', async () => {
+    // The requirement is the address. A send with no edge to follow still reaches
+    // the peer, in the one thread every role of that requirement shares.
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    await expect(send.execute({ to: 'dev', message: 'x', requirement: REQ })).rejects.toThrow(/conversation_id or session_id is required/)
-    expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
+    const result = await send.execute({ to: 'dev', message: 'x', requirement: REQ })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
+      .toMatchObject({ conversationId: REQ, sessionId: undefined })
+    expect(result.conversationId).toBe(REQ)
   })
 
-  it('still accepts an explicit "main", which is a choice rather than an omission', async () => {
+  it('accepts the requirement directory as the thread name', async () => {
     const service = serviceStub()
-    await toolOf(build(service), 'digital_human_send').execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].conversationId).toBe('main')
+    await toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'dev', message: 'x', conversation_id: REQ + '-20260101', requirement: REQ })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].conversationId).toBe(REQ)
+  })
+
+  it('refuses a role-suffixed conversation instead of splitting the requirement', async () => {
+    // One requirement is one conversation. A suffix would file the same requirement
+    // under a second node in the tree, which is exactly the split this guards.
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    await expect(send.execute({ to: 'dev', message: 'x', conversation_id: REQ + '-dev', requirement: REQ }))
+      .rejects.toThrow(/must be the requirement's thread name.*do not add a role suffix/)
+    expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
   })
 
   it('accepts a Session address in place of the conversation', async () => {

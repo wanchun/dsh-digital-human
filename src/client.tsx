@@ -210,6 +210,13 @@ const STYLE = `
   cursor: pointer; user-select: none;
 }
 .dh-tree-row .dh-tree-label { flex: 1; margin: 0 6px 0 4px; }
+/* The running mark the native row carries: one 16px spinner, centered on the same
+   line as the label and gone when the turn ends. It is the row's last child, so
+   the role mark keeps the column's left edge. */
+.dh-tree-running {
+  display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+}
 .dh-tree-row:hover, .dh-tree-row[data-current="true"] { background: var(--dsw-alias-interactive-bg-hover); }
 .dh-tree-row:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary); outline-offset: -2px; }
 .dh-tree-hint { margin: 0; padding: 4px 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
@@ -1541,13 +1548,15 @@ interface TreeSection {
 }
 
 /** One session row inside a requirement menu. */
-function TreeSession({ label, sessionId, icon, current, openSession }: {
+function TreeSession({ label, sessionId, icon, current, running, openSession }: {
   label: string
   sessionId: string
   /** The role's own mark; the row falls back to a neutral Session icon. */
   icon?: string
   /** Whether the main column is showing this Session. */
   current?: boolean
+  /** Whether the Session is working right now, as the native row reports it. */
+  running?: boolean
   openSession: (sessionId: string) => void
 }) {
   return (
@@ -1565,6 +1574,13 @@ function TreeSession({ label, sessionId, icon, current, openSession }: {
         {icon ? <img src={icon} alt="" width={16} height={16} /> : <IconNewChatOutlineRegular size={16} />}
       </span>
       <span className="dh-tree-label">{label}</span>
+      {/* The same 16px spinner the native row shows while a turn runs. It sits at
+          the row's end, so the role mark keeps the column's left edge. */}
+      {running === true ? (
+        <span className="dh-tree-running" role="img" aria-label="运行中">
+          <StateDot state="ongoing" size={16} />
+        </span>
+      ) : null}
     </button>
   )
 }
@@ -1584,6 +1600,28 @@ function liveSessionIds(workspace: any): Set<string> | null {
 }
 
 /**
+ * The Sessions the runtime reports as running right now.
+ *
+ * Two sources are read because a host may register either one: the Session status
+ * store is the same one the native row draws its spinner from, and the Workspace
+ * catalog carries `running` on every row. The union is what the tree shows.
+ */
+function runningSessionIds(status: any, workspace: any): Set<string> {
+  const found = new Set<string>()
+  const snapshot = status?.getSnapshot?.()
+  if (snapshot && typeof snapshot.forEach === 'function') {
+    snapshot.forEach((entry: any, sessionId: string) => {
+      if (entry?.running === true) found.add(sessionId)
+    })
+  }
+  const byId = workspace?.sessions?.list?.getSnapshot?.()?.byId
+  for (const [sessionId, row] of Object.entries(byId ?? {})) {
+    if ((row as any)?.running === true) found.add(sessionId)
+  }
+  return found
+}
+
+/**
  * The digital-human column: chat-keyed roles first, then one menu per requirement.
  *
  * The tree is read whole from the Host; nothing here holds its own state. A
@@ -1593,12 +1631,14 @@ function liveSessionIds(workspace: any): Set<string> | null {
  * requirement. Clicking a row only selects that Session; the conversation pane
  * never changes.
  */
-function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }: {
+function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace, getSessionStatus }: {
   rpc?: RpcCall
   openSession?: (sessionId: string) => void
   onClose?: () => void
   /** The workspace service, read lazily: it may register after this plugin. */
   getWorkspace?: () => any
+  /** The Session runtime status store, read lazily for the same reason. */
+  getSessionStatus?: () => any
 }) {
   const rpc = injected ?? hostRpc
   const [state, setState] = React.useState<{ loading: boolean; error: string; humans: TreeHuman[] }>({
@@ -1648,15 +1688,22 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
     return selection.subscribe(read)
   }, [getWorkspace])
 
-  // The catalog arrives asynchronously, and a row filtered against an empty first
-  // frame would stay hidden. Re-render on every catalog change; the filter itself
-  // reads the latest snapshot.
-  const [, refreshCatalog] = React.useState(0)
+  // The catalog and the Session status arrive asynchronously, and a row filtered or
+  // marked against an empty first frame would stay wrong. Re-render on every change
+  // of either; the filter and the running mark read the latest snapshot.
+  const [, refreshStatus] = React.useState(0)
   React.useEffect(() => {
-    const list = typeof getWorkspace === 'function' ? getWorkspace()?.sessions?.list : undefined
-    if (typeof list?.subscribe !== 'function') return
-    return list.subscribe(() => refreshCatalog((value) => value + 1))
-  }, [getWorkspace])
+    const workspace = typeof getWorkspace === 'function' ? getWorkspace() : undefined
+    const status = typeof getSessionStatus === 'function' ? getSessionStatus() : undefined
+    const bump = () => refreshStatus((value) => value + 1)
+    const disposers: Array<() => void> = []
+    for (const store of [workspace?.sessions?.list, status]) {
+      if (typeof store?.subscribe !== 'function') continue
+      const dispose = store.subscribe(bump)
+      if (typeof dispose === 'function') disposers.push(dispose)
+    }
+    return () => { for (const dispose of disposers) dispose() }
+  }, [getWorkspace, getSessionStatus])
 
   const open = (sessionId: string) => {
     if (typeof openSession !== 'function') {
@@ -1670,7 +1717,9 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
   // section with the two chat kinds as subheadings, the rest fill the menu of the
   // requirement they were filed under. Rows whose Session the catalog no longer
   // lists are dropped: clicking one would clear the main area.
-  const live = liveSessionIds(typeof getWorkspace === 'function' ? getWorkspace() : undefined)
+  const workspace = typeof getWorkspace === 'function' ? getWorkspace() : undefined
+  const live = liveSessionIds(workspace)
+  const running = runningSessionIds(typeof getSessionStatus === 'function' ? getSessionStatus() : undefined, workspace)
   const sections: TreeSection[] = []
   // Keyed by the thread, because that is the Session key; the title comes from the
   // directory's meta.json, so the menu reads the requirement's name.
@@ -1752,7 +1801,13 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace }
             <span className="dh-tree-label">{section.title}</span>
           </summary>
           {section.rows.map((row) => (
-                <TreeSession key={row.sessionId} {...row} current={row.sessionId === current} openSession={open} />
+                <TreeSession
+                  key={row.sessionId}
+                  {...row}
+                  current={row.sessionId === current}
+                  running={running.has(row.sessionId)}
+                  openSession={open}
+                />
               ))}
         </details>
       ))}
@@ -1848,6 +1903,20 @@ export function apply(ctx) {
     }
   }
 
+  /**
+   * The Session runtime status store, resolved the same way.
+   *
+   * It is the source the native row reads for its spinner, so the tree marks a
+   * running Session exactly when the native list would.
+   */
+  const sessionStatusService = () => {
+    try {
+      return (ctx.get?.('uiSession') ?? (ctx as any).uiSession)?.sessionStatus
+    } catch {
+      return undefined
+    }
+  }
+
   hostRpc = rpc
 
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => {
@@ -1893,7 +1962,13 @@ export function apply(ctx) {
       const dispose = ctx.slots.register({
         name: 'sidebar.workspaces',
         priority: -20,
-        inject: () => ({ rpc, openSession, onClose: () => showTree(false), getWorkspace: workspaceService }),
+        inject: () => ({
+          rpc,
+          openSession,
+          onClose: () => showTree(false),
+          getWorkspace: workspaceService,
+          getSessionStatus: sessionStatusService,
+        }),
       } as any, DigitalHumansTree as any)
       return () => dispose()
     }), 'digital-human: sidebar column')

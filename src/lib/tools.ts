@@ -360,6 +360,30 @@ function requirementFallback(root, dir, reference) {
 }
 
 /**
+ * The one conversation a requirement runs in: its own thread name.
+ *
+ * Every role of a requirement is reached in the same thread, so the tree can file
+ * all of their Sessions under one requirement node. A caller may name the thread,
+ * but only by that name: a role suffix would split the requirement in two.
+ *
+ * @param requirement - the resolved requirement, whose thread is the key.
+ * @param dir - the requirement directory, accepted as another name for it.
+ * @param requested - the caller's `conversation_id`, when it passed one.
+ * @returns the thread name the dispatch must use.
+ */
+function requirementConversation(requirement, dir, requested) {
+  const asked = String(requested ?? '').trim()
+  if (!asked || asked === requirement.thread) return requirement.thread
+  // The directory is the same requirement, so it resolves to the thread.
+  if (asked === basename(dir)) return requirement.thread
+  throw new Error(
+    `conversation_id must be the requirement's thread name (${JSON.stringify(requirement.thread)}), `
+    + `not ${JSON.stringify(asked)}. One requirement runs in one conversation shared by every role; `
+    + 'do not add a role suffix.',
+  )
+}
+
+/**
  * Chat and IM tools for one digital human.
  * @param options.service - the `digitalHumans` Host service.
  * @param options.humanId - the owning digital human.
@@ -420,9 +444,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       + 'not steps, commands or cautions. The peer\'s playbook decides the steps. '
       + 'Delivery is asynchronous, like handing over a task. Set wait_seconds to wait for its reply, '
       + 'then read it with digital_human_messages, or poll with digital_human_status. '
-      + 'Omit the address to reply in the thread this Session already shares with the peer — the '
-      + 'transport sends it back to the Session that asked. Pass session_id to choose a Session, '
-      + 'or conversation_id to open a new thread. '
+      + 'The conversation is the requirement\'s own thread, shared by every role, so all of a '
+      + 'requirement\'s Sessions file under one requirement node. Omit the address to reply in the '
+      + 'thread this Session already shares with the peer — the transport sends it back to the Session '
+      + 'that asked. Pass session_id to choose a Session. '
       + 'Every send is also a work item: a busy peer queues it, and a reply to its running turn '
       + 'amends the item already open. The detail says which it became.',
     parameters: {
@@ -449,15 +474,16 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         description: 'Requirement thread name or directory name. The tool resolves the directory and writes '
           + 'its absolute path into the head of the message, so the peer works inside that requirement.',
       },
-      // Required here, unlike on the reading tools: a send with no address would put
-      // every subject into one shared thread.
+      // The requirement is the address: one requirement is one conversation, shared
+      // by its handler, developer, self-test and deploy roles.
       conversation_id: {
         type: 'string',
-        description: 'Conversation id that isolates one thread, for example a requirement or version name. '
-          + 'Opens the thread when it is new; omit it to reply in the thread this Session is already in.',
+        description: 'The requirement\'s thread name. Omit it and the tool dispatches into that thread. '
+          + 'When given it must equal the requirement\'s thread name or its directory name: one requirement '
+          + 'runs in one conversation shared by every role, so a role suffix is refused.',
       },
       // The other form of the same address, for answering the Session that asked.
-      session_id: { type: 'string', description: 'The target Session id to deliver into, as reported by a <dsh_peer_source> block. Use this to answer the Session that asked for the work. One of session_id and conversation_id is required.' },
+      session_id: { type: 'string', description: 'The target Session id to deliver into, as reported by a <dsh_peer_source> block. Use this to answer the Session that asked for the work.' },
       wait_seconds: {
         type: 'number',
         description: `Wait up to this many seconds for the target to finish its turn, at most ${WAIT_MAX_SECONDS}. Defaults to 0 (return as soon as the message is accepted).`,
@@ -563,13 +589,18 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       // caller reads.
       refuseForbiddenDispatch(args)
       const me = await self()
+      const root = requirementRoot(me)
       // Resolve the requirement before any peer or address: a send with no requirement
       // is refused, never filed into a shared directory.
-      const requirementDir = requirementDirIn(requirementRoot(me), args.requirement, {
+      const requirementDir = requirementDirIn(root, args.requirement, {
         tool: 'digital_human_send',
         missing: 'digital_human_send requires a requirement（派单必须带需求）: pass the requirement thread name '
           + 'or directory name so the peer works inside that requirement.',
       })
+      // One requirement is one conversation, shared by every role: the peer is
+      // reached in the requirement's own thread, never in a role-suffixed one.
+      const requirement = requirementFallback(root, requirementDir, args.requirement)
+      const conversation = requirementConversation(requirement, requirementDir, args.conversation_id)
       // The transport prepends <dsh_peer_source>, so this head lands after it and
       // before the body. Every recipient reads the same absolute directory, then the
       // same facts and context in the same fixed order.
@@ -591,23 +622,16 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       for (const target of targets) {
         const peer = await resolvePeer(service, me, target)
         // No address means "the thread this Session is already in": the edges say which
-        // Session of the peer last asked here, and a reply goes back to it.
+        // Session of the peer last asked here, and a reply goes back to it. An explicit
+        // name is the requirement's own thread, so the lookup is scoped to it.
         const address = await addressOf(service, humanId, peer, {
-          conversationId: typeof args.conversation_id === 'string' ? args.conversation_id : undefined,
+          conversationId: typeof args.conversation_id === 'string' ? conversation : undefined,
           sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
           exec,
         })
-        // Nothing to address and nothing to reply to: say what is missing rather than
-        // pour the subject into the one shared `main` thread.
-        if (address.conversationId === undefined && address.sessionId === undefined) {
-          throw new Error(
-            'conversation_id or session_id is required. A digital human is reached in a named '
-            + 'conversation, and sending without one would put every requirement into the same '
-            + 'shared thread. Use this requirement\'s conversation_id, or the session_id reported '
-            + 'by the <dsh_peer_source> block of the message being answered.',
-          )
-        }
-        addressed.push({ peer, address })
+        // A requirement always names its own thread, so a send that found no edge
+        // still has an address: it opens that requirement's conversation.
+        addressed.push({ peer, address: { sessionId: address.sessionId, conversationId: conversation } })
       }
       // Same targets, same thread, same words, within a minute: this is a retry of a
       // handover that already landed, not a second piece of work.

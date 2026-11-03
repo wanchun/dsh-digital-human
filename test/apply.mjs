@@ -245,7 +245,6 @@ const outbound = await scope.tools.get('digital_human_send')
   .execute({
     to: 'pm-assistant',
     message: 'status please',
-    conversation_id: 'main',
     requirement: 'REQ-1',
     task_id: 'w-01',
     node: '开发',
@@ -260,7 +259,7 @@ const outbound = await scope.tools.get('digital_human_send')
     context: '已接单；上一步结论见 nodes/intake.md',
   })
 check('send resolves the peer by id', outbound.to === 'pm-assistant' && outbound.accepted === true)
-check('send reports the conversation', outbound.conversationId === 'main')
+check('send reports the requirement thread', outbound.conversationId === 'REQ-1')
 const lastPrompt = platform.prompts.at(-1).content[0].text
 check('the requirement path follows the peer source and precedes the facts',
   lastPrompt.indexOf('<dsh_peer_source') < lastPrompt.indexOf(`需求目录：${requirement.path}`)
@@ -273,24 +272,23 @@ check('the head carries task, node, facts and context in one fixed order',
   && lastPrompt.indexOf('上下文：已接单；上一步结论见 nodes/intake.md') < lastPrompt.indexOf('status please'))
 check('send refuses a dispatch that carries steps, commands or cautions',
   await scope.tools.get('digital_human_send').execute({
-    to: 'pm-assistant', message: 'x', conversation_id: 'main', requirement: 'REQ-1', steps: ['one', 'two'],
+    to: 'pm-assistant', message: 'x', requirement: 'REQ-1', steps: ['one', 'two'],
   }).then(() => false, (error) => error.message.includes('派单只传事实')))
 check('send refuses a missing requirement',
-  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', conversation_id: 'main' }).then(() => false, (error) => error.message.includes('派单必须带需求')))
+  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x' }).then(() => false, (error) => error.message.includes('派单必须带需求')))
 check('send refuses an unknown requirement',
-  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', conversation_id: 'main', requirement: 'ghost' }).then(() => false, () => true))
+  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', requirement: 'ghost' }).then(() => false, () => true))
 const byName = await scope.tools.get('digital_human_send')
-  .execute({ to: '研发PM助手', message: 'ping', conversation_id: 'main', requirement: 'REQ-1' })
+  .execute({ to: '研发PM助手', message: 'ping', requirement: 'REQ-1' })
 check('send resolves the peer by display name', byName.to === 'pm-assistant')
-// A send with no address at all would pour every requirement into one shared thread,
-// so the tool refuses it rather than defaulting.
-check('send refuses a missing address',
-  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', requirement: 'REQ-1' }).then(() => false, () => true))
-check('send refuses itself', await scope.tools.get('digital_human_send').execute({ to: 'dev-assistant', message: 'x', conversation_id: 'main', requirement: 'REQ-1' }).then(() => false, () => true))
-check('send refuses an unknown peer', await scope.tools.get('digital_human_send').execute({ to: 'nobody', message: 'x', conversation_id: 'main', requirement: 'REQ-1' }).then(() => false, () => true))
+// The requirement is its own address: a send that names none still lands in the one
+// thread every role of that requirement shares.
+check('send uses the requirement thread when no address is given', byName.conversationId === 'REQ-1')
+check('send refuses itself', await scope.tools.get('digital_human_send').execute({ to: 'dev-assistant', message: 'x', requirement: 'REQ-1' }).then(() => false, () => true))
+check('send refuses an unknown peer', await scope.tools.get('digital_human_send').execute({ to: 'nobody', message: 'x', requirement: 'REQ-1' }).then(() => false, () => true))
 const listed = await scope.tools.get('digital_human_list').execute({})
 check('list names the caller as you', listed.detail.includes('you'))
-const mail = await scope.tools.get('digital_human_messages').execute({ to: 'pm-assistant', limit: 5 })
+const mail = await scope.tools.get('digital_human_messages').execute({ to: 'pm-assistant', conversation_id: 'REQ-1', limit: 5 })
 check('messages reads the peer mailbox', mail.detail.includes('status please'), mail.detail)
 
 console.log('8) IM binding')

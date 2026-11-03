@@ -86,7 +86,7 @@ export function Pill(props: any) {
 }
 
 export function StateDot(props: any) {
-  return <span data-state={props.state} />
+  return <span data-state={props.state} data-size={props.size} />
 }
 
 export function Switch(props: any) {

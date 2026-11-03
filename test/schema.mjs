@@ -163,11 +163,10 @@ const calls = [
   ['digital_human_list', {}],
   ['digital_human_status', { to: 'pm-assistant' }],
   ['digital_human_messages', { to: 'pm-assistant' }],
-  // An address, because the tool refuses a send that names none.
+  // No address: the requirement's own thread is the address of a dispatch.
   ['digital_human_send', {
     to: 'pm-assistant',
     message: 'schema probe',
-    conversation_id: 'schema-probe',
     requirement: 'REQ-SCHEMA',
     task_id: 'w-schema',
     node: '开发',
