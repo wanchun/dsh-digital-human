@@ -117,7 +117,7 @@ const service = provided.get('digitalHumans')
 
 console.log('1) preset-scoped tools')
 const scoped = buildHumanTools({ ctx, service, humanId: 'dev-assistant' })
-check('every scoped tool is declared', scoped.length === 12, String(scoped.length))
+check('every scoped tool is declared', scoped.length === 16, String(scoped.length))
 check('the title tool is exposed to a record with a bot', scoped.some((tool) => tool.name === 'set_session_title'))
 // Inventing a conversation id splits one subject across two Sessions, so the
 // capability to see what already exists is what lets a caller reuse it.
@@ -156,17 +156,22 @@ for (const tool of [...scoped, registry]) {
 }
 
 console.log('5) real outputs satisfy their declared schema')
+const byName = new Map(scoped.map((tool) => [tool.name, tool]))
+// A send names a requirement, so one must exist before the send below can pass.
+await byName.get('digital_human_requirement_create').execute({ thread: 'REQ-SCHEMA', name: 'Schema Probe' })
 const calls = [
   ['digital_human_list', {}],
   ['digital_human_status', { to: 'pm-assistant' }],
   ['digital_human_messages', { to: 'pm-assistant' }],
   // An address, because the tool refuses a send that names none.
-  ['digital_human_send', { to: 'pm-assistant', message: 'schema probe', conversation_id: 'schema-probe' }],
+  ['digital_human_send', { to: 'pm-assistant', message: 'schema probe', conversation_id: 'schema-probe', requirement: 'REQ-SCHEMA' }],
+  ['digital_human_requirement_read', { requirement: 'REQ-SCHEMA' }],
+  ['digital_human_requirement_update', { requirement: 'REQ-SCHEMA', node: 'dev', status: 'running' }],
+  ['digital_human_requirement_attach', { requirement: 'REQ-SCHEMA', name: 'probe.md', content: 'x' }],
   ['memory_status', {}],
   ['memory_compact', {}],
   ['list_bot_targets', { bot_id: 'bot-a' }],
 ]
-const byName = new Map(scoped.map((tool) => [tool.name, tool]))
 for (const [name, args] of calls) {
   const tool = byName.get(name)
   let value = null

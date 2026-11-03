@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -7,8 +7,18 @@ import { buildHumanTools, buildRegistryTool } from '../../src/lib/tools'
 
 let home = ''
 
+/** The requirement every send names, and the directory that backs it. */
+const REQ = 'REQ-1'
+const REQ_NAME = '组织基线验证'
+let requirementDir = ''
+
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'dh-tools-'))
+  // A requirement exists before a send may name it: the tools refuse a name they
+  // cannot resolve, so the fixture is the same fact every call reads.
+  requirementDir = join(home, 'workspace', 'reqs', REQ + '-20260101')
+  mkdirSync(requirementDir, { recursive: true })
+  writeFileSync(join(requirementDir, 'meta.json'), JSON.stringify({ thread: REQ, name: REQ_NAME }))
 })
 
 afterEach(() => {
@@ -56,7 +66,7 @@ function serviceStub(overrides: Record<string, unknown> = {}) {
   const record = (method: string, ...args: any[]) => { calls.push({ method, args }) }
   const service: any = {
     calls,
-    store: { dir: (id: string) => join(home, 'humans', id) },
+    store: { home, dir: (id: string) => join(home, 'humans', id) },
     require: async (id: string) => {
       record('require', id)
       if (!people[id]) throw new Error(`unknown digital human: ${JSON.stringify(id)}`)
@@ -131,7 +141,8 @@ describe('the chat tools', () => {
     expect(names).toEqual([
       'digital_human_send', 'digital_human_status', 'digital_human_stop', 'digital_human_messages',
       'digital_human_conversations', 'digital_human_list', 'digital_human_usage', 'notify_bot', 'list_bot_targets',
-      'set_session_title', 'memory_status', 'memory_compact',
+      'set_session_title', 'memory_status', 'memory_compact', 'digital_human_requirement_create',
+      'digital_human_requirement_read', 'digital_human_requirement_update', 'digital_human_requirement_attach',
     ])
   })
 
@@ -158,19 +169,48 @@ describe('the chat tools', () => {
   it('sends to a peer by name or id, and reports the conversation it used', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    const result = await send.execute({ to: 'dev', message: 'do it', conversation_id: 'main' })
+    const result = await send.execute({ to: 'dev', message: 'do it', conversation_id: 'main', requirement: REQ })
     expect(result).toMatchObject({ to: 'dev', conversationId: 'main', accepted: true, finished: false })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1]).toMatchObject({
-      conversationId: 'main', message: 'do it', from: 'pm',
-    })
-    const byName = await send.execute({ to: '开发助手', message: 'x', conversation_id: 'main' })
+    const delivered = service.calls.find((entry) => entry.method === 'send')!.args[1]
+    expect(delivered).toMatchObject({ conversationId: 'main', from: 'pm' })
+    // The requirement directory rides ahead of the body, so the peer works inside it.
+    expect(delivered.message).toBe(`需求目录：${requirementDir}\n\ndo it`)
+    const byName = await send.execute({ to: '开发助手', message: 'x', conversation_id: 'main', requirement: REQ })
     expect(byName.to).toBe('dev')
+  })
+
+  it('refuses a send that names no requirement, delivering nothing', async () => {
+    // A peer that gets no requirement directory would file the work wherever its
+    // workspace happens to be; the refusal is the contract, not a fallback.
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    await expect(send.execute({ to: 'dev', message: 'x', conversation_id: 'main' }))
+      .rejects.toThrow(/requires a requirement.*派单必须带需求/)
+    expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
+  })
+
+  it('refuses a requirement it cannot resolve instead of guessing one', async () => {
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    await expect(send.execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: 'ghost' }))
+      .rejects.toThrow(/unknown requirement: "ghost"/)
+    expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
+  })
+
+  it('resolves a requirement by directory name as well as by thread name', async () => {
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    await send.execute({
+      to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ + '-20260101',
+    })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].message)
+      .toBe(`需求目录：${requirementDir}\n\nx`)
   })
 
   it('waits for a reply when asked, and reports the outcome', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    const result = await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1 })
+    const result = await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1, requirement: REQ })
     expect(result.finished).toBe(true)
     expect(result.detail).toContain('turn finished')
   })
@@ -178,7 +218,7 @@ describe('the chat tools', () => {
   it('reports a reply that is still running', async () => {
     const service = serviceStub({ status: async () => ({ exists: true, isGenerating: true }) })
     const send = toolOf(build(service), 'digital_human_send')
-    const result = await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1 })
+    const result = await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1, requirement: REQ })
     expect(result.finished).toBe(false)
     expect(result.detail).toContain('not ready')
   })
@@ -186,7 +226,7 @@ describe('the chat tools', () => {
   it('carries the caller Session when the Host supplies one', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main' }, { agent: { session: { header: { id: 'session-me-1' } } } })
+    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ }, { agent: { session: { header: { id: 'session-me-1' } } } })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].fromSession).toBe('session-me-1')
   })
 
@@ -196,7 +236,7 @@ describe('the chat tools', () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
     for (const exec of [undefined, {}, { agent: {} }, { agent: { session: { header: {} } } }, { agent: { session: { header: { id: 7 } } } }]) {
-      await send.execute({ to: 'dev', message: 'x', conversation_id: 'main' }, exec)
+      await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ }, exec)
     }
     expect(service.calls.filter((entry) => entry.method === 'send')
       .every((entry) => entry.args[1].fromSession === undefined)).toBe(true)
@@ -206,31 +246,31 @@ describe('the chat tools', () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
     const deadline = '2026-11-01T00:00:00.000Z'
-    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline })
+    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline, requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1]).toMatchObject({ deadline })
     // A blank value is "no deadline", not a deadline of empty string.
-    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline: '  ' })
+    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', deadline: '  ', requirement: REQ })
     expect(service.calls.filter((entry) => entry.method === 'send')[1].args[1].deadline).toBeUndefined()
   })
 
   it('passes a Session address through as the address', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    await send.execute({ to: 'dev', message: 'x', session_id: 'session-them-1' })
+    await send.execute({ to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBe('session-them-1')
   })
 
   it('ignores a Session address that is not a string', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', session_id: 7 })
+    await send.execute({ to: 'dev', message: 'x', conversation_id: 'main', session_id: 7, requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
   })
 
   it('reports the Session it delivered into', async () => {
     const service = serviceStub()
     const detail = (await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', conversation_id: 'main' })).detail
+      .execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ })).detail
     expect(detail).toContain('session-1')
   })
 
@@ -241,7 +281,7 @@ describe('the chat tools', () => {
     })
     const send = toolOf(build(service), 'digital_human_send')
     const result = await send.execute(
-      { to: 'dev', message: 'x' },
+      { to: 'dev', message: 'x', requirement: REQ },
       { agent: { session: { header: { id: 'session-me-1' } } } },
     )
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
@@ -256,20 +296,20 @@ describe('the chat tools', () => {
       threadTarget: async () => { throw new Error('must not be asked when an address is given') },
     })
     await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', session_id: 'session-them-2' })
+      .execute({ to: 'dev', message: 'x', session_id: 'session-them-2', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBe('session-them-2')
   })
 
   it('refuses to reach a digital human outside the declared peers', async () => {
     const send = toolOf(build(serviceStub()), 'digital_human_send')
-    await expect(send.execute({ to: 'off', message: 'x', conversation_id: 'main' }))
+    await expect(send.execute({ to: 'off', message: 'x', conversation_id: 'main', requirement: REQ }))
       .rejects.toThrow(/may only message/)
   })
 
   it('lets a record with no peers declared reach anyone', async () => {
     const service = serviceStub()
     await toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
-      .execute({ to: 'pm', message: 'x', conversation_id: 'main' })
+      .execute({ to: 'pm', message: 'x', conversation_id: 'main', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[0]).toBe('pm')
   })
 
@@ -292,7 +332,7 @@ describe('the chat tools', () => {
     })
     // dev declares no peers, so both targets are reachable.
     const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
-    const result = await send.execute({ to: ['pm', 'qa'], message: 'do it', conversation_id: 'REQ-1' })
+    const result = await send.execute({ to: ['pm', 'qa'], message: 'do it', conversation_id: 'REQ-1', requirement: REQ })
     expect(service.calls.filter((entry) => entry.method === 'send').map((entry) => entry.args[0]))
       .toEqual(['pm', 'qa'])
     // Two targets, two receipts: each carries the Session and the work item of one peer.
@@ -323,8 +363,8 @@ describe('the chat tools', () => {
       },
     })
     const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
-    const first = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1' })
-    const again = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1' })
+    const first = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1', requirement: REQ })
+    const again = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1', requirement: REQ })
     expect(delivered).toBe(1)
     expect(again.taskId).toBe(first.taskId)
     expect(again.detail).toContain('not handed over twice')
@@ -340,7 +380,7 @@ describe('the chat tools', () => {
       }),
     })
     const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
-    const result = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1' })
+    const result = await send.execute({ to: 'pm', message: 'do it', conversation_id: 'REQ-1', requirement: REQ })
     expect(undeclaredKeys(send.output.schema, result)).toEqual([])
     expect(result.results[0].detail).toContain('w-01')
   })
@@ -348,7 +388,7 @@ describe('the chat tools', () => {
   it('refuses the whole array when one target is unknown, delivering nothing', async () => {
     const service = serviceStub()
     const send = toolOf(buildHumanTools({ ctx: ctxWith(), service, humanId: 'dev' }), 'digital_human_send')
-    await expect(send.execute({ to: ['pm', 'ghost'], message: 'x', conversation_id: 'main' }))
+    await expect(send.execute({ to: ['pm', 'ghost'], message: 'x', conversation_id: 'main', requirement: REQ }))
       .rejects.toThrow(/unknown digital human/)
     expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
   })
@@ -374,7 +414,7 @@ describe('the chat tools', () => {
     })
     await toolOf(build(service), 'digital_human_send')
       .execute(
-        { to: 'dev', message: 'x', conversation_id: 'REQ-1' },
+        { to: 'dev', message: 'x', conversation_id: 'REQ-1', requirement: REQ },
         { agent: { session: { header: { id: 'session-me-1' } } } },
       )
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
@@ -384,7 +424,7 @@ describe('the chat tools', () => {
   it('still addresses by conversation when the transport cannot resolve edges', async () => {
     const service = serviceStub({ threadTarget: undefined })
     await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', conversation_id: 'main' })
+      .execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
       .toMatchObject({ conversationId: 'main', sessionId: undefined })
   })
@@ -397,7 +437,7 @@ describe('the chat tools', () => {
       },
     })
     const result = await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1 })
+      .execute({ to: 'dev', message: 'x', conversation_id: 'main', wait_seconds: 1, requirement: REQ })
     expect(result.finished).toBe(true)
     expect(service.calls.find((entry) => entry.method === 'status')!.args[1]).toBe('main')
   })
@@ -431,27 +471,27 @@ describe('the chat tools', () => {
     // the split would be silent and permanent.
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
-    await expect(send.execute({ to: 'dev', message: 'x' })).rejects.toThrow(/conversation_id or session_id is required/)
+    await expect(send.execute({ to: 'dev', message: 'x', requirement: REQ })).rejects.toThrow(/conversation_id or session_id is required/)
     expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
   })
 
   it('still accepts an explicit "main", which is a choice rather than an omission', async () => {
     const service = serviceStub()
-    await toolOf(build(service), 'digital_human_send').execute({ to: 'dev', message: 'x', conversation_id: 'main' })
+    await toolOf(build(service), 'digital_human_send').execute({ to: 'dev', message: 'x', conversation_id: 'main', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].conversationId).toBe('main')
   })
 
   it('accepts a Session address in place of the conversation', async () => {
     const service = serviceStub()
-    await toolOf(build(service), 'digital_human_send').execute({ to: 'dev', message: 'x', session_id: 'session-them-1' })
+    await toolOf(build(service), 'digital_human_send').execute({ to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBe('session-them-1')
   })
 
   it('refuses an unknown peer, a self-send and an empty target', async () => {
     const send = toolOf(build(serviceStub()), 'digital_human_send')
-    await expect(send.execute({ to: 'nobody', message: 'x' })).rejects.toThrow(/unknown digital human/)
-    await expect(send.execute({ to: 'pm', message: 'x' })).rejects.toThrow(/cannot send to itself/)
-    await expect(send.execute({ to: '', message: 'x' })).rejects.toThrow(/target digital human is required/)
+    await expect(send.execute({ to: 'nobody', message: 'x', requirement: REQ })).rejects.toThrow(/unknown digital human/)
+    await expect(send.execute({ to: 'pm', message: 'x', requirement: REQ })).rejects.toThrow(/cannot send to itself/)
+    await expect(send.execute({ to: '', message: 'x', requirement: REQ })).rejects.toThrow(/target digital human is required/)
   })
 
   it('reads a conversation', async () => {
@@ -522,7 +562,7 @@ describe('the chat tools', () => {
       },
     })
     const result = await toolOf(build(service), 'digital_human_send').execute({
-      to: 'dev', message: 'x', conversation_id: 'REQ-1', mode: 'amend', task_id: 'w-01', note: 'ships Monday',
+      to: 'dev', message: 'x', conversation_id: 'REQ-1', mode: 'amend', task_id: 'w-01', note: 'ships Monday', requirement: REQ,
     })
     expect(result).toMatchObject({ taskId: 'w-01', taskState: 'in_progress', taskIntent: 'amend' })
     expect(result.detail).toContain('amendment to w-01')
@@ -541,7 +581,7 @@ describe('the chat tools', () => {
       },
     })
     const result = await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', conversation_id: 'REQ-1', wait_seconds: 30 })
+      .execute({ to: 'dev', message: 'x', conversation_id: 'REQ-1', wait_seconds: 30, requirement: REQ })
     expect(result.detail).toContain('Queued as w-02')
     expect(result.finished).toBe(false)
     // Waiting would only observe the turn in front of the queued item.
@@ -559,7 +599,7 @@ describe('the chat tools', () => {
       },
     })
     const result = await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'stop', conversation_id: 'REQ-1', mode: 'cancel' })
+      .execute({ to: 'dev', message: 'stop', conversation_id: 'REQ-1', mode: 'cancel', requirement: REQ })
     expect(result).toMatchObject({ accepted: false, taskId: 'w-01', taskState: 'cancelled' })
     expect(result.detail).toContain('Cancelled work item w-01')
     expect(result.detail).not.toContain('Delivered')
@@ -588,6 +628,90 @@ describe('the chat tools', () => {
     expect(result.detail).toContain('failed')
     expect(result.detail).toContain('see the log')
     expect(service.calls.find((entry) => entry.method === 'tasks')!.args).toEqual(['dev', 'REQ-1'])
+  })
+})
+
+describe('the requirement tools', () => {
+  const build = (service: any = serviceStub()) => buildHumanTools({ ctx: ctxWith(), service, humanId: 'pm' })
+  const stateFile = () => join(requirementDir, 'state.json')
+
+  it('reads the digest of a requirement with no state yet', async () => {
+    const read = toolOf(build(), 'digital_human_requirement_read')
+    const result = await read.execute({ requirement: REQ })
+    expect(result.detail).toContain('线程名：REQ-1')
+    expect(result.detail).toContain('需求名：组织基线验证')
+    expect(result.detail).toContain('（尚未开始）')
+    // Reading is not a write: no state.json appears until an update makes one.
+    expect(existsSync(stateFile())).toBe(false)
+    expect(undeclaredKeys(read.output.schema, result)).toEqual([])
+  })
+
+  it('refuses a requirement it cannot resolve, instead of guessing a directory', async () => {
+    const read = toolOf(build(), 'digital_human_requirement_read')
+    await expect(read.execute({ requirement: 'ghost' })).rejects.toThrow(/unknown requirement: "ghost"/)
+    await expect(read.execute({})).rejects.toThrow(/requires a requirement/)
+  })
+
+  it('advances one node, writes state.json and returns the new digest', async () => {
+    const tools = build()
+    const update = toolOf(tools, 'digital_human_requirement_update')
+    const result = await update.execute({
+      requirement: REQ, node: 'dev', status: 'running', note: '写代码', evidence: ['nodes/dev.md'],
+    })
+    expect(result.detail).toContain('- dev：running（写代码） 证据 nodes/dev.md')
+    const state = JSON.parse(readFileSync(stateFile(), 'utf8'))
+    expect(state).toMatchObject({
+      thread: REQ,
+      name: REQ_NAME,
+      nodes: { dev: { status: 'running', note: '写代码', evidence: ['nodes/dev.md'] } },
+    })
+    expect(typeof state.updatedAt).toBe('string')
+    // The same read tool reports what the update wrote, so the state has one source.
+    expect((await toolOf(tools, 'digital_human_requirement_read').execute({ requirement: REQ })).detail)
+      .toContain('- dev：running')
+    expect(undeclaredKeys(update.output.schema, result)).toEqual([])
+  })
+
+  it('refuses an update with no node or no status', async () => {
+    const update = toolOf(build(), 'digital_human_requirement_update')
+    await expect(update.execute({ requirement: REQ, status: 'done' })).rejects.toThrow(/node is required/)
+    await expect(update.execute({ requirement: REQ, node: 'dev' })).rejects.toThrow(/status is required/)
+    expect(existsSync(stateFile())).toBe(false)
+  })
+
+  it('attaches evidence inside the requirement directory and returns its path', async () => {
+    const attach = toolOf(build(), 'digital_human_requirement_attach')
+    const result = await attach.execute({ requirement: REQ, name: 'report.md', content: '# ok', kind: 'self-test' })
+    expect(result.path).toBe(join(requirementDir, 'self-test', 'report.md'))
+    expect(result.detail).toContain(result.path)
+    expect(readFileSync(result.path, 'utf8')).toBe('# ok')
+    // The default folder is nodes, where a node's own evidence belongs.
+    const node = await attach.execute({ requirement: REQ, name: 'dev.md', content: 'x' })
+    expect(node.path).toBe(join(requirementDir, 'nodes', 'dev.md'))
+    expect(undeclaredKeys(attach.output.schema, result)).toEqual([])
+  })
+
+  it('keeps a slash in the name from leaving the evidence folder', async () => {
+    const attach = toolOf(build(), 'digital_human_requirement_attach')
+    const result = await attach.execute({ requirement: REQ, name: '../escape.md', content: 'x' })
+    expect(result.path).toBe(join(requirementDir, 'nodes', '..-escape.md'))
+  })
+
+  it('refuses an attachment with no name, and an unknown requirement', async () => {
+    const attach = toolOf(build(), 'digital_human_requirement_attach')
+    await expect(attach.execute({ requirement: REQ, content: 'x' })).rejects.toThrow(/name is required/)
+    await expect(attach.execute({ requirement: 'ghost', name: 'a.md', content: 'x' }))
+      .rejects.toThrow(/unknown requirement/)
+  })
+
+  it('creates a requirement and renders its receipt', async () => {
+    const create = toolOf(build(), 'digital_human_requirement_create')
+    const result = await create.execute({ thread: 'REQ-2', name: '交付验证' })
+    expect(result.dir.startsWith('交付验证-')).toBe(true)
+    expect(existsSync(join(result.path, 'meta.json'))).toBe(true)
+    expect(existsSync(join(result.path, 'params.md'))).toBe(true)
+    // The generic gaps check calls every renderer, so this one must exist.
+    expect(create.output.render({}, result)).toEqual([{ type: 'text', text: JSON.stringify(result) }])
   })
 })
 

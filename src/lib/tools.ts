@@ -13,11 +13,11 @@
  * and editing digital humans is deployment work, not digital-human work.
  */
 
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { requireConversation } from './chat.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
-import { createRequirement } from './requirements.js'
+import { attachFile, createRequirement, findRequirementDir, readRequirementDirs, readState, renderDigest, writeState } from './requirements.js'
 import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
 import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
@@ -223,6 +223,42 @@ function normalizeTool(definition) {
 }
 
 /**
+ * Resolve one requirement directory, refusing rather than guessing.
+ *
+ * The reference is a thread name or a directory name, and only a directory that
+ * exists counts. A miss is an error because a made-up path would file the work
+ * somewhere no role reads.
+ */
+function requirementDirIn(root, reference, { tool, missing }) {
+  const wanted = String(reference ?? '').trim()
+  if (!wanted) throw new Error(missing)
+  const dir = findRequirementDir(root, wanted)
+  if (!dir) {
+    throw new Error(
+      `unknown requirement: ${JSON.stringify(reference)}. ${tool} resolves a requirement only by its `
+      + 'thread name or directory name. Create it with digital_human_requirement_create first.',
+    )
+  }
+  return dir
+}
+
+/**
+ * The names a digest falls back to before any state was written.
+ *
+ * A requirement with no state.json has no thread or name inside it, so they come
+ * from meta.json. A directory without one reads as its own name, which is still
+ * more useful than an empty label.
+ */
+function requirementFallback(root, dir, reference) {
+  const folder = basename(dir)
+  for (const [thread, entry] of readRequirementDirs(root)) {
+    if (entry.dir === folder) return { thread, name: entry.name }
+  }
+  const named = String(reference ?? '').trim() || folder
+  return { thread: named, name: folder }
+}
+
+/**
  * Chat and IM tools for one digital human.
  * @param options.service - the `digitalHumans` Host service.
  * @param options.humanId - the owning digital human.
@@ -255,6 +291,22 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       ...(owner?.humanId === humanId && owner?.conversationId ? { conversation: owner.conversationId } : {}),
     })
   }
+  /** The root the requirement directories live under: the shared workspace. */
+  const requirementRoot = (record) => record.workspace || join(service.store.home, 'workspace')
+  /**
+   * Resolve one requirement and the names its digest falls back to.
+   *
+   * Every requirement tool goes through this, so "unknown" is one error shape and
+   * no tool ever invents a directory.
+   */
+  const requirementContext = async (reference, tool) => {
+    const root = requirementRoot(await self())
+    const dir = requirementDirIn(root, reference, {
+      tool,
+      missing: `${tool} requires a requirement: pass the requirement thread name or directory name.`,
+    })
+    return { dir, fallback: requirementFallback(root, dir, reference) }
+  }
   // Fingerprint of a send that already landed, so a retry after a failed report does
   // not assign the same work a second time.
   const recentSends = new Map<string, { at: number; value: any }>()
@@ -281,6 +333,14 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           + 'An array assigns one independent work item per target, each with its own receipt.',
       },
       message: { type: 'string', required: true, description: 'Message body. State the task, the acceptance criteria, and how to report back.' },
+      // Required on every send: the peer needs the requirement's own directory, and a
+      // message that names none could only file the work in a shared folder.
+      requirement: {
+        type: 'string',
+        required: true,
+        description: 'Requirement thread name or directory name. The tool resolves the directory and writes '
+          + 'its absolute path into the head of the message, so the peer works inside that requirement.',
+      },
       // Required here, unlike on the reading tools: a send with no address would put
       // every subject into one shared thread.
       conversation_id: {
@@ -357,6 +417,16 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     },
     async execute(args, exec) {
       const me = await self()
+      // Resolve the requirement before any peer or address: a send with no requirement
+      // is refused, never filed into a shared directory.
+      const requirementDir = requirementDirIn(requirementRoot(me), args.requirement, {
+        tool: 'digital_human_send',
+        missing: 'digital_human_send requires a requirement（派单必须带需求）: pass the requirement thread name '
+          + 'or directory name so the peer works inside that requirement.',
+      })
+      // The transport prepends <dsh_peer_source>, so this head lands after it and
+      // before the body. Every recipient reads the same absolute directory.
+      const message = `需求目录：${requirementDir}\n\n${String(args.message ?? '')}`
       const targets = Array.isArray(args.to) ? args.to : [args.to]
       if (targets.length === 0) throw new Error('a target digital human is required')
       // Its own Session travels with the message, so the reply can come back to the
@@ -400,7 +470,8 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         note ?? null,
         typeof args.task_id === 'string' ? args.task_id : null,
         typeof args.deadline === 'string' ? args.deadline : null,
-        String(args.message ?? ''),
+        requirementDir,
+        message,
       ])
       const repeated = recentSends.get(fingerprint)
       if (repeated !== undefined && Date.now() - repeated.at < DUPLICATE_WINDOW_MS) {
@@ -416,7 +487,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         const delivered = await service.send(peer.id, {
           conversationId: address.conversationId,
           sessionId: address.sessionId,
-          message: args.message,
+          message,
           from: humanId,
           fromSession,
           ...(mode ? { mode } : {}),
@@ -1009,6 +1080,114 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     },
   }
 
+  /** Read one requirement's digest: the state a role reads instead of the history. */
+  const requirementRead = {
+    name: 'digital_human_requirement_read',
+    description:
+      'Read one requirement\'s state digest: thread name, requirement name, phase, node statuses with their '
+      + 'evidence pointers, the next steps, and the most recent events. Read this at the start of every turn '
+      + 'instead of replaying the conversation. Name the requirement by its thread name or directory name.',
+    parameters: {
+      requirement: {
+        type: 'string',
+        required: true,
+        description: 'Requirement thread name or directory name, for example a name reported by digital_human_requirement_create.',
+      },
+    },
+    output: TEXT_OUTPUT,
+    async execute(args) {
+      const { dir, fallback } = await requirementContext(args.requirement, 'digital_human_requirement_read')
+      return { detail: renderDigest(readState(dir, fallback)) }
+    },
+  }
+
+  /** Advance one node of a requirement and return the new digest. */
+  const requirementUpdate = {
+    name: 'digital_human_requirement_update',
+    description:
+      'Set one node of a requirement to a new status, with a short note and evidence pointers, then return '
+      + 'the updated digest. This is the only write path into state.json: use it for progress instead of '
+      + 'editing the file by hand.',
+    parameters: {
+      requirement: {
+        type: 'string',
+        required: true,
+        description: 'Requirement thread name or directory name.',
+      },
+      node: { type: 'string', required: true, description: 'Node name, for example pm, dev, self-test, or deploy.' },
+      status: { type: 'string', required: true, description: 'New status of the node, for example pending, running, done, or blocked.' },
+      note: { type: 'string', description: 'One short line about the node, shown in parentheses beside its status.' },
+      evidence: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Absolute paths or names of the files that prove the status, at most three are shown.',
+      },
+    },
+    output: TEXT_OUTPUT,
+    async execute(args) {
+      const { dir, fallback } = await requirementContext(args.requirement, 'digital_human_requirement_update')
+      const node = String(args.node ?? '').trim()
+      const status = String(args.status ?? '').trim()
+      if (!node) throw new Error('node is required')
+      if (!status) throw new Error('status is required')
+      const state = readState(dir, fallback)
+      const note = typeof args.note === 'string' && args.note.trim() ? args.note.trim() : undefined
+      const evidence = Array.isArray(args.evidence) ? args.evidence.map((entry) => String(entry)) : undefined
+      state.nodes[node] = {
+        status,
+        ...(note ? { note } : {}),
+        ...(evidence && evidence.length > 0 ? { evidence } : {}),
+        updatedAt: new Date().toISOString(),
+      }
+      return { detail: renderDigest(writeState(dir, state)) }
+    },
+  }
+
+  /** Fold one evidence file into a requirement directory. */
+  const requirementAttach = {
+    name: 'digital_human_requirement_attach',
+    description:
+      'Write one evidence file into a requirement directory and return its absolute path: nodes/ for a node\'s '
+      + 'output, self-test/ for a test report, or files/ for anything else. Use the returned path as the '
+      + 'evidence of digital_human_requirement_update; never leave a product in the workspace root.',
+    parameters: {
+      requirement: {
+        type: 'string',
+        required: true,
+        description: 'Requirement thread name or directory name.',
+      },
+      name: { type: 'string', required: true, description: 'File name inside the chosen folder, for example review.md.' },
+      content: { type: 'string', required: true, description: 'File body to write.' },
+      kind: {
+        type: 'string',
+        enum: ['nodes', 'self-test', 'files'],
+        description: 'Which folder of the requirement the file belongs to. Defaults to nodes.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          detail: { type: 'string', required: true },
+          path: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => renderText(value),
+    },
+    async execute(args) {
+      const { dir } = await requirementContext(args.requirement, 'digital_human_requirement_attach')
+      const name = String(args.name ?? '').trim()
+      if (!name) throw new Error('name is required')
+      const file = attachFile(dir, {
+        name,
+        content: String(args.content ?? ''),
+        kind: args.kind === 'self-test' ? 'self-test' : args.kind === 'files' ? 'files' : 'nodes',
+      })
+      return { detail: `Attached ${name} to ${file}.`, path: file }
+    },
+  }
+
   const tools: any[] = [send, status, stop, messages, conversations, roster, usage]
   // A digital human with no bot speaks to its peers only: the chat tools land in a
   // Session, while these two can only reach an IM contact. The title tool is not one
@@ -1036,6 +1215,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         additionalProperties: false,
         properties: { dir: { type: 'string', required: true }, path: { type: 'string', required: true } },
       },
+      render: (_args, value) => renderText(value),
     },
     async execute(args) {
       const record = await service.require(humanId)
@@ -1048,6 +1228,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       return { dir: created.dir, path: created.path }
     },
   })
+  tools.push(requirementRead, requirementUpdate, requirementAttach)
 
   return tools.map(normalizeTool)
 }

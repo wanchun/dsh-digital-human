@@ -236,19 +236,32 @@ check('the memory context renders the rules', scope.contexts[0].text().includes(
 check('refuses an empty human id', (() => { try { applyTools(makeCtx().ctx, {}) ; return false } catch { return true } })())
 
 console.log('7) tools drive the chat system')
+// A send names its requirement; the tool resolves the directory and puts its
+// absolute path at the head of the message.
+const requirement = await scope.tools.get('digital_human_requirement_create')
+  .execute({ thread: 'REQ-1', name: '组织基线验证' })
+check('create returns an absolute requirement directory', requirement.path.startsWith('/'))
 const outbound = await scope.tools.get('digital_human_send')
-  .execute({ to: 'pm-assistant', message: 'status please', conversation_id: 'main' })
+  .execute({ to: 'pm-assistant', message: 'status please', conversation_id: 'main', requirement: 'REQ-1' })
 check('send resolves the peer by id', outbound.to === 'pm-assistant' && outbound.accepted === true)
 check('send reports the conversation', outbound.conversationId === 'main')
+const lastPrompt = platform.prompts.at(-1).content[0].text
+check('the requirement path follows the peer source and precedes the body',
+  lastPrompt.indexOf('<dsh_peer_source') < lastPrompt.indexOf(`需求目录：${requirement.path}`)
+  && lastPrompt.indexOf(`需求目录：${requirement.path}`) < lastPrompt.indexOf('status please'))
+check('send refuses a missing requirement',
+  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', conversation_id: 'main' }).then(() => false, (error) => error.message.includes('派单必须带需求')))
+check('send refuses an unknown requirement',
+  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', conversation_id: 'main', requirement: 'ghost' }).then(() => false, () => true))
 const byName = await scope.tools.get('digital_human_send')
-  .execute({ to: '研发PM助手', message: 'ping', conversation_id: 'main' })
+  .execute({ to: '研发PM助手', message: 'ping', conversation_id: 'main', requirement: 'REQ-1' })
 check('send resolves the peer by display name', byName.to === 'pm-assistant')
 // A send with no address at all would pour every requirement into one shared thread,
 // so the tool refuses it rather than defaulting.
 check('send refuses a missing address',
-  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x' }).then(() => false, () => true))
-check('send refuses itself', await scope.tools.get('digital_human_send').execute({ to: 'dev-assistant', message: 'x', conversation_id: 'main' }).then(() => false, () => true))
-check('send refuses an unknown peer', await scope.tools.get('digital_human_send').execute({ to: 'nobody', message: 'x', conversation_id: 'main' }).then(() => false, () => true))
+  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', requirement: 'REQ-1' }).then(() => false, () => true))
+check('send refuses itself', await scope.tools.get('digital_human_send').execute({ to: 'dev-assistant', message: 'x', conversation_id: 'main', requirement: 'REQ-1' }).then(() => false, () => true))
+check('send refuses an unknown peer', await scope.tools.get('digital_human_send').execute({ to: 'nobody', message: 'x', conversation_id: 'main', requirement: 'REQ-1' }).then(() => false, () => true))
 const listed = await scope.tools.get('digital_human_list').execute({})
 check('list names the caller as you', listed.detail.includes('you'))
 const mail = await scope.tools.get('digital_human_messages').execute({ to: 'pm-assistant', limit: 5 })
