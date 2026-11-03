@@ -460,14 +460,15 @@ console.log('13) bound bots are aligned at startup, without a save')
   aligned.ctx.provide('connection', connection)
   await applyPlatform(aligned.ctx, { home: alignHome })
 
-  check('the workspace is pushed at startup', seen.some((entry) => entry.method === 'bot.workspace.set'))
+  // The platform now has one fixed workspace: a record no longer names its own,
+  // so neither the record's /tmp nor any per-record path may be pushed.
+  const workspacePush = seen.find((entry) => entry.method === 'bot.workspace.set')
+  check('no per-record workspace is pushed', workspacePush === undefined || workspacePush.payload.workspace !== '/tmp')
   check('the preset is pushed at startup', seen.some((entry) => entry.method === 'bot.preset.set'))
   check('the source block is pushed at startup', seen.some((entry) => entry.method === 'bot.context-enhancement.set'))
   const context = seen.find((entry) => entry.method === 'bot.context-enhancement.set')
   check('the startup claim reaches the pushed guidance',
     context.payload.config.group.guidance.includes('wohR_owner'), context.payload.config.group.guidance.slice(-90))
-  check('the pushed workspace is the digital human\'s',
-    seen.find((entry) => entry.method === 'bot.workspace.set').payload.workspace === '/tmp')
 
   await rm(root, { recursive: true, force: true })
 }
@@ -514,7 +515,8 @@ console.log('14) an alignment that found no connection recovers on a later refre
     }),
   })
   await late.provided.get('digitalHumans').refresh()
-  check('the later refresh pushes the workspace', seen.some((entry) => entry.method === 'bot.workspace.set'))
+  // One fixed workspace: the record no longer names a directory to push.
+  check('the later refresh pushes no per-record workspace', seen.every((entry) => entry.method !== 'bot.workspace.set'))
   check('the later refresh pushes the preset', seen.some((entry) => entry.method === 'bot.preset.set'))
   check('the later refresh pushes the source block', seen.some((entry) => entry.method === 'bot.context-enhancement.set'))
 
@@ -613,7 +615,7 @@ console.log('16) a delivered session is filed under its Workspace')
   const bareSent = await bare.provided.get('digitalHumans').send('ws-two', { message: 'hi' })
   const bareRow = bare.sessions.find((entry) => entry.sessionId === bareSent.sessionId)
   check('no roster means no Workspace id', bareRow.workspaceId === undefined)
-  check('no roster still passes the named directory', bareRow.cwd === target, String(bareRow.cwd))
+  check('a record with no roster runs in the fixed workspace', bareRow.cwd === '' || bareRow.cwd === undefined, String(bareRow.cwd))
 
   await rm(root, { recursive: true, force: true })
 }
