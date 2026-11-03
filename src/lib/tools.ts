@@ -1555,7 +1555,8 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     name: 'digital_human_requirement_create',
     description:
       'Create one requirement directory and its metadata in a single step: reqs/<name>-<date>/ with meta.json and a params.md skeleton. '
-      + 'Use this instead of writing those files by hand, so the thread name, the directory and the display name cannot drift apart.',
+      + 'Use this instead of writing those files by hand, so the thread name, the directory and the display name cannot drift apart. '
+      + 'Fill subsystems one row per subsystem: the version belongs to the subsystem, not to the requirement. A requirement touching three subsystems passes three entries. A tool or pure-document requirement passes none, and params.md records kind: tool instead of a table row.',
     parameters: {
       thread: { type: 'string', description: 'Thread name (the Session key) this requirement runs under.', required: true },
       name: { type: 'string', description: 'Requirement name people read; the directory is named after it.', required: true },
