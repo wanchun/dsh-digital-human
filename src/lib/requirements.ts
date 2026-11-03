@@ -42,9 +42,28 @@ const ARCHIVE_INDEX_HEADER = [
  * @returns thread name -> the directory and display name it maps to.
  */
 export function readRequirementDirs(workspacePath: string | undefined): Map<string, RequirementDir> {
+  if (!workspacePath) return new Map()
+  return readMetaDirs(join(workspacePath, REQUIREMENTS_DIR))
+}
+
+/**
+ * Read every archived requirement's `meta.json` under one requirement root.
+ *
+ * An archived requirement left `reqs/`, so the live map no longer names it. The
+ * view still needs to know that the thread is archived, not unknown: this map is
+ * what keeps its Sessions off the tree until a restore brings it back.
+ *
+ * @param workspacePath - the requirement root, the parent of `_archive/`.
+ * @returns thread name -> the archived directory and display name.
+ */
+export function readArchivedRequirementDirs(workspacePath: string | undefined): Map<string, RequirementDir> {
+  if (!workspacePath) return new Map()
+  return readMetaDirs(join(workspacePath, ARCHIVE_DIR))
+}
+
+/** Read the `meta.json` of every directory under one requirement folder. */
+function readMetaDirs(root: string): Map<string, RequirementDir> {
   const found = new Map<string, RequirementDir>()
-  if (!workspacePath) return found
-  const root = join(workspacePath, REQUIREMENTS_DIR)
   let entries: Array<{ name: string; isDirectory(): boolean }> = []
   try {
     entries = readdirSync(root, { withFileTypes: true })
@@ -198,13 +217,28 @@ export function attachFile(dirPath: string, input: { name: string; content: stri
 
 /** Resolve one requirement directory by thread name or directory name. */
 export function findRequirementDir(root: string, key: string): string | undefined {
-  const byThread = readRequirementDirs(root)
+  return findDirUnder(join(root, REQUIREMENTS_DIR), key)
+}
+
+/**
+ * Resolve one archived requirement directory by thread name or directory name.
+ *
+ * Only a directory under `_archive/` counts, so a restore cannot move a live
+ * requirement, and a send can tell an archived requirement from an unknown one.
+ */
+export function findArchivedRequirementDir(root: string, key: string): string | undefined {
+  return findDirUnder(join(root, ARCHIVE_DIR), key)
+}
+
+/** Resolve one directory under a requirement folder by meta thread or folder name. */
+function findDirUnder(base: string, key: string): string | undefined {
+  const byThread = readMetaDirs(base)
   const hit = byThread.get(key)
-  if (hit) return join(root, REQUIREMENTS_DIR, hit.dir)
+  if (hit) return join(base, hit.dir)
   try {
-    for (const entry of readdirSync(join(root, REQUIREMENTS_DIR), { withFileTypes: true })) {
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
-      if (entry.name === key) return join(root, REQUIREMENTS_DIR, entry.name)
+      if (entry.name === key) return join(base, entry.name)
     }
   } catch {
     return undefined
@@ -257,11 +291,96 @@ export function archiveRequirement(
   mkdirSync(archiveRoot, { recursive: true })
   renameSync(sourcePath, target)
   state.phase = 'archived'
-  state.events = [...state.events, `${archivedAt} archived to ${target}`]
+  // The phase before the move is kept in the event: a restore reads it back and
+  // has no other record of what the requirement was doing.
+  state.events = [...state.events, `${archivedAt} archived to ${target} (phase before archive: ${lastPhase})`]
   writeState(target, state)
   const index = join(archiveRoot, 'index.md')
   const header = existsSync(index) ? '' : ARCHIVE_INDEX_HEADER.join('\n') + '\n'
   const row = `| ${state.name} | ${state.thread} | ${archivedAt} | ${Object.keys(state.nodes).length} | ${lastPhase} |`
   appendFileSync(index, header + row + '\n', 'utf8')
   return { dir, archivedAt, index }
+}
+
+/** One restored requirement: where it went and when. */
+export interface RestoredRequirement {
+  /** Directory name the requirement has again under `reqs/`. */
+  dir: string
+  /** When the move happened, as an ISO 8601 timestamp. */
+  restoredAt: string
+}
+
+/**
+ * Move one archived requirement back to `reqs/` and record the move.
+ *
+ * The restore reverses an archive, never a delete: every file moves back with the
+ * directory. The phase returns to what it was before the archive, read from the
+ * archive event, and falls back to `active` when no event names it. One annotation
+ * is added to the archived row, so the index shows that the requirement is live
+ * again.
+ *
+ * @param root - the requirement root, the parent of `reqs/` and `_archive/`.
+ * @param sourcePath - the archived requirement directory to move.
+ * @param names - the thread name and display name the state falls back to.
+ * @returns the restored directory name and the timestamp.
+ */
+export function restoreRequirement(
+  root: string,
+  sourcePath: string,
+  names: { thread: string; name: string },
+): RestoredRequirement {
+  const dir = basename(sourcePath)
+  const target = join(root, REQUIREMENTS_DIR, dir)
+  // A live directory with the same name holds newer work; never overwrite it.
+  if (existsSync(target)) {
+    throw new Error(
+      `restore target already exists: ${target}. Nothing was moved. Rename or remove the live copy first.`,
+    )
+  }
+  const state = readState(sourcePath, names)
+  const archivedIndex = join(root, ARCHIVE_DIR, 'index.md')
+  const phase = phaseBeforeArchive(state) || 'active'
+  const restoredAt = new Date().toISOString()
+  mkdirSync(join(root, REQUIREMENTS_DIR), { recursive: true })
+  renameSync(sourcePath, target)
+  state.phase = phase === 'archived' ? 'active' : phase
+  state.events = [...state.events, `${restoredAt} restored to ${target}`]
+  writeState(target, state)
+  markIndexRestored(archivedIndex, state.thread, restoredAt)
+  return { dir, restoredAt }
+}
+
+/** The phase an archive event recorded, or '' when no event names one. */
+function phaseBeforeArchive(state: RequirementState): string {
+  for (const event of [...state.events].reverse()) {
+    const found = /phase before archive: ([^\s()]+)/.exec(event)
+    if (found && found[1] !== 'archived') return found[1]
+  }
+  return ''
+}
+
+/**
+ * Mark one archived row as restored, in place.
+ *
+ * The note goes inside the row's last cell, so the table keeps its five columns and
+ * no other line is rewritten. A row that cannot be found is left alone: the move
+ * already happened and the state already records it.
+ */
+function markIndexRestored(index: string, thread: string, restoredAt: string): void {
+  let body = ''
+  try {
+    body = readFileSync(index, 'utf8')
+  } catch {
+    return
+  }
+  const lines = body.split('\n')
+  for (let position = 0; position < lines.length; position += 1) {
+    const cells = lines[position].split('|')
+    if (cells.length !== 7) continue
+    if (cells[2].trim() !== thread) continue
+    cells[5] = `${cells[5]}（已恢复 ${restoredAt}）`
+    lines[position] = cells.join('|')
+    writeFileSync(index, lines.join('\n'), 'utf8')
+    return
+  }
 }

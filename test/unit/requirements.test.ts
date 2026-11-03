@@ -5,11 +5,15 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  archiveRequirement,
   attachFile,
+  findArchivedRequirementDir,
   findRequirementDir,
+  readArchivedRequirementDirs,
   readRequirementDirs,
   readState,
   renderDigest,
+  restoreRequirement,
   statePath,
   writeState,
 } from '../../src/lib/requirements'
@@ -131,5 +135,43 @@ describe('requirement state', () => {
     expect(findRequirementDir(root, '组织基线验证-20260101')).toBe(dir())
     expect(findRequirementDir(root, 'ghost')).toBeUndefined()
     expect(findRequirementDir(join(root, 'absent'), 'REQ-1')).toBeUndefined()
+  })
+
+  it('moves a requirement to the archive and back, restoring its phase and marking the row', async () => {
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    writeState(dir(), { ...fallback, phase: 'executing', nodes: {}, next: [], events: [] })
+    const archived = archiveRequirement(root, dir(), fallback)
+    // The archived map names the thread, so the tree can tell archived from unknown.
+    expect(readArchivedRequirementDirs(root).get('REQ-1'))
+      .toEqual({ dir: '组织基线验证-20260101', name: '组织基线验证' })
+    expect(findArchivedRequirementDir(root, 'REQ-1')).toBe(join(root, '_archive', archived.dir))
+    expect(findRequirementDir(root, 'REQ-1')).toBeUndefined()
+    expect(readState(join(root, '_archive', archived.dir), fallback).phase).toBe('archived')
+
+    const restored = restoreRequirement(root, join(root, '_archive', archived.dir), fallback)
+    expect(restored.dir).toBe(archived.dir)
+    expect(typeof restored.restoredAt).toBe('string')
+    expect(findRequirementDir(root, 'REQ-1')).toBe(dir())
+    expect(readArchivedRequirementDirs(root).size).toBe(0)
+    const state = readState(dir(), fallback)
+    expect(state.phase).toBe('executing')
+    expect(state.events.at(-1)).toContain('restored to')
+    // One row, annotated in place: the header is not written again.
+    const index = readFileSync(join(root, '_archive', 'index.md'), 'utf8')
+    expect(index.split('\n').filter((line) => line.startsWith('| 需求名'))).toHaveLength(1)
+    expect(index).toContain('已恢复')
+    expect(index).toContain(restored.restoredAt)
+  })
+
+  it('refuses a restore onto a directory that already exists', async () => {
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    const archived = archiveRequirement(root, dir(), fallback)
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'live.md'), 'new')
+    expect(() => restoreRequirement(root, join(root, '_archive', archived.dir), fallback))
+      .toThrow(/restore target already exists/)
+    expect(readFileSync(join(dir(), 'live.md'), 'utf8')).toBe('new')
   })
 })

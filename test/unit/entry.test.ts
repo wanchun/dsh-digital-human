@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -501,6 +501,42 @@ describe('the management route', () => {
     // Four roles, four Sessions, one requirement: the view merges them by `conversation`.
     expect(tree.map((role) => role.requirements[0].sessions[0].sessionId).sort()).toEqual([
       'session-deploy-assistant', 'session-dev-assistant', 'session-lead-assistant', 'session-qa-assistant',
+    ])
+  })
+
+  it('keeps an archived requirement off the tree until a restore brings it back', async () => {
+    // Archiving moves the requirement to _archive/, and the tree is the live view:
+    // its Sessions must disappear at once, then reappear after a restore.
+    const THREAD = 'REQ-ARCH'
+    const DIR = '归档需求-20261101'
+    const store = new HumanStore(home)
+    await store.upsert({
+      id: 'dev-assistant', name: '开发', enabled: true, order: 20, sessionKey: 'requirement',
+    } as any)
+    await writeMailbox('dev-assistant', 'session-dev-arch', THREAD)
+    const archived = join(home, 'workspace', '_archive', DIR)
+    await mkdir(archived, { recursive: true })
+    await writeFile(join(archived, 'meta.json'), JSON.stringify({ thread: THREAD, name: '归档需求' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const read = async () => {
+      const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+      expect(answer.result.ok).toBe(true)
+      return answer.result.value.humans
+    }
+
+    const archivedTree = await read()
+    expect(archivedTree).toHaveLength(1)
+    expect(archivedTree[0].requirements).toEqual([])
+
+    // A restore is the same move in reverse, so the tree must pick it up again.
+    await mkdir(join(home, 'workspace', 'reqs'), { recursive: true })
+    await rename(archived, join(home, 'workspace', 'reqs', DIR))
+    const restoredTree = await read()
+    expect(restoredTree[0].requirements).toEqual([
+      { conversation: THREAD, dir: DIR, name: '归档需求', sessions: [{ sessionId: 'session-dev-arch' }] },
     ])
   })
 

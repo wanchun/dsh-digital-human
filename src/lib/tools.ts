@@ -17,7 +17,7 @@ import { basename, join } from 'node:path'
 import { requireConversation } from './chat.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
-import { ARCHIVE_DIR, archiveRequirement, attachFile, createRequirement, findRequirementDir, readRequirementDirs, readState, renderDigest, writeState } from './requirements.js'
+import { ARCHIVE_DIR, archiveRequirement, attachFile, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
 import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
 import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
@@ -592,6 +592,16 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       const root = requirementRoot(me)
       // Resolve the requirement before any peer or address: a send with no requirement
       // is refused, never filed into a shared directory.
+      // An archived requirement is not an unknown one: say so before the generic
+      // miss, so the caller restores instead of hunting for a missing file.
+      const archivedDir = findArchivedRequirementDir(root, args.requirement)
+      if (archivedDir) {
+        throw new Error(
+          `digital_human_send refused: 该需求已归档，先恢复再派单。Requirement ${JSON.stringify(args.requirement)} `
+          + `is archived at ${archivedDir}. Restore it with digital_human_requirement_restore `
+          + `(requirement: ${JSON.stringify(basename(archivedDir))}) and send again.`,
+        )
+      }
       const requirementDir = requirementDirIn(root, args.requirement, {
         tool: 'digital_human_send',
         missing: 'digital_human_send requires a requirement（派单必须带需求）: pass the requirement thread name '
@@ -1401,6 +1411,65 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     },
   }
 
+  /**
+   * Bring one archived requirement back into `reqs/`.
+   *
+   * A restore is the reverse of an archive, never a new requirement: the same
+   * directory, the same files and the same thread return, so the tree picks the
+   * requirement up again and a dispatch can name it.
+   */
+  const requirementRestore = {
+    name: 'digital_human_requirement_restore',
+    description:
+      'Restore one archived requirement: move _archive/<dir>/ back to reqs/<dir> keeping every file, set its '
+      + 'state phase to the value recorded before the archive (active when no record names one), append one '
+      + 'event, and mark its row in _archive/index.md as restored. A target directory that already exists is '
+      + 'refused, never overwritten. The requirement is nameable and dispatchable again after the restore.',
+    parameters: {
+      requirement: {
+        type: 'string',
+        required: true,
+        description: 'Archived requirement thread name or directory name, for example a name reported by '
+          + 'digital_human_requirement_archive. Resolved under _archive/.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          detail: { type: 'string', required: true },
+          dir: { type: 'string', required: true },
+          restoredAt: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => renderText(value),
+    },
+    async execute(args) {
+      const reference = String(args.requirement ?? '').trim()
+      if (!reference) {
+        throw new Error(
+          'digital_human_requirement_restore requires a requirement: pass the archived requirement thread name '
+          + 'or directory name.',
+        )
+      }
+      const root = requirementRoot(await self())
+      const source = findArchivedRequirementDir(root, reference)
+      if (!source) {
+        throw new Error(
+          `no archived requirement: ${JSON.stringify(args.requirement)}. `
+          + 'digital_human_requirement_restore resolves only a directory under _archive/; a requirement that is '
+          + 'already live in reqs/ needs no restore.',
+        )
+      }
+      const restored = restoreRequirement(root, source, requirementFallback(root, source, reference))
+      return {
+        detail: `Restored ${restored.dir} to ${join(root, 'reqs', restored.dir)}; its state phase and the archive index now record the restore.`,
+        ...restored,
+      }
+    },
+  }
+
   const tools: any[] = [send, status, stop, messages, conversations, roster, usage]
   // A digital human with no bot speaks to its peers only: the chat tools land in a
   // Session, while these two can only reach an IM contact. The title tool is not one
@@ -1441,7 +1510,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       return { dir: created.dir, path: created.path }
     },
   })
-  tools.push(requirementRead, requirementUpdate, requirementAttach, requirementArchive)
+  tools.push(requirementRead, requirementUpdate, requirementAttach, requirementArchive, requirementRestore)
 
   return tools.map(normalizeTool)
 }

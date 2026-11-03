@@ -37,7 +37,7 @@ import { registerRpc } from './lib/rpc.js'
 import { directSenderOf, directSenders, syncBotToHuman } from './lib/im.js'
 import type { ImSyncResult } from './lib/im.js'
 import { DEFAULT_WORKSPACE_TITLE, defaultWorkspacePath, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
-import { readRequirementDirs } from './lib/requirements.js'
+import { readArchivedRequirementDirs, readRequirementDirs } from './lib/requirements.js'
 import type { Config, Ctx, Human, HumanPatch, WorkspaceView } from './lib/types.js'
 import { DEFAULT_PERMISSION_PRESET } from './lib/types.js'
 
@@ -919,7 +919,16 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       const humans = (await store.list(seed)).filter((human) => human.enabled !== false)
       // The requirement root is the directory the digital humans share: `reqs/`
       // sits in it, and each directory's `meta.json` names its thread.
-      const requirementDirs = readRequirementDirs(defaultWorkspace?.path ?? defaultWorkspacePath(home))
+      const requirementRoot = defaultWorkspace?.path ?? defaultWorkspacePath(home)
+      const requirementDirs = readRequirementDirs(requirementRoot)
+      // An archived requirement moved out of `reqs/`, so it is no longer a node of
+      // the live tree. Its thread and its directory still name its old Sessions, and
+      // those rows must drop until a restore brings the requirement back.
+      const archivedDirs = readArchivedRequirementDirs(requirementRoot)
+      const archivedThreads = new Set(archivedDirs.keys())
+      const archivedFolders = new Set([...archivedDirs.values()].map((meta) => meta.dir))
+      const isArchived = (conversation: string) =>
+        archivedThreads.has(conversation) || archivedFolders.has(conversation)
       // A Session is filed by a conversation name, and the requirement it belongs to
       // may be named by the thread or by the directory. Both resolve to the thread,
       // so one requirement is one node even when its Sessions were filed two ways.
@@ -960,6 +969,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           // A named one is grouped by the requirement it belongs to, not by the label
           // it was filed under: the thread and the directory are the same requirement.
           const conversation = address.conversationId ?? ''
+          // The requirement is archived, so this row is not part of the live tree.
+          if (conversation && isArchived(conversation)) continue
           const key = requirementOf(conversation) || conversation
           const bucket = byRequirement.get(key) ?? []
           bucket.push({ sessionId: address.sessionId })

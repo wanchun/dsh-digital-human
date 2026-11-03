@@ -119,7 +119,7 @@ const service = provided.get('digitalHumans')
 
 console.log('1) preset-scoped tools')
 const scoped = buildHumanTools({ ctx, service, humanId: 'dev-assistant' })
-check('every scoped tool is declared', scoped.length === 17, String(scoped.length))
+check('every scoped tool is declared', scoped.length === 18, String(scoped.length))
 check('the title tool is exposed to a record with a bot', scoped.some((tool) => tool.name === 'set_session_title'))
 // Inventing a conversation id splits one subject across two Sessions, so the
 // capability to see what already exists is what lets a caller reuse it.
@@ -179,6 +179,7 @@ const calls = [
   ['digital_human_requirement_update', { requirement: 'REQ-SCHEMA', node: 'dev', status: 'running' }],
   ['digital_human_requirement_attach', { requirement: 'REQ-SCHEMA', name: 'probe.md', content: 'x' }],
   ['digital_human_requirement_archive', { requirement: 'REQ-SCHEMA' }],
+  ['digital_human_requirement_restore', { requirement: 'REQ-SCHEMA' }],
   ['memory_status', {}],
   ['memory_compact', {}],
   ['list_bot_targets', { bot_id: 'bot-a' }],

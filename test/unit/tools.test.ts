@@ -143,7 +143,7 @@ describe('the chat tools', () => {
       'digital_human_conversations', 'digital_human_list', 'digital_human_usage', 'notify_bot', 'list_bot_targets',
       'set_session_title', 'memory_status', 'memory_compact', 'digital_human_requirement_create',
       'digital_human_requirement_read', 'digital_human_requirement_update', 'digital_human_requirement_attach',
-      'digital_human_requirement_archive',
+      'digital_human_requirement_archive', 'digital_human_requirement_restore',
     ])
   })
 
@@ -885,6 +885,80 @@ describe('the requirement tools', () => {
     await expect(archive.execute({})).rejects.toThrow(/requires a requirement/)
     expect(existsSync(requirementDir)).toBe(true)
     expect(existsSync(join(home, 'workspace', '_archive'))).toBe(false)
+  })
+
+  it('refuses a dispatch to an archived requirement, then restores it and dispatches again', async () => {
+    const tools = build()
+    const archivedState = join(requirementDir, 'state.json')
+    writeFileSync(archivedState, JSON.stringify({
+      thread: REQ, name: REQ_NAME, phase: 'executing', nodes: {}, next: [], events: [],
+    }))
+    const archive = toolOf(tools, 'digital_human_requirement_archive')
+    const archived = await archive.execute({ requirement: REQ })
+    // The name is archived, not unknown: the reason says what to do next.
+    const send = toolOf(tools, 'digital_human_send')
+    await expect(send.execute({ to: 'dev', requirement: REQ, message: '继续改' }))
+      .rejects.toThrow(/该需求已归档，先恢复再派单/)
+    await expect(send.execute({ to: 'dev', requirement: REQ + '-20260101', message: '继续改' }))
+      .rejects.toThrow(/该需求已归档，先恢复再派单/)
+
+    const restore = toolOf(tools, 'digital_human_requirement_restore')
+    const result = await restore.execute({ requirement: REQ })
+    expect(result.dir).toBe(REQ + '-20260101')
+    expect(typeof result.restoredAt).toBe('string')
+    // A move back, never a copy: the live directory is back and the archive is empty.
+    expect(existsSync(requirementDir)).toBe(true)
+    expect(existsSync(join(home, 'workspace', '_archive', REQ + '-20260101'))).toBe(false)
+    const state = JSON.parse(readFileSync(archivedState, 'utf8'))
+    expect(state.phase).toBe('executing')
+    expect(state.events.at(-1)).toContain('restored to')
+    // The row is annotated in place: one row, now carrying the restore stamp.
+    const index = readFileSync(archived.index, 'utf8')
+    const rows = index.split('\n').filter((line) => line.startsWith(`| ${REQ_NAME} | ${REQ} |`))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toContain('已恢复')
+    expect(rows[0]).toContain(result.restoredAt)
+    expect(undeclaredKeys(restore.output.schema, result)).toEqual([])
+    expect(restore.output.render({}, result)).toEqual([{ type: 'text', text: result.detail }])
+    // Restored, the requirement resolves and a dispatch goes through again.
+    const sent = await send.execute({ to: 'dev', requirement: REQ, message: '继续改' })
+    expect(sent.accepted).toBe(true)
+  })
+
+  it('refuses to restore onto a directory that already exists', async () => {
+    const tools = build()
+    await toolOf(tools, 'digital_human_requirement_archive').execute({ requirement: REQ })
+    // Newer work took the live name; the restore must not overwrite it.
+    mkdirSync(requirementDir, { recursive: true })
+    writeFileSync(join(requirementDir, 'live.md'), 'new')
+    const restore = toolOf(tools, 'digital_human_requirement_restore')
+    await expect(restore.execute({ requirement: REQ })).rejects.toThrow(/restore target already exists/)
+    expect(readFileSync(join(requirementDir, 'live.md'), 'utf8')).toBe('new')
+    expect(existsSync(join(home, 'workspace', '_archive', REQ + '-20260101', 'meta.json'))).toBe(true)
+  })
+
+  it('restores only an archived requirement, and says so otherwise', async () => {
+    const restore = toolOf(build(), 'digital_human_requirement_restore')
+    await expect(restore.execute({})).rejects.toThrow(/requires a requirement/)
+    // A live requirement needs no restore; an unknown name is not archived either.
+    await expect(restore.execute({ requirement: REQ })).rejects.toThrow(/no archived requirement/)
+    await expect(restore.execute({ requirement: 'ghost' })).rejects.toThrow(/no archived requirement/)
+  })
+
+  it('restores a hand-archived requirement to active when no record names its phase', async () => {
+    const archivedDir = join(home, 'workspace', '_archive', '手工归档-20260101')
+    mkdirSync(archivedDir, { recursive: true })
+    writeFileSync(join(archivedDir, 'meta.json'), JSON.stringify({ thread: 'HAND-1', name: '手工归档' }))
+    writeFileSync(join(archivedDir, 'state.json'), JSON.stringify({
+      thread: 'HAND-1', name: '手工归档', phase: 'archived', nodes: {}, next: [], events: [],
+    }))
+    const restore = toolOf(build(), 'digital_human_requirement_restore')
+    const result = await restore.execute({ requirement: 'HAND-1' })
+    expect(result.dir).toBe('手工归档-20260101')
+    const state = JSON.parse(readFileSync(join(home, 'workspace', 'reqs', '手工归档-20260101', 'state.json'), 'utf8'))
+    expect(state.phase).toBe('active')
+    // No index existed, so the restore must still finish and report success.
+    expect(result.detail).toContain(join(home, 'workspace', 'reqs', '手工归档-20260101'))
   })
 })
 
