@@ -273,6 +273,8 @@ check('the head carries task, node, facts and context in one fixed order',
   && lastPrompt.indexOf('- 子系统：RCS-CSA') < lastPrompt.indexOf('- 版本：3.32.0')
   && lastPrompt.indexOf('- 文档：') < lastPrompt.indexOf('上下文：已接单；上一步结论见 nodes/intake.md')
   && lastPrompt.indexOf('上下文：已接单；上一步结论见 nodes/intake.md') < lastPrompt.indexOf('status please'))
+check('the dispatch ends with one fixed receipt request',
+  lastPrompt.indexOf('status please') < lastPrompt.indexOf('—— 完成后请用 digital_human_send 回执给我：requirement=REQ-1，node=开发。写在你自己的会话里我收不到。'))
 check('send refuses a dispatch that carries steps, commands or cautions',
   await scope.tools.get('digital_human_send').execute({
     to: 'pm-assistant', message: 'x', requirement: 'REQ-1', steps: ['one', 'two'],

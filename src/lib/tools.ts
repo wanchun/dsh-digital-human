@@ -123,6 +123,51 @@ function dispatchHead(requirementDir: string, args: any): string {
   return lines.join('\n')
 }
 
+/**
+ * The placeholder values the receipt line falls back to.
+ *
+ * A dispatch always resolves a requirement, so the thread name is always there. A
+ * node is optional by design — the executor judges whether it applies — so a call
+ * that names none keeps a placeholder instead of inventing one.
+ */
+const RECEIPT_THREAD_PLACEHOLDER = '<按派单里的需求>'
+const RECEIPT_NODE_PLACEHOLDER = '<节点名>'
+
+/**
+ * The receipt request every dispatch ends with.
+ *
+ * A persona may forget to answer, and a conclusion written in the executor's own
+ * Session never reaches the sender. The line states the two values the answer must
+ * carry, in one fixed form, so every dispatch asks the same way.
+ *
+ * @param thread - the requirement's thread name, as this call resolved it.
+ * @param node - the node this call dispatched, when it named one.
+ */
+function receiptLine(thread: string, node: any): string {
+  const requirement = String(thread ?? '').trim() || RECEIPT_THREAD_PLACEHOLDER
+  const named = String(node ?? '').trim() || RECEIPT_NODE_PLACEHOLDER
+  return `—— 完成后请用 digital_human_send 回执给我：requirement=${requirement}，node=${named}。写在你自己的会话里我收不到。`
+}
+
+/**
+ * Append the receipt request to a dispatch, and to nothing else.
+ *
+ * A reply answers the Session that asked: the schema names `session_id` as that
+ * address, and the transport files the message as an amendment to the item it
+ * answers. Asking for a receipt on that path would let two peers ask each other
+ * forever, so only a dispatch carries the line. `mode: 'new'` still marks a new
+ * handover into a Session this side already knows.
+ *
+ * The line is part of the message text: it is neither a fact nor context.
+ */
+function withReceiptLine(message: string, { thread, node, reply }: {
+  thread: string
+  node?: unknown
+  reply: boolean
+}): string {
+  return reply ? message : `${message}\n\n${receiptLine(thread, node)}`
+}
+
 /** Refuse a dispatch that carries how-to-work fields, and say why. */
 function refuseForbiddenDispatch(args: any): void {
   for (const [key, label] of Object.entries(FORBIDDEN_DISPATCH_FIELDS)) {
@@ -627,7 +672,14 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       // same facts and context in the same fixed order.
       const head = dispatchHead(requirementDir, args)
       const body = typeof args.message === 'string' ? args.message : ''
-      const message = body ? `${head}\n\n${body}` : head
+      // A reply travels to the Session that asked, named by `session_id`; the
+      // transport files it as an amendment. Only a dispatch asks for a receipt.
+      const replying = typeof args.session_id === 'string' && args.session_id.trim() !== '' && args.mode !== 'new'
+      const message = withReceiptLine(body ? `${head}\n\n${body}` : head, {
+        thread: conversation,
+        node: args.node,
+        reply: replying,
+      })
       const targets = Array.isArray(args.to) ? args.to : [args.to]
       if (targets.length === 0) throw new Error('a target digital human is required')
       // Its own Session travels with the message, so the reply can come back to the
