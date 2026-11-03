@@ -72,6 +72,20 @@ const fourRoleTree = {
   ],
 }
 
+/** The tree after another role's Session is created: one more requirement row. */
+const grownTree = {
+  humans: [
+    ...treeValue.humans,
+    {
+      humanId: 'qa-assistant',
+      name: '自测',
+      order: 30,
+      sessionKey: 'requirement',
+      requirements: [{ conversation: 'REQ-NEW', dir: '新需求-20261103', name: '新需求', sessions: [{ sessionId: 's-new' }] }],
+    },
+  ],
+}
+
 /**
  * A store shaped like `uiSession.sessionStatus`: a snapshot plus subscribers.
  *
@@ -101,6 +115,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   localStorage.clear()
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -117,10 +132,12 @@ function mountTree({
   tree = treeValue,
   sessionStatus,
   rows = {},
+  listStore,
 } = {}) {
   const registrations: Array<{ options: any; Component: any }> = []
   const openSession = vi.fn()
-  const list = {
+  // The catalog is either the fixed one, or a store the test drives itself.
+  const list = listStore ?? {
     getSnapshot: () => ({ ...snapshot(ids, phase), byId: rows }),
     subscribe: () => () => {},
   }
@@ -132,7 +149,14 @@ function mountTree({
       }
     : undefined
   const uiSession = sessionStatus ? { sessionStatus } : undefined
-  const rpc = vi.fn(async (method: string) => ({ ok: true, value: method === 'tree.read' ? tree : {} }))
+  // `tree` may be a function of the read's number, so a test can answer the
+  // second read differently from the first.
+  let reads = 0
+  const rpc = vi.fn(async (method: string) => {
+    if (method !== 'tree.read') return { ok: true, value: {} }
+    const call = reads++
+    return { ok: true, value: typeof tree === 'function' ? await tree(call) : tree }
+  })
   const ctx = {
     effect: (fn: () => unknown) => fn(),
     get: (name: string) => {
@@ -152,7 +176,30 @@ function mountTree({
   apply(ctx)
   const reg = registrations.find((entry) => entry.options.name === 'sidebar.workspaces')!
   const rendered = render(React.createElement(reg.Component, reg.options.inject()))
-  return { ...rendered, openSession, reg }
+  return { ...rendered, openSession, reg, rpc, reads: () => reads }
+}
+
+/**
+ * A store shaped like `uiWorkspace.sessions.list`: a snapshot plus subscribers.
+ *
+ * `set` publishes a new catalog, which is what the Workspace does when a Session
+ * is created or removed elsewhere.
+ */
+function catalogStore(initialIds: string[], phase = 'ready') {
+  let current = { phase, ids: [...initialIds] }
+  const listeners = new Set<() => void>()
+  return {
+    getSnapshot: () => ({ ...snapshot(current.ids, current.phase), byId: {} }),
+    subscribe: (listener: () => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    set: (nextIds: string[], nextPhase = 'ready') => {
+      current = { phase: nextPhase, ids: [...nextIds] }
+      for (const listener of listeners) listener()
+    },
+    listeners: () => listeners.size,
+  }
 }
 
 describe('the requirement tree', () => {
@@ -238,5 +285,114 @@ describe('the requirement tree', () => {
     await waitFor(() => expect(screen.getByText('REQ-LEGACY')).toBeTruthy())
     expect(document.querySelector('[title="s-req"] [data-state="ongoing"]')).toBeTruthy()
     expect(document.querySelector('[title="s-legacy"] [data-state="ongoing"]')).toBeNull()
+  })
+})
+
+/**
+ * The column is Host state, so a Session created or removed elsewhere only shows
+ * after another whole read. Three things drive that read: the mount, a change in
+ * the Workspace catalog, and a 30-second fallback timer.
+ */
+describe('the live refresh', () => {
+  it('reads the tree again when the catalog gains a Session', async () => {
+    const catalog = catalogStore(['s-live', 's-group', 's-req', 's-legacy'])
+    const view = mountTree({ listStore: catalog, tree: (call: number) => (call === 0 ? treeValue : grownTree) })
+    await waitFor(() => expect(screen.getByText('REQ-LEGACY')).toBeTruthy())
+    expect(screen.queryByText('新需求')).toBeNull()
+    await act(async () => { catalog.set(['s-live', 's-group', 's-req', 's-legacy', 's-new']) })
+    await waitFor(() => expect(screen.getByText('新需求')).toBeTruthy())
+    expect(view.reads()).toBe(2)
+    expect(document.querySelector('[title="s-new"]')).toBeTruthy()
+  })
+
+  it('reads the tree again when the catalog loses a Session', async () => {
+    const catalog = catalogStore(['s-live', 's-group', 's-req', 's-legacy'])
+    const view = mountTree({ listStore: catalog })
+    await waitFor(() => expect(screen.getByText('REQ-LEGACY')).toBeTruthy())
+    expect(view.reads()).toBe(1)
+    await act(async () => { catalog.set(['s-live', 's-group', 's-legacy']) })
+    await waitFor(() => expect(view.reads()).toBe(2))
+    expect(document.querySelector('[title="s-req"]')).toBeNull()
+  })
+
+  it('reads the tree again on the 30-second fallback timer', async () => {
+    vi.useFakeTimers()
+    // The new Session is already in the catalog: only the timer can bring its row.
+    const view = mountTree({
+      listStore: catalogStore(['s-live', 's-group', 's-req', 's-legacy', 's-new']),
+      tree: (call: number) => (call === 0 ? treeValue : grownTree),
+    })
+    await act(async () => {})
+    expect(view.reads()).toBe(1)
+    await act(async () => { vi.advanceTimersByTime(30_000) })
+    expect(view.reads()).toBe(2)
+    // The second answer lands a turn after the timer fires.
+    await act(async () => {})
+    expect(screen.getByText('新需求')).toBeTruthy()
+  })
+
+  it('does not read the tree when a publish carries the same ids', async () => {
+    // A running mark is also a catalog publish. It redraws the rows; it is not a
+    // reason to walk every mailbox.
+    const catalog = catalogStore(['s-live', 's-group', 's-req', 's-legacy'])
+    const view = mountTree({ listStore: catalog })
+    await waitFor(() => expect(screen.getByText('REQ-LEGACY')).toBeTruthy())
+    await act(async () => { catalog.set(['s-live', 's-group', 's-req', 's-legacy']) })
+    expect(view.reads()).toBe(1)
+  })
+
+  it('stops reading after the column unmounts', async () => {
+    vi.useFakeTimers()
+    const catalog = catalogStore(['s-live', 's-group', 's-req', 's-legacy'])
+    const view = mountTree({ listStore: catalog })
+    await act(async () => {})
+    expect(view.reads()).toBe(1)
+    expect(catalog.listeners()).toBeGreaterThan(0)
+    view.unmount()
+    expect(catalog.listeners()).toBe(0)
+    await act(async () => { vi.advanceTimersByTime(90_000) })
+    expect(view.reads()).toBe(1)
+  })
+
+  it('keeps the rows on screen while a re-read is in flight', async () => {
+    const catalog = catalogStore(['s-live', 's-group', 's-req', 's-legacy'])
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const view = mountTree({
+      listStore: catalog,
+      tree: async (call: number) => {
+        if (call === 0) return treeValue
+        await gate
+        return grownTree
+      },
+    })
+    await waitFor(() => expect(screen.getByText('REQ-LEGACY')).toBeTruthy())
+    await act(async () => { catalog.set(['s-live', 's-group', 's-req', 's-legacy', 's-new']) })
+    // The second read has not answered: the last tree stays, and no loading hint
+    // takes its place.
+    expect(screen.getByText('REQ-LEGACY')).toBeTruthy()
+    expect(screen.queryByText('加载中…')).toBeNull()
+    await act(async () => { release() })
+    await waitFor(() => expect(screen.getByText('新需求')).toBeTruthy())
+    expect(view.reads()).toBe(2)
+  })
+
+  it('keeps the last tree when a background re-read fails', async () => {
+    const catalog = catalogStore(['s-live', 's-group', 's-req', 's-legacy'])
+    let broken = false
+    const mount = mountTree({
+      listStore: catalog,
+      tree: () => {
+        if (broken) throw new Error('断线')
+        return treeValue
+      },
+    })
+    await waitFor(() => expect(screen.getByText('REQ-LEGACY')).toBeTruthy())
+    broken = true
+    await act(async () => { catalog.set(['s-live', 's-group', 's-req', 's-legacy', 's-new']) })
+    await waitFor(() => expect(mount.reads()).toBe(2))
+    expect(screen.getByText('REQ-LEGACY')).toBeTruthy()
+    expect(screen.getByText('组织基线验证')).toBeTruthy()
+    expect(screen.queryByText(/读取需求失败/)).toBeNull()
   })
 })

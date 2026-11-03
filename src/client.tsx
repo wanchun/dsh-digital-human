@@ -1528,6 +1528,13 @@ function runningSessionIds(status: any, workspace: any): Set<string> {
   return found
 }
 
+/** Whether two catalogs name the same Sessions, whatever their order. */
+function sameSessionIds(left: Set<string>, right: Set<string>) {
+  if (left.size !== right.size) return false
+  for (const sessionId of left) if (!right.has(sessionId)) return false
+  return true
+}
+
 /**
  * The digital-human column: chat-keyed roles first, then one menu per requirement.
  *
@@ -1555,7 +1562,14 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace, 
   })
   const [current, setCurrent] = React.useState<string | undefined>(undefined)
 
-  const load = React.useCallback(async () => {
+  /**
+   * Read the whole tree again.
+   *
+   * `refresh` is the background pass: it keeps the rows the column already shows
+   * until the new tree arrives, and a failed pass leaves the last good tree in
+   * place. The operator did not ask for that pass, so it raises no error panel.
+   */
+  const load = React.useCallback(async (mode: 'initial' | 'refresh' = 'initial') => {
     // A face that lost its caller cannot read anything. Say so instead of showing
     // an empty tree, which would read as "no requirements".
     if (typeof rpc !== 'function') {
@@ -1563,7 +1577,7 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace, 
       setState({ loading: false, error: '没有拿到 Host 调用器', humans: [] })
       return
     }
-    setState((value) => ({ ...value, loading: true, error: '' }))
+    if (mode === 'initial') setState((value) => ({ ...value, loading: true, error: '' }))
     try {
       // The caller returns the Connection envelope, not the value: a refusal
       // arrives as `ok: false` with the Host's own message, and reading past it
@@ -1575,7 +1589,11 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace, 
     } catch (error) {
       // The caller's own message is what tells a refusal from a dead channel.
       console.warn('[digital-human] tree.read failed', error)
-      setState({ loading: false, error: error?.message ?? String(error), humans: [] })
+      const message = error?.message ?? String(error)
+      // One bad background read must not empty the column: keep the tree it has.
+      setState((value) => (mode === 'refresh'
+        ? { ...value, loading: false }
+        : { loading: false, error: message, humans: [] }))
     }
   }, [rpc])
 
@@ -1611,6 +1629,35 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace, 
     }
     return () => { for (const dispose of disposers) dispose() }
   }, [getWorkspace, getSessionStatus])
+
+  // A Session created or removed elsewhere is Host state, not a render input: the
+  // tree must be read again, not merely redrawn. The catalog also carries the
+  // running marks, so only a change in the set of ids is a reason to read it.
+  React.useEffect(() => {
+    const workspace = typeof getWorkspace === 'function' ? getWorkspace() : undefined
+    const store = workspace?.sessions?.list
+    if (typeof store?.subscribe !== 'function' || typeof store?.getSnapshot !== 'function') return
+    // `null` means "no authoritative catalog yet". The first ready catalog is the
+    // baseline, because the mount read already covered it.
+    let known: Set<string> | null = null
+    const read = () => {
+      const ids = liveSessionIds(workspace)
+      if (!ids) return
+      const changed = known !== null && !sameSessionIds(known, ids)
+      known = ids
+      if (changed) void load('refresh')
+    }
+    read()
+    const dispose = store.subscribe(read)
+    return typeof dispose === 'function' ? dispose : undefined
+  }, [getWorkspace, load])
+
+  // The fallback: a creation path that never touches the catalog still lands
+  // within 30 seconds. `tree.read` walks every mailbox, so the interval is slow.
+  React.useEffect(() => {
+    const timer = setInterval(() => { void load('refresh') }, 30_000)
+    return () => { clearInterval(timer) }
+  }, [load])
 
   const open = (sessionId: string) => {
     if (typeof openSession !== 'function') {
