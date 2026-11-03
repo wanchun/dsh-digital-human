@@ -931,7 +931,17 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         }>
       }> = []
       for (const human of humans) {
-        const addresses = await chat.addresses(human.id)
+        // The mailbox is where every delivery leaves the thread name, and the index
+        // beside it is a cache that not every path writes. Read the logs first: a
+        // Session they name once is listed once. The index then fills in only what a
+        // log cannot name — one written before the thread field existed — so no
+        // earlier Session disappears from the view.
+        const fromMailbox = await chat.addressesFromMailbox(human.id)
+        const listed = new Set(fromMailbox.map((address) => address.sessionId))
+        const addresses = [
+          ...fromMailbox,
+          ...(await chat.addresses(human.id)).filter((address) => !listed.has(address.sessionId)),
+        ]
         const byRequirement = new Map<string, Array<{ sessionId: string }>>()
         for (const address of addresses) {
           // An address the index does not name is a Session reached by id; it has no

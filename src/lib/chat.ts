@@ -9,10 +9,12 @@
  * transcript — is what peers read back, so a conversation survives compaction.
  */
 
-import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, open, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { peerSource } from './peer-source.js'
 import { conversationSlug } from './slug.js'
 import type { HumanStore } from './store.js'
@@ -109,6 +111,28 @@ function record(kind, fields) {
   return JSON.stringify({ at: new Date().toISOString(), kind, ...fields })
 }
 
+/** Bytes read per step while looking for the thread name in one mailbox log. */
+const MAILBOX_CHUNK = 64 * 1024
+
+/** The thread one mailbox line belongs to, or null when the line names none. */
+function conversationOf(line: string): string | null {
+  if (!line.trim()) return null
+  try {
+    const entry = JSON.parse(line)
+    const conversation = entry?.conversation
+    return typeof conversation === 'string' && conversation.trim() ? conversation : null
+  } catch {
+    return null
+  }
+}
+
+/** What one mailbox file has already reported, so a large log is read once. */
+interface MailboxScan {
+  mtimeMs: number
+  size: number
+  conversation: string | null
+}
+
 /** Owns every Session and mailbox a digital human uses. */
 export class HumanChat {
   #ctx
@@ -122,6 +146,9 @@ export class HumanChat {
   // Every peer message seen, per human: appended to edges.jsonl and read back by
   // prime, so a restart keeps the routing.
   #edges = new Map<string, PeerEdge[]>()
+  // What each mailbox log has already reported, per human and per file: a thread
+  // name is read once, not on every tree read.
+  #mailboxes = new Map<string, Map<string, MailboxScan>>()
   // One write at a time per human. The index is rewritten whole, so two concurrent
   // writers would drop each other's line.
   #writes = new Map<string, Promise<unknown>>()
@@ -383,6 +410,127 @@ export class HumanChat {
       found.push({ conversationId: null, sessionId })
     }
     return found
+  }
+
+  /**
+   * Every address the mailbox itself proves for one digital human.
+   *
+   * `sessions.json` is a cache of the same fact, and a delivery path that never
+   * writes it leaves a Session the index cannot name. The mailbox is written on
+   * every delivery, so it is read here instead: one file per Session, and each
+   * inbound line names the thread the message belongs to.
+   *
+   * The file name is the authority for the Session. `conversationPath` keys the
+   * log by Session, while the `session` field of a line names the *peer* that
+   * asked — the two do not confirm each other, and the name is what this side of
+   * the exchange is called. A log filed under a conversation name predates the
+   * Session key: it gives no Session of its own, so its thread is left to the
+   * index rather than guessed here.
+   *
+   * @returns one address per Session, or an empty list when nothing is logged.
+   */
+  async addressesFromMailbox(humanId: string) {
+    const dir = join(this.#store.dir(humanId), 'conversations')
+    let names: string[]
+    try {
+      names = await readdir(dir)
+    } catch {
+      this.#mailboxes.delete(humanId)
+      return []
+    }
+    const scans = this.#mailboxScans(humanId)
+    const found: Array<{ conversationId: string | null; sessionId: string }> = []
+    const present = new Set<string>()
+    for (const name of names.sort()) {
+      if (!name.endsWith('.jsonl')) continue
+      let sessionId: string
+      try {
+        sessionId = decodeURIComponent(name.slice(0, -'.jsonl'.length))
+      } catch {
+        continue
+      }
+      if (!isSessionAddress(sessionId)) continue
+      const path = join(dir, name)
+      present.add(path)
+      const conversation = await this.#mailboxConversation(path, scans)
+      if (conversation) found.push({ conversationId: conversation, sessionId })
+    }
+    // A log that is gone must not keep answering after it is deleted.
+    for (const path of [...scans.keys()]) if (!present.has(path)) scans.delete(path)
+    return found
+  }
+
+  /** The per-file scan cache of one digital human. */
+  #mailboxScans(humanId: string) {
+    let scans = this.#mailboxes.get(humanId)
+    if (scans === undefined) {
+      scans = new Map<string, MailboxScan>()
+      this.#mailboxes.set(humanId, scans)
+    }
+    return scans
+  }
+
+  /**
+   * The thread one mailbox log names, read only when the file may have changed.
+   *
+   * @param path - the log to read.
+   * @param scans - the per-file cache this call fills.
+   * @returns the thread name, or null when the log names none yet.
+   */
+  async #mailboxConversation(path: string, scans: Map<string, MailboxScan>) {
+    let handle
+    try {
+      handle = await open(path, 'r')
+      const stats = await handle.stat()
+      const known = scans.get(path)
+      if (known && known.mtimeMs === stats.mtimeMs && known.size === stats.size) {
+        return known.conversation
+      }
+      // A thread name is fixed once it is known: rewriting the log cannot move its
+      // Session to another requirement.
+      if (known?.conversation) {
+        scans.set(path, { ...known, mtimeMs: stats.mtimeMs, size: stats.size })
+        return known.conversation
+      }
+      const conversation = await this.#threadIn(handle)
+      scans.set(path, { mtimeMs: stats.mtimeMs, size: stats.size, conversation })
+      return conversation
+    } catch {
+      // A log that cannot be opened or read says nothing; the other logs still do.
+      scans.delete(path)
+      return null
+    } finally {
+      await handle?.close().catch(() => {})
+    }
+  }
+
+  /**
+   * Read one log far enough to find its thread name.
+   *
+   * The log is read in chunks and stops at the first line that names a thread, so
+   * the size a mailbox reaches does not decide the cost of a tree read. A line that
+   * a chunk edge splits is joined before it is parsed; a line that is not JSON, and
+   * a line still being written, are skipped.
+   */
+  async #threadIn(handle: FileHandle): Promise<string | null> {
+    const decoder = new StringDecoder('utf8')
+    const buffer = Buffer.alloc(MAILBOX_CHUNK)
+    let position = 0
+    let carry = ''
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position)
+      if (bytesRead === 0) break
+      position += bytesRead
+      // The decoder keeps a UTF-8 sequence that a chunk edge splits, and `carry`
+      // keeps a line that the edge splits, so neither is lost or parsed half.
+      const lines = (carry + decoder.write(buffer.subarray(0, bytesRead))).split('\n')
+      carry = lines.pop() as string
+      for (const line of lines) {
+        const conversation = conversationOf(line)
+        if (conversation !== null) return conversation
+      }
+    }
+    return null
   }
 
   /**

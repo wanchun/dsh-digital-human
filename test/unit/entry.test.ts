@@ -342,6 +342,26 @@ describe('the management route', () => {
     return { platform, connection, route: connection.routes[0] }
   }
 
+  /**
+   * Write one mailbox log the way a delivery leaves it: the thread's name on the
+   * inbound line, plus the Session of the side that asked.
+   */
+  const writeMailbox = async (
+    id: string,
+    sessionId: string,
+    conversation: string,
+    { noise = [], tail = '' }: { noise?: string[]; tail?: string } = {},
+  ) => {
+    const dir = join(home, 'humans', id, 'conversations')
+    await mkdir(dir, { recursive: true })
+    const lines = [
+      ...noise,
+      JSON.stringify({ at: '2026-11-03T01:00:00.000Z', kind: 'inbound', from: 'pm-assistant', text: '【新需求】cas 文档同步', session: 'session-pm-1', conversation }),
+      JSON.stringify({ at: '2026-11-03T01:00:01.000Z', kind: 'outbound', text: '收到' }),
+    ]
+    await writeFile(join(dir, `${sessionId}.jsonl`), `${lines.join('\n')}\n${tail}`)
+  }
+
   it('mounts only when the connection service exists', async () => {
     const bare = makeCtx()
     await applyPlatform(bare.ctx, { home, humans: SEED_HUMANS })
@@ -479,6 +499,135 @@ describe('the management route', () => {
     // Four roles, four Sessions, one requirement: the view merges them by `conversation`.
     expect(tree.map((role) => role.requirements[0].sessions[0].sessionId).sort()).toEqual([
       'session-deploy-assistant', 'session-dev-assistant', 'session-lead-assistant', 'session-qa-assistant',
+    ])
+  })
+
+  it('serves the requirement tree from the mailbox alone', async () => {
+    // No sessions.json is written here at all: one delivery path creates the
+    // Session, writes the edge and the mailbox, and never writes the index. The
+    // mailbox still knows the thread, so all four roles stay in the tree.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const roles = [
+      { id: 'lead-assistant', name: '负责人', order: 10, session: 'session-lead-1' },
+      { id: 'dev-assistant', name: '开发', order: 20, session: 'session-dev-1' },
+      { id: 'qa-assistant', name: '自测', order: 30, session: 'session-qa-1' },
+      { id: 'deploy-assistant', name: '部署', order: 40, session: 'session-deploy-1' },
+    ]
+    const store = new HumanStore(home)
+    for (const role of roles) {
+      await store.upsert({
+        id: role.id, name: role.name, enabled: true, order: role.order, sessionKey: 'requirement',
+      } as any)
+      await writeMailbox(role.id, role.session, THREAD)
+    }
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    expect(tree).toHaveLength(4)
+    // One requirement node, four rows: every role reports the same thread and its
+    // own Session — the asking side named inside the log is not its address.
+    for (const role of tree) {
+      const owned = roles.find((entry) => entry.id === role.humanId)!
+      expect(role.requirements).toEqual([
+        { conversation: THREAD, dir: DIR, name: 'cas文档同步', sessions: [{ sessionId: owned.session }] },
+      ])
+    }
+    const rows = tree.flatMap((role) => role.requirements.flatMap((requirement: any) => requirement.sessions.map((entry: any) => entry.sessionId)))
+    expect(rows.sort()).toEqual(roles.map((role) => role.session).sort())
+    expect(rows).not.toContain('session-pm-1')
+  })
+
+  it('keeps grouping after sessions.json is deleted', async () => {
+    // Today's failure: the Session was created, the mailbox and the edge were
+    // written, and sessions.json was not. A tree that reads only the index loses
+    // the role, so the log must decide what the tree shows.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const roles: Array<{
+      id: string
+      name: string
+      order: number
+      session: string
+      noise?: string[]
+      tail?: string
+    }> = [
+      { id: 'lead-assistant', name: '负责人', order: 10, session: 'session-lead-1' },
+      { id: 'dev-assistant', name: '开发', order: 20, session: 'session-dev-1' },
+      { id: 'qa-assistant', name: '自测', order: 30, session: 'session-qa-1' },
+      {
+        id: 'deploy-assistant',
+        name: '部署',
+        order: 40,
+        session: 'session-deploy-1',
+        // A half-written line and a line that is not JSON: neither may hide a role.
+        noise: ['{"at":"2026-11-03T00:59:00.000Z","kind":"inbound","conversation":"half'],
+        tail: '{"at":"2026-11-03T01:02:00.000Z","kind":"outbound"',
+      },
+    ]
+    const store = new HumanStore(home)
+    for (const role of roles) {
+      await store.upsert({
+        id: role.id, name: role.name, enabled: true, order: role.order, sessionKey: 'requirement',
+      } as any)
+      await writeMailbox(role.id, role.session, THREAD, { noise: role.noise, tail: role.tail })
+      // The index held the address, then the file went missing.
+      await writeFile(join(home, 'humans', role.id, 'sessions.json'), JSON.stringify({ [THREAD]: role.session }))
+      await rm(join(home, 'humans', role.id, 'sessions.json'), { force: true })
+    }
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    expect(tree).toHaveLength(4)
+    for (const role of tree) {
+      const owned = roles.find((entry) => entry.id === role.humanId)!
+      expect(role.requirements).toEqual([
+        { conversation: THREAD, dir: DIR, name: 'cas文档同步', sessions: [{ sessionId: owned.session }] },
+      ])
+    }
+    // Four sessions, one node, and no invented thread from the broken lines.
+    const rows = tree.flatMap((role) => role.requirements.flatMap((requirement: any) => requirement.sessions))
+    expect(rows).toHaveLength(4)
+    expect(JSON.stringify(tree)).not.toContain('half')
+  })
+
+  it('keeps an older Session whose log names no thread', async () => {
+    // A log written before the thread field existed cannot name its requirement.
+    // The index is the only record of that Session, so reading the mailbox must
+    // not hide it — and a Session the log does name is still listed once.
+    const store = new HumanStore(home)
+    await store.upsert({
+      id: 'dev-assistant', name: '开发', enabled: true, order: 20, sessionKey: 'requirement',
+    } as any)
+    await writeMailbox('dev-assistant', 'session-new-1', 'REQ-NEW')
+    // An outbound-only log: no line names a thread.
+    await writeFile(join(home, 'humans', 'dev-assistant', 'conversations', 'session-old-1.jsonl'),
+      `${JSON.stringify({ at: '2026-10-13T01:00:00.000Z', kind: 'outbound', text: 'done' })}\n`)
+    await writeFile(join(home, 'humans', 'dev-assistant', 'sessions.json'), JSON.stringify({ 'REQ-OLD': 'session-old-1' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    const [dev] = answer.result.value.humans
+    expect(dev.requirements).toEqual([
+      { conversation: 'REQ-NEW', dir: 'REQ-NEW', name: 'REQ-NEW', sessions: [{ sessionId: 'session-new-1' }] },
+      { conversation: 'REQ-OLD', dir: 'REQ-OLD', name: 'REQ-OLD', sessions: [{ sessionId: 'session-old-1' }] },
     ])
   })
 

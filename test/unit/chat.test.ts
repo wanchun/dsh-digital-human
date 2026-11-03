@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -715,6 +715,47 @@ describe('the address list', () => {
     const named = await chat.ensureSession(human(), 'main', 'dh-pm')
     await chat.deliver(human(), { sessionId: named, message: 'x' })
     expect(await chat.addresses('pm')).toHaveLength(1)
+  })
+})
+
+describe('the mailbox addresses', () => {
+  it('reads the thread from each log, and skips what is not an address', async () => {
+    const { chat } = chatWith(controllerStub())
+    // Nothing is logged yet.
+    expect(await chat.addressesFromMailbox('pm')).toEqual([])
+    const dir = join(store.dir('pm'), 'conversations')
+    await store.ensureDir(dir)
+
+    // A log filed under a conversation name predates the Session key: the name is
+    // not an address, so its thread stays the index's business.
+    writeFileSync(join(dir, 'REQ-1.jsonl'), `${JSON.stringify({ at: 'x', kind: 'inbound', conversation: 'REQ-1' })}\n`)
+    // An escape that does not decode cannot name a Session.
+    writeFileSync(join(dir, 'session-%E0%A4%A.jsonl'), `${JSON.stringify({ at: 'x', conversation: 'REQ-1' })}\n`)
+    // A log that cannot be read says nothing, and must not fail the whole read.
+    symlinkSync(join(dir, 'gone.jsonl'), join(dir, 'session-broken-1.jsonl'))
+    // Blank lines, a line that is not JSON, a thread that is not text, and a log
+    // with only outbound lines all name no thread.
+    writeFileSync(join(dir, 'session-empty-1.jsonl'), [
+      '',
+      '{ not json',
+      JSON.stringify({ at: 'x', kind: 'inbound', conversation: 7 }),
+      JSON.stringify({ at: 'x', kind: 'inbound', conversation: '   ' }),
+      JSON.stringify({ at: 'x', kind: 'outbound', text: 'hi' }),
+    ].join('\n') + '\n')
+    // The inbound line names the thread; the half-written tail is skipped.
+    writeFileSync(join(dir, 'session-1.jsonl'), `${JSON.stringify({ at: 'x', kind: 'inbound', conversation: 'REQ-1', session: 'session-peer' })}\n{"at":"x","kind":"outb`)
+    expect(await chat.addressesFromMailbox('pm')).toEqual([{ conversationId: 'REQ-1', sessionId: 'session-1' }])
+    // A second read takes the cached answer instead of the log again.
+    expect(await chat.addressesFromMailbox('pm')).toEqual([{ conversationId: 'REQ-1', sessionId: 'session-1' }])
+
+    // A log that gains its thread is read again; a known one keeps its thread.
+    writeFileSync(join(dir, 'session-empty-1.jsonl'), `${JSON.stringify({ at: 'x', kind: 'inbound', conversation: 'REQ-2' })}\n`)
+    writeFileSync(join(dir, 'session-1.jsonl'), `${JSON.stringify({ at: 'x', kind: 'inbound', conversation: 'REQ-1', session: 'session-peer' })}\n${JSON.stringify({ at: 'x', kind: 'outbound', text: 'more' })}\n`)
+    expect((await chat.addressesFromMailbox('pm')).map((entry) => entry.conversationId).sort()).toEqual(['REQ-1', 'REQ-2'])
+
+    // A log that is gone stops answering.
+    rmSync(join(dir, 'session-empty-1.jsonl'))
+    expect((await chat.addressesFromMailbox('pm')).map((entry) => entry.sessionId)).toEqual(['session-1'])
   })
 })
 
