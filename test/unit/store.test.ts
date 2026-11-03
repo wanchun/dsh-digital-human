@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { existsSync, symlinkSync } from 'node:fs'
+import { existsSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -59,7 +59,7 @@ describe('normalizeHuman', () => {
     const human = normalizeHuman({ id: 'a' })
     expect(human).toMatchObject({
       id: 'a', name: 'a', description: '', enabled: true, systemPrompt: '', workspace: '',
-      skills: [], peers: [], subscriptions: [], memory: true, sessionMode: 'thread',
+      skills: [], peers: [], subscriptions: [], memory: true, sessionMode: 'thread', order: 100,
     })
     expect(human.createdAt).toBeTypeOf('string')
   })
@@ -516,11 +516,93 @@ describe('record switches', () => {
     expect(loaded?.memoryScope).toBe('session')
   })
 
-  it('does not write a default switch, so an old config stays byte-identical', async () => {
+  it('writes every switch, so a direct reader of config.json sees a value', async () => {
     await store.upsert(record({ id: 'old' }))
     const stored = JSON.parse(await readFile(store.configPath('old'), 'utf8'))
-    expect(stored.sessionWorkspace).toBeUndefined()
-    expect(stored.memoryScope).toBeUndefined()
+    expect(stored).toMatchObject({
+      sessionMode: 'thread',
+      sessionWorkspace: 'record',
+      memoryScope: 'record',
+      sessionKey: 'requirement',
+      order: 100,
+    })
+  })
+})
+
+describe('config defaults on disk', () => {
+  const legacyConfig = () => JSON.stringify({
+    enabled: true,
+    workspace: '',
+    skills: [],
+    peers: [],
+    im: { botId: '', targetId: '' },
+    permissionPreset: 'danger-full-access',
+    sessionMode: 'thread',
+    memory: false,
+    subscriptions: [],
+    createdAt: '2026-01-02T03:04:05.000Z',
+    updatedAt: '2026-01-02T03:04:05.000Z',
+  }, null, 2) + '\n'
+
+  const completeConfig = () => JSON.stringify({
+    enabled: true,
+    workspace: '',
+    skills: [],
+    peers: [],
+    im: { botId: '', targetId: '' },
+    permissionPreset: 'danger-full-access',
+    sessionMode: 'thread',
+    sessionWorkspace: 'record',
+    memoryScope: 'record',
+    order: 100,
+    sessionKey: 'requirement',
+    memory: true,
+    subscriptions: [],
+    createdAt: '2026-01-02T03:04:05.000Z',
+    updatedAt: '2026-01-02T03:04:05.000Z',
+    note: 'written by hand',
+  }, null, 2) + '\n'
+
+  const writeConfigFile = async (id: string, config: string) => {
+    await store.ensureDir(store.dir(id))
+    await writeFile(store.configPath(id), config, 'utf8')
+  }
+
+  it('fills a missing sessionKey and order, writes them once, then stops', async () => {
+    await writeConfigFile('qa', legacyConfig())
+    expect((await store.get('qa'))?.sessionKey).toBe('requirement')
+    const filled = JSON.parse(await readFile(store.configPath('qa'), 'utf8'))
+    expect(filled).toMatchObject({
+      sessionMode: 'thread',
+      sessionWorkspace: 'record',
+      memoryScope: 'record',
+      sessionKey: 'requirement',
+      order: 100,
+    })
+    // A backfill must not look like an edit.
+    expect(filled.updatedAt).toBe('2026-01-02T03:04:05.000Z')
+
+    const text = await readFile(store.configPath('qa'), 'utf8')
+    const mtime = statSync(store.configPath('qa')).mtimeMs
+    await store.get('qa')
+    expect(await readFile(store.configPath('qa'), 'utf8')).toBe(text)
+    expect(statSync(store.configPath('qa')).mtimeMs).toBe(mtime)
+  })
+
+  it('leaves a config that already carries every field byte-identical', async () => {
+    const config = completeConfig()
+    await writeConfigFile('lead', config)
+    const mtime = statSync(store.configPath('lead')).mtimeMs
+    expect((await store.get('lead'))?.order).toBe(100)
+    expect(await readFile(store.configPath('lead'), 'utf8')).toBe(config)
+    expect(statSync(store.configPath('lead')).mtimeMs).toBe(mtime)
+  })
+
+  it('writes only the config file, so a record without a persona keeps none', async () => {
+    await writeConfigFile('nopersona', legacyConfig())
+    expect((await store.get('nopersona'))?.id).toBe('nopersona')
+    expect(existsSync(store.personaPath('nopersona'))).toBe(false)
+    expect(JSON.parse(await readFile(store.configPath('nopersona'), 'utf8')).sessionKey).toBe('requirement')
   })
 })
 

@@ -198,7 +198,9 @@ export function normalizeHuman(input, now = new Date().toISOString()): Human {
     sessionWorkspace: input.sessionWorkspace === 'requirement' ? 'requirement' : 'record',
     memoryScope: input.memoryScope === 'session' ? 'session' : 'record',
     sessionKey: input.sessionKey === 'chat' ? 'chat' : 'requirement',
-    ...(typeof input.order === 'number' && Number.isFinite(input.order) ? { order: input.order } : {}),
+    // The same fallback the tree and the sidebar sort with, so a default written
+    // here cannot disagree with the order a reader already sees.
+    order: typeof input.order === 'number' && Number.isFinite(input.order) ? input.order : 100,
     // A non-positive or non-numeric window would mean "escalate at once" or "never",
     // neither of which the operator asked for, so the platform default stays.
     ...(usableMinutes(input.escalationDeadlineMinutes)
@@ -308,16 +310,17 @@ function configOf(human: Human): Record<string, unknown> {
       ...(human.im.owner ? { owner: human.im.owner } : {}),
     },
     permissionPreset: human.permissionPreset,
+    // Every switch is written, a default included. A tool that reads config.json
+    // directly does not normalize, so an omitted field would reach it as
+    // `undefined` and take a different path from the runtime. A file written before
+    // a field existed is filled in once on load; see `#backfillDefaults`.
     sessionMode: human.sessionMode ?? 'thread',
-    // A default switch is omitted so an existing config.json is not rewritten just
-    // because it was read; the normalizer supplies the same value on the way back.
-    ...(human.sessionWorkspace === 'requirement' ? { sessionWorkspace: human.sessionWorkspace } : {}),
-    ...(human.memoryScope === 'session' ? { memoryScope: human.memoryScope } : {}),
+    sessionWorkspace: human.sessionWorkspace ?? 'record',
+    memoryScope: human.memoryScope ?? 'record',
     // The sidebar reads both: a role's position, and whether its Sessions are chats
-    // or requirement threads. Written only when set, so reading an older config does
-    // not rewrite it just to store a default.
-    ...(human.order === undefined ? {} : { order: human.order }),
-    ...(human.sessionKey === 'chat' ? { sessionKey: human.sessionKey } : {}),
+    // or requirement threads.
+    order: human.order ?? 100,
+    sessionKey: human.sessionKey ?? 'requirement',
     ...(human.escalationDeadlineMinutes === undefined
       ? {}
       : { escalationDeadlineMinutes: human.escalationDeadlineMinutes }),
@@ -334,6 +337,18 @@ function configOf(human: Human): Record<string, unknown> {
 /** The config file's text for one record. */
 export function configText(human: Human): string {
   return `${JSON.stringify(configOf(human), null, 2)}\n`
+}
+
+/**
+ * The config fields a file on disk does not carry.
+ *
+ * Normalization supplies a default on read, but anything that reads `config.json`
+ * directly does not normalize: it sees `undefined` and takes a different path.
+ * A load writes such a record back once, so every reader sees the value the
+ * runtime applies.
+ */
+function missingConfigFields(config: Record<string, unknown>, record: Human): string[] {
+  return Object.keys(configOf(record)).filter((field) => config[field] === undefined)
 }
 
 /**
@@ -464,8 +479,8 @@ export class HumanStore {
     await mkdir(path, { recursive: true })
   }
 
-  /** Compose one record from the two files that describe it. */
-  async #read(id: string): Promise<Human | undefined> {
+  /** Compose one record from the two files that describe it, and name what it lacked. */
+  async #read(id: string): Promise<{ record: Human; missing: string[] } | undefined> {
     const personaPath = this.personaPath(id)
     const configPath = this.configPath(id)
     const hasPersona = existsSync(personaPath)
@@ -484,20 +499,27 @@ export class HumanStore {
     const persona = hasPersona
       ? parsePersona(await readFile(personaPath, 'utf8'), id)
       : { name: id, description: '', body: '' }
-    return composeRecord(id, config, persona)
+    const record = composeRecord(id, config, persona)
+    return { record, missing: missingConfigFields(config, record) }
+  }
+
+  /** Write one record's config file atomically. Never call this outside {@link #serialize}. */
+  async #writeConfig(human: Human) {
+    await this.ensureDir(this.dir(human.id))
+    await this.#writeAtomically(this.configPath(human.id), configText(human))
   }
 
   /** Write one record's two files atomically. Never call this outside {@link #serialize}. */
   async #writeRecord(human: Human) {
-    const dir = this.dir(human.id)
-    await this.ensureDir(dir)
-    const writes = async (path: string, text: string) => {
-      const temp = `${path}.${process.pid}.${++this.#writes}.tmp`
-      await writeFile(temp, text, 'utf8')
-      await rename(temp, path)
-    }
-    await writes(this.configPath(human.id), configText(human))
-    await writes(this.personaPath(human.id), personaText(human))
+    await this.#writeConfig(human)
+    await this.#writeAtomically(this.personaPath(human.id), personaText(human))
+  }
+
+  /** Replace one file in a single rename, so a reader never sees half of it. */
+  async #writeAtomically(path: string, text: string) {
+    const temp = `${path}.${process.pid}.${++this.#writes}.tmp`
+    await writeFile(temp, text, 'utf8')
+    await rename(temp, path)
   }
 
   /** Remove the two record files, leaving memory and conversation state intact. */
@@ -513,12 +535,30 @@ export class HumanStore {
    * Read the registry. One directory per record; there is no combined file and no
    * fallback to the old one.
    *
+   * A record whose config file predates a field is written back once, so the
+   * defaults the read supplied are on disk for anything that reads the file
+   * directly. See `#backfillDefaults`.
+   */
+  async load(seed: Human[] = []): Promise<Human[]> {
+    const { records, stale } = await this.#readAll(seed)
+    for (const id of stale) await this.#backfillDefaults(id)
+    return records
+  }
+
+  /**
+   * Read every record and name the ones whose config file was missing a field.
+   *
+   * Kept apart from {@link load} because `upsert` and `remove` read inside their
+   * critical section: a backfill started there would queue behind the operation
+   * that is waiting for it.
+   *
    * A fresh registry is seeded only when the registry root does not exist yet. An
    * empty root means the operator removed every record, not that seeding should run
    * again and resurrect them.
    */
-  async load(seed: Human[] = []): Promise<Human[]> {
+  async #readAll(seed: Human[] = []): Promise<{ records: Human[]; stale: string[] }> {
     const records: Human[] = []
+    const stale: string[] = []
     if (existsSync(this.#humans)) {
       for (const name of readdirSync(this.#humans)) {
         if (!SLUG.test(name)) continue
@@ -528,8 +568,10 @@ export class HumanStore {
         } catch {
           continue
         }
-        const record = await this.#read(name)
-        if (record) records.push(record)
+        const read = await this.#read(name)
+        if (!read) continue
+        if (read.missing.length > 0) stale.push(name)
+        records.push(read.record)
       }
     }
     records.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.id.localeCompare(b.id))
@@ -546,7 +588,24 @@ export class HumanStore {
         records.push(record)
       }
     }
-    return records
+    return { records, stale }
+  }
+
+  /**
+   * Write a record back so the defaults a read supplied reach the disk.
+   *
+   * Runs once per record: the written file carries every field a write produces, so
+   * the next read finds nothing missing and writes nothing. The record is read again
+   * inside the critical section, so a save that landed in between is never
+   * overwritten. Only the config file is touched, because a record may legitimately
+   * have no persona yet, and a backfill is not a reason to create one.
+   */
+  #backfillDefaults(id: string): Promise<void> {
+    return this.#serialize(async () => {
+      const current = await this.#read(id)
+      if (!current || current.missing.length === 0) return
+      await this.#writeConfig(current.record)
+    })
   }
 
   /** The legacy combined registry, when a deployment still has one. */
@@ -619,7 +678,7 @@ export class HumanStore {
           await this.#writeRecord(record)
           written.push(record.id)
           const read = await this.#read(record.id)
-          if (read === undefined || !sameRecord(read, record)) {
+          if (read === undefined || !sameRecord(read.record, record)) {
             throw new Error(`record ${record.id} did not round-trip`)
           }
         }
@@ -676,7 +735,7 @@ export class HumanStore {
 
   upsert(input: HumanPatch, seed: Human[] = []): Promise<Human> {
     return this.#serialize(async () => {
-      const records = await this.load(seed)
+      const { records } = await this.#readAll(seed)
       const next = normalizeHuman(input)
       const index = records.findIndex((entry) => entry.id === next.id)
       const merged = index >= 0
@@ -692,7 +751,7 @@ export class HumanStore {
 
   remove(id: string, seed: Human[] = []): Promise<boolean> {
     return this.#serialize(async () => {
-      const records = await this.load(seed)
+      const { records } = await this.#readAll(seed)
       if (!records.some((entry) => entry.id === id)) return false
       await this.#removeRecord(id)
       return true
