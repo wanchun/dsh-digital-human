@@ -33,17 +33,24 @@ DSH 里的一次对话上下文。执行角色：**一个线程名一个会话**
 在 `<工作区根>/reqs/<需求名>-<日期>/`，归档后移到 `<工作区根>/_archive/<需求名>-<日期>/`。
 下含 `meta.json`（`{"thread":"<线程名>","name":"<需求名>"}`）与 brief/params/nodes 等过程文件。线程名仍是会话主键；目录名与显示名只认 `meta.json`。所有角色共用同一个目录。
 
+## 阶段（phase）
+
+阶段集合：`planning → developing → verifying → deploying → testing → done`，外加 `archived`。
+阶段只推导，不存储。`state.json` 不写 `phase` 字段；需求摘要与侧栏树一律用推导值。
+节点名映射：开发、修复→developing；合并、验证→verifying；部署→deploying；自测、冒烟→testing。
+推导规则：已归档→archived；无节点→planning；有未完成节点→动作顺序上最早那个未完成节点的阶段；全部 done→done；未知节点名→沿用上一个已知阶段，没有则 planning。
+
 ## 归档（archive）
 
 把需求目录从 `reqs/` 整体移到 `_archive/`。只移动，不删除，不丢文件。
-状态 `phase` 记为 `archived`；`_archive/index.md` 追加一行：需求名、线程名、归档时间、节点数、最后阶段。
+`state.json` 记 `archived: true`；`_archive/index.md` 追加一行：需求名、线程名、归档时间、节点数、最后阶段。
 归档只由人的一句话触发（「上线了」或「可以归档了」）。链路不触发归档：链路只到测试环境，生产上线是人的判断。
 归档后该需求从侧栏消失，派单被拒绝并提示先恢复。目标目录已存在时拒绝，不覆盖。
 
 ## 召回（restore）
 
 把已归档的需求目录从 `_archive/` 整体移回 `reqs/`。只移动，不删除。
-状态 `phase` 恢复为归档前的值，取不到时记 `active`；索引里该需求最新一行加注已恢复与时间。
+`state.json` 去掉 `archived` 标记，阶段重新由节点推导；索引里该需求最新一行加注已恢复与时间。
 召回后该需求重新出现在侧栏，可以再派单。目标目录已存在时拒绝，不覆盖。
 归档与召回都可重复执行：记录先写、目录后移，任一步失败都不移动目录，可原样重试。
 

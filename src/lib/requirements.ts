@@ -160,15 +160,85 @@ export function createRequirement(
   return { dir, path, metaPath }
 }
 
-/** One requirement's durable state: the digest every role reads instead of history. */
+/** The phase a requirement is in: derived from its nodes, never stored. */
+export type RequirementPhase =
+  | 'planning'
+  | 'developing'
+  | 'verifying'
+  | 'deploying'
+  | 'testing'
+  | 'done'
+  | 'archived'
+
+/**
+ * One requirement's durable state: the digest every role reads instead of history.
+ *
+ * There is no `phase` field on purpose. A stored phase is the thing that goes
+ * stale; `phaseOf` derives it from `nodes` every time it is read.
+ */
 export interface RequirementState {
   thread: string
   name: string
-  phase: string
+  /** Whether the requirement is archived. `phaseOf` reads this before the nodes. */
+  archived?: boolean
   nodes: Record<string, { status: string; note?: string; evidence?: string[]; updatedAt?: string }>
   next: string[]
   events: string[]
   updatedAt?: string
+}
+
+/**
+ * The node names that name a phase.
+ *
+ * A node name may carry a suffix such as `修复`, so the match is by substring.
+ * The list is in action order: it is the order `phaseOf` compares unfinished
+ * nodes by, and it is not the order the node was written in.
+ */
+const NODE_PHASES: ReadonlyArray<readonly [string, RequirementPhase]> = [
+  ['开发', 'developing'],
+  ['修复', 'developing'],
+  ['合并', 'verifying'],
+  ['验证', 'verifying'],
+  ['部署', 'deploying'],
+  ['自测', 'testing'],
+  ['冒烟', 'testing'],
+]
+
+/** The action order of the phases a node name can name. */
+const PHASE_ORDER: readonly RequirementPhase[] = ['developing', 'verifying', 'deploying', 'testing']
+
+/**
+ * Derive a requirement's phase from its node statuses.
+ *
+ * The rules, in order:
+ *
+ * 1. An archived requirement is `archived`, whatever its nodes say.
+ * 2. No node at all is `planning`: nothing has started.
+ * 3. The earliest unfinished node, in action order, names the phase.
+ * 4. Every node done is `done`.
+ * 5. A node name outside the map carries the last known phase before it, or
+ *    `planning` when no earlier node was known. Such a name never throws: a
+ *    requirement whose nodes are its own words stays readable.
+ *
+ * @param state - the state to read. Only `archived` and `nodes` are used.
+ * @returns the phase, derived, never read from the state.
+ */
+export function phaseOf(state: RequirementState): RequirementPhase {
+  if (state.archived === true) return 'archived'
+  const nodes = Object.entries(state.nodes ?? {})
+  if (nodes.length === 0) return 'planning'
+  // One pass in the recorded order, so an unknown name can take the phase of the
+  // node before it. Each unfinished node is then ranked by its phase's action
+  // order; the recorded position only breaks a tie.
+  let carried: RequirementPhase = 'planning'
+  const unfinished: Array<{ phase: RequirementPhase; order: number; at: number }> = []
+  nodes.forEach(([name, info], at) => {
+    carried = NODE_PHASES.find(([word]) => name.includes(word))?.[1] ?? carried
+    if (info?.status !== 'done') unfinished.push({ phase: carried, order: PHASE_ORDER.indexOf(carried), at })
+  })
+  if (unfinished.length === 0) return 'done'
+  unfinished.sort((left, right) => left.order - right.order || left.at - right.at)
+  return unfinished[0].phase
 }
 
 /** Where a requirement keeps its state file. */
@@ -181,10 +251,13 @@ export function readState(dirPath: string, fallback: { thread: string; name: str
   try {
     const parsed = JSON.parse(readFileSync(statePath(dirPath), 'utf8'))
     if (parsed && typeof parsed === 'object') {
+      // A state written before the phase was derived still carries `phase`. Only
+      // `archived` still says something the nodes cannot: the rest is re-derived.
+      const archived = parsed.archived === true || parsed.phase === 'archived'
       return {
         thread: String(parsed.thread ?? fallback.thread),
         name: String(parsed.name ?? fallback.name),
-        phase: String(parsed.phase ?? 'planning'),
+        ...(archived ? { archived: true } : {}),
         nodes: parsed.nodes && typeof parsed.nodes === 'object' ? parsed.nodes : {},
         next: Array.isArray(parsed.next) ? parsed.next.map(String) : [],
         events: Array.isArray(parsed.events) ? parsed.events.map(String) : [],
@@ -194,12 +267,15 @@ export function readState(dirPath: string, fallback: { thread: string; name: str
   } catch {
     // A missing or broken file reads as "nothing recorded yet".
   }
-  return { thread: fallback.thread, name: fallback.name, phase: 'planning', nodes: {}, next: [], events: [] }
+  return { thread: fallback.thread, name: fallback.name, nodes: {}, next: [], events: [] }
 }
 
 /** Write one requirement's state, keeping the file small on purpose. */
 export function writeState(dirPath: string, state: RequirementState): RequirementState {
-  const next = { ...state, updatedAt: new Date().toISOString(), events: state.events.slice(-20) }
+  // A state read from an older file may still carry `phase`. It is derived now,
+  // so the field is dropped here instead of being written back to go stale.
+  const { phase: _legacyPhase, ...kept } = { ...state } as RequirementState & { phase?: string }
+  const next = { ...kept, updatedAt: new Date().toISOString(), events: kept.events.slice(-20) }
   writeFileSync(statePath(dirPath), JSON.stringify(next, null, 2) + '\n', 'utf8')
   return next
 }
@@ -211,7 +287,7 @@ export function renderDigest(state: RequirementState): string {
     '',
     '线程名：' + state.thread,
     '需求名：' + state.name,
-    '阶段：' + state.phase,
+    '阶段：' + phaseOf(state),
     '',
     '## 节点',
   ]
@@ -285,9 +361,9 @@ export interface ArchivedRequirement {
  * Move one requirement directory into the archive root and record the move.
  *
  * The move keeps every file: a requirement holds the evidence of its own work, so
- * archiving is a change of location, never a cleanup. The state is written with
- * phase `archived`, and one row is appended to `_archive/index.md`, which is
- * created with its header on the first archive.
+ * archiving is a change of location, never a cleanup. The state is marked
+ * `archived` — the one phase its nodes cannot express — and one row is appended
+ * to `_archive/index.md`, which is created with its header on the first archive.
  *
  * Every write happens before the move. A write that fails therefore leaves the
  * requirement where it was, unchanged and retryable; a directory that moved before
@@ -315,14 +391,14 @@ export function archiveRequirement(
   // Read the state before anything is written: the row records the phase the
   // requirement ended in, and the snapshot is what a failed move is rolled back to.
   const before = readState(sourcePath, names)
-  const lastPhase = before.phase
+  const lastPhase = phaseOf(before)
   const archivedAt = new Date().toISOString()
   mkdirSync(archiveRoot, { recursive: true })
-  // The phase before the move is kept in the event: a restore reads it back and
-  // has no other record of what the requirement was doing.
+  // The phase before the move is kept in the event: the index is a history once the
+  // requirement is archived, and this line is the only record of where it stopped.
   const state: RequirementState = {
     ...before,
-    phase: 'archived',
+    archived: true,
     events: [...before.events, `${archivedAt} archived to ${target} (phase before archive: ${lastPhase})`],
   }
   // The state file moves with the directory, so it is written in place.
@@ -385,10 +461,9 @@ export interface RestoredRequirement {
  * Move one archived requirement back to `reqs/` and record the move.
  *
  * The restore reverses an archive, never a delete: every file moves back with the
- * directory. The phase returns to what it was before the archive, read from the
- * archive event, and falls back to `active` when no event names it. One annotation
- * is added to the archived row, so the index shows that the requirement is live
- * again.
+ * directory. The `archived` mark is cleared, so the phase is derived from the
+ * nodes again. One annotation is added to the archived row, so the index shows
+ * that the requirement is live again.
  *
  * @param root - the requirement root, the parent of `reqs/` and `_archive/`.
  * @param sourcePath - the archived requirement directory to move.
@@ -408,15 +483,13 @@ export function restoreRequirement(
       `restore target already exists: ${target}. Nothing was moved. Rename or remove the live copy first.`,
     )
   }
-  // The phase an archive recorded is never `archived` itself: an archive event
-  // names the phase the requirement was in before the move.
   const before = readState(sourcePath, names)
   const archivedIndex = join(root, ARCHIVE_DIR, 'index.md')
-  const phase = phaseBeforeArchive(before) || 'active'
   const restoredAt = new Date().toISOString()
+  // A live requirement carries no `archived` key: the phase derives from its nodes.
+  const { archived: _archived, ...live } = before
   const state: RequirementState = {
-    ...before,
-    phase,
+    ...live,
     events: [...before.events, `${restoredAt} restored to ${target}`],
   }
   mkdirSync(join(root, REQUIREMENTS_DIR), { recursive: true })
@@ -432,15 +505,6 @@ export function restoreRequirement(
   }
   markIndexRestored(archivedIndex, state.thread, restoredAt)
   return { dir, restoredAt }
-}
-
-/** The phase an archive event recorded, or '' when no event names one. */
-function phaseBeforeArchive(state: RequirementState): string {
-  for (const event of [...state.events].reverse()) {
-    const found = /phase before archive: ([^\s()]+)/.exec(event)
-    if (found && found[1] !== 'archived') return found[1]
-  }
-  return ''
 }
 
 /**

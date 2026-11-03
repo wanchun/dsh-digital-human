@@ -850,7 +850,7 @@ describe('the requirement tools', () => {
     expect(create.output.render({}, result)).toEqual([{ type: 'text', text: JSON.stringify(result) }])
   })
 
-  it('archives a requirement: moves every file, appends the index, sets the phase', async () => {
+  it('archives a requirement: moves every file, appends the index, marks the state archived', async () => {
     const tools = build()
     // A requirement holds its own documents and its state; archiving keeps both.
     writeFileSync(join(requirementDir, 'nodes.md'), 'evidence')
@@ -869,12 +869,14 @@ describe('the requirement tools', () => {
     expect(readFileSync(join(archived, 'nodes.md'), 'utf8')).toBe('evidence')
     expect(readFileSync(join(archived, 'nodes', 'dev.md'), 'utf8')).toBe('x')
     const state = JSON.parse(readFileSync(join(archived, 'state.json'), 'utf8'))
-    expect(state.phase).toBe('archived')
+    expect(state.archived).toBe(true)
+    expect(state).not.toHaveProperty('phase')
     expect(state.events.at(-1)).toContain('archived to')
     // The first archive creates the index with its header, then one row.
     const index = readFileSync(result.index, 'utf8')
     expect(index.split('\n')[0]).toBe('| 需求名 | 线程名 | 归档时间 | 节点数 | 最后阶段 |')
-    expect(index).toContain(`| ${REQ_NAME} | ${REQ} | ${result.archivedAt} | 1 | planning |`)
+    // The row records the phase the nodes derived at the moment of the archive.
+    expect(index).toContain(`| ${REQ_NAME} | ${REQ} | ${result.archivedAt} | 1 | done |`)
     expect(result.detail).toContain(archived)
     expect(undeclaredKeys(archive.output.schema, result)).toEqual([])
     expect(archive.output.render({}, result)).toEqual([{ type: 'text', text: result.detail }])
@@ -911,6 +913,7 @@ describe('the requirement tools', () => {
   it('refuses a dispatch to an archived requirement, then restores it and dispatches again', async () => {
     const tools = build()
     const archivedState = join(requirementDir, 'state.json')
+    // A state written by an older version still carries `phase`; it is ignored.
     writeFileSync(archivedState, JSON.stringify({
       thread: REQ, name: REQ_NAME, phase: 'executing', nodes: {}, next: [], events: [],
     }))
@@ -931,7 +934,10 @@ describe('the requirement tools', () => {
     expect(existsSync(requirementDir)).toBe(true)
     expect(existsSync(join(home, 'workspace', '_archive', REQ + '-20260101'))).toBe(false)
     const state = JSON.parse(readFileSync(archivedState, 'utf8'))
-    expect(state.phase).toBe('executing')
+    // The archived mark is cleared and the legacy phase is not written back: the
+    // phase derives from the nodes, and there are none.
+    expect(state.archived).toBeUndefined()
+    expect(state).not.toHaveProperty('phase')
     expect(state.events.at(-1)).toContain('restored to')
     // The row is annotated in place: one row, now carrying the restore stamp.
     const index = readFileSync(archived.index, 'utf8')
@@ -966,7 +972,7 @@ describe('the requirement tools', () => {
     await expect(restore.execute({ requirement: 'ghost' })).rejects.toThrow(/no archived requirement/)
   })
 
-  it('restores a hand-archived requirement to active when no record names its phase', async () => {
+  it('restores a hand-archived requirement and drops the archived mark', async () => {
     const archivedDir = join(home, 'workspace', '_archive', '手工归档-20260101')
     mkdirSync(archivedDir, { recursive: true })
     writeFileSync(join(archivedDir, 'meta.json'), JSON.stringify({ thread: 'HAND-1', name: '手工归档' }))
@@ -977,7 +983,8 @@ describe('the requirement tools', () => {
     const result = await restore.execute({ requirement: 'HAND-1' })
     expect(result.dir).toBe('手工归档-20260101')
     const state = JSON.parse(readFileSync(join(home, 'workspace', 'reqs', '手工归档-20260101', 'state.json'), 'utf8'))
-    expect(state.phase).toBe('active')
+    expect(state.archived).toBeUndefined()
+    expect(state).not.toHaveProperty('phase')
     // No index existed, so the restore must still finish and report success.
     expect(result.detail).toContain(join(home, 'workspace', 'reqs', '手工归档-20260101'))
   })

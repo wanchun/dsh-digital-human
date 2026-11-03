@@ -1425,6 +1425,11 @@ interface TreeHuman {
     dir?: string
     /** Requirement name the menu shows; falls back to the thread name. */
     name?: string
+    /**
+     * Phase derived from the requirement's nodes. Absent on a chat-keyed row: a
+     * chat has no nodes, so the Host has nothing to derive it from.
+     */
+    phase?: string
     sessions?: Array<{ sessionId?: string }>
   }>
 }

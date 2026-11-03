@@ -15,7 +15,8 @@
  *   already deliver a due task back into its original Session.
  */
 
-import { dirname } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 import { HumanStore, deadlineMinutesOf, defaultHome } from './lib/store.js'
 import { DEFAULT_CONVERSATION, HumanChat, requireConversation } from './lib/chat.js'
@@ -37,7 +38,8 @@ import { registerRpc } from './lib/rpc.js'
 import { directSenderOf, directSenders, syncBotToHuman } from './lib/im.js'
 import type { ImSyncResult } from './lib/im.js'
 import { DEFAULT_WORKSPACE_TITLE, defaultWorkspacePath, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
-import { readArchivedRequirementDirs, readRequirementDirs } from './lib/requirements.js'
+import { REQUIREMENTS_DIR, phaseOf, readArchivedRequirementDirs, readRequirementDirs, readState } from './lib/requirements.js'
+import type { RequirementPhase } from './lib/requirements.js'
 import type { Config, Ctx, Human, HumanPatch, WorkspaceView } from './lib/types.js'
 import { DEFAULT_PERMISSION_PRESET } from './lib/types.js'
 
@@ -941,6 +943,21 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       // a directory name would otherwise answer for a requirement it no longer names.
       const isArchived = (thread: string) =>
         Boolean(thread) && !liveDirs.has(thread) && archivedDirs.has(thread)
+      // The phase is derived from each requirement's nodes, never stored: one state
+      // read serves every role's row, so all of them report the same phase. A row
+      // that names no requirement directory — a chat-keyed role — has no nodes and
+      // therefore no phase.
+      const phaseByRequirement = new Map<string, RequirementPhase>()
+      const phaseOfRequirement = (conversation: string): RequirementPhase | undefined => {
+        const known = phaseByRequirement.get(conversation)
+        if (known) return known
+        const meta = metaByThread.get(conversation)
+        const dir = join(requirementRoot, REQUIREMENTS_DIR, meta?.dir ?? conversation)
+        if (!existsSync(dir)) return undefined
+        const phase = phaseOf(readState(dir, { thread: conversation, name: meta?.name ?? conversation }))
+        phaseByRequirement.set(conversation, phase)
+        return phase
+      }
       const tree: Array<{
         humanId: string
         name: string
@@ -995,7 +1012,14 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           // which is exactly the legacy `reqs/<thread>/` layout.
           requirements: [...byRequirement].map(([conversation, sessions]) => {
             const meta = metaByThread.get(conversation)
-            return { conversation, dir: meta?.dir ?? conversation, name: meta?.name ?? conversation, sessions }
+            const phase = phaseOfRequirement(conversation)
+            return {
+              conversation,
+              dir: meta?.dir ?? conversation,
+              name: meta?.name ?? conversation,
+              ...(phase ? { phase } : {}),
+              sessions,
+            }
           }),
         })
       }

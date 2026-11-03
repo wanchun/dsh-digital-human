@@ -9,6 +9,7 @@ import {
   attachFile,
   findArchivedRequirementDir,
   findRequirementDir,
+  phaseOf,
   readArchivedRequirementDirs,
   readRequirementDirs,
   readState,
@@ -59,6 +60,53 @@ describe('requirement directory metadata', () => {
     expect(readRequirementDirs(join(root, 'absent')).size).toBe(0)
   })
 })
+describe('derived phase', () => {
+  const state = (nodes: Record<string, { status: string }>, archived = false) => ({
+    thread: 'REQ-1',
+    name: '组织基线验证',
+    ...(archived ? { archived: true } : {}),
+    nodes,
+    next: [],
+    events: [],
+  })
+
+  it('reports planning when the requirement has no nodes', () => {
+    expect(phaseOf(state({}))).toBe('planning')
+  })
+
+  it('reports the earliest unfinished node in action order, not the last written', () => {
+    // Deploy is written first and is still pending, but merge comes earlier.
+    expect(phaseOf(state({
+      部署: { status: 'pending' },
+      开发: { status: 'done' },
+      合并: { status: 'running' },
+    }))).toBe('verifying')
+    // A name that carries 修复 is development work.
+    expect(phaseOf(state({ 'bug修复': { status: 'running' } }))).toBe('developing')
+    expect(phaseOf(state({ 自测: { status: 'pending' }, 冒烟: { status: 'done' } }))).toBe('testing')
+  })
+
+  it('reports done when every node is done', () => {
+    expect(phaseOf(state({
+      开发: { status: 'done' },
+      合并: { status: 'done' },
+      部署: { status: 'done' },
+      自测: { status: 'done' },
+    }))).toBe('done')
+  })
+
+  it('reports archived before any node', () => {
+    expect(phaseOf(state({ 开发: { status: 'running' } }, true))).toBe('archived')
+    expect(phaseOf(state({}, true))).toBe('archived')
+  })
+
+  it('carries the last known phase for a name it does not know, and never throws', () => {
+    // 联调 is not in the map, so it takes the phase of 开发 before it.
+    expect(phaseOf(state({ 开发: { status: 'done' }, 联调: { status: 'running' } }))).toBe('developing')
+    // With no known name before it, there is nothing to carry: planning.
+    expect(phaseOf(state({ 联调: { status: 'running' } }))).toBe('planning')
+  })
+})
 describe('requirement state', () => {
   const fallback = { thread: 'REQ-1', name: '组织基线验证' }
   const dir = () => join(root, 'reqs', '组织基线验证-20260101')
@@ -66,14 +114,15 @@ describe('requirement state', () => {
   it('reads a missing state as an empty skeleton', async () => {
     await mkdir(dir(), { recursive: true })
     expect(readState(dir(), fallback)).toEqual({
-      ...fallback, phase: 'planning', nodes: {}, next: [], events: [],
+      ...fallback, nodes: {}, next: [], events: [],
     })
+    expect(phaseOf(readState(dir(), fallback))).toBe('planning')
   })
 
   it('reads a broken state file as an empty skeleton', async () => {
     await mkdir(dir(), { recursive: true })
     await writeFile(statePath(dir()), '{not json')
-    expect(readState(dir(), fallback).phase).toBe('planning')
+    expect(phaseOf(readState(dir(), fallback))).toBe('planning')
   })
 
   it('writes a state that reads back, stamps updatedAt and keeps the last 20 events', async () => {
@@ -81,7 +130,6 @@ describe('requirement state', () => {
     const events = Array.from({ length: 25 }, (_, index) => `e${index}`)
     const saved = writeState(dir(), {
       ...fallback,
-      phase: 'executing',
       nodes: { dev: { status: 'done', evidence: ['nodes/dev.md'] } },
       next: ['self-test'],
       events,
@@ -91,15 +139,16 @@ describe('requirement state', () => {
     const loaded = JSON.parse(readFileSync(statePath(dir()), 'utf8'))
     expect(loaded.events).toHaveLength(20)
     expect(loaded.events[0]).toBe('e5')
+    // The phase is derived now, so the file never carries it.
+    expect(loaded).not.toHaveProperty('phase')
     expect(readState(dir(), fallback)).toMatchObject({
-      phase: 'executing', nodes: { dev: { status: 'done' } }, next: ['self-test'],
+      nodes: { dev: { status: 'done' } }, next: ['self-test'],
     })
   })
 
   it('renders a bounded digest of nodes, next steps and recent events', async () => {
     const digest = renderDigest({
       ...fallback,
-      phase: 'executing',
       nodes: {
         dev: { status: 'done', note: 'merged', evidence: ['a.md', 'b.md', 'c.md', 'd.md'] },
         deploy: { status: 'running' },
@@ -108,6 +157,8 @@ describe('requirement state', () => {
       events: ['old', 'older', 'e1', 'e2', 'e3'],
     })
     expect(digest).toContain('线程名：REQ-1')
+    // Neither node name is in the map, so the phase stays at its planning default.
+    expect(digest).toContain('阶段：planning')
     expect(digest).toContain('- dev：done（merged） 证据 a.md b.md c.md')
     expect(digest).not.toContain('d.md')
     expect(digest).toContain('- deploy：running')
@@ -137,17 +188,19 @@ describe('requirement state', () => {
     expect(findRequirementDir(join(root, 'absent'), 'REQ-1')).toBeUndefined()
   })
 
-  it('moves a requirement to the archive and back, restoring its phase and marking the row', async () => {
+  it('moves a requirement to the archive and back, clearing its archived mark and marking the row', async () => {
     await mkdir(dir(), { recursive: true })
     await writeFile(join(dir(), 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
-    writeState(dir(), { ...fallback, phase: 'executing', nodes: {}, next: [], events: [] })
+    writeState(dir(), { ...fallback, nodes: {}, next: [], events: [] })
     const archived = archiveRequirement(root, dir(), fallback)
     // The archived map names the thread, so the tree can tell archived from unknown.
     expect(readArchivedRequirementDirs(root).get('REQ-1'))
       .toEqual({ dir: '组织基线验证-20260101', name: '组织基线验证' })
     expect(findArchivedRequirementDir(root, 'REQ-1')).toBe(join(root, '_archive', archived.dir))
     expect(findRequirementDir(root, 'REQ-1')).toBeUndefined()
-    expect(readState(join(root, '_archive', archived.dir), fallback).phase).toBe('archived')
+    const archivedState = readState(join(root, '_archive', archived.dir), fallback)
+    expect(archivedState.archived).toBe(true)
+    expect(phaseOf(archivedState)).toBe('archived')
 
     const restored = restoreRequirement(root, join(root, '_archive', archived.dir), fallback)
     expect(restored.dir).toBe(archived.dir)
@@ -155,7 +208,9 @@ describe('requirement state', () => {
     expect(findRequirementDir(root, 'REQ-1')).toBe(dir())
     expect(readArchivedRequirementDirs(root).size).toBe(0)
     const state = readState(dir(), fallback)
-    expect(state.phase).toBe('executing')
+    // No nodes, so the derived phase is planning again; nothing says "archived".
+    expect(state.archived).toBeUndefined()
+    expect(phaseOf(state)).toBe('planning')
     expect(state.events.at(-1)).toContain('restored to')
     // One row, annotated in place: the header is not written again.
     const index = readFileSync(join(root, '_archive', 'index.md'), 'utf8')
@@ -228,7 +283,9 @@ describe('requirement state', () => {
       await chmod(join(root, 'reqs'), 0o700)
     }
     expect(findRequirementDir(root, 'REQ-1')).toBe(dir())
-    expect(readState(dir(), fallback).phase).toBe('planning')
+    // The rolled-back state must not claim the archive it never made.
+    expect(readState(dir(), fallback).archived).toBeUndefined()
+    expect(phaseOf(readState(dir(), fallback))).toBe('planning')
     expect(existsSync(join(root, '_archive', '组织基线验证-20260101'))).toBe(false)
     expect(readFileSync(indexFile, 'utf8')).toBe(before)
   })
@@ -245,7 +302,7 @@ describe('requirement state', () => {
     }
     expect(readArchivedRequirementDirs(root).get('REQ-1')).toEqual({ dir: '组织基线验证-20260101', name: '组织基线验证' })
     // Still archived, so its state still says so.
-    expect(readState(join(root, '_archive', archived.dir), fallback).phase).toBe('archived')
+    expect(readState(join(root, '_archive', archived.dir), fallback).archived).toBe(true)
   })
 
   it('notes the row of a hand-written index in its own last column', async () => {

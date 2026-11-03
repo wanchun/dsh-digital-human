@@ -1379,7 +1379,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     name: 'digital_human_requirement_archive',
     description:
       'Archive one finished requirement: move reqs/<dir>/ to _archive/<dir>/ keeping every file, append one row '
-      + 'to _archive/index.md, and set its state phase to "archived". Nothing is deleted. A target directory that '
+      + 'to _archive/index.md, and mark its state archived. Nothing is deleted. A target directory that '
       + 'already exists is refused, never overwritten. '
       + 'Call it only when the person says the requirement is live or may be archived. The chain ends at the '
       + 'test environment, so no node status and no judgement of your own is a reason to archive.',
@@ -1426,9 +1426,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
   const requirementRestore = {
     name: 'digital_human_requirement_restore',
     description:
-      'Restore one archived requirement: move _archive/<dir>/ back to reqs/<dir> keeping every file, set its '
-      + 'state phase to the value recorded before the archive (active when no record names one), append one '
-      + 'event, and mark its row in _archive/index.md as restored. A target directory that already exists is '
+      'Restore one archived requirement: move _archive/<dir>/ back to reqs/<dir> keeping every file, clear its '
+      + 'archived mark so its phase is derived from its nodes again, append one event, and mark its row in '
+      + '_archive/index.md as restored. A target directory that already exists is '
       + 'refused, never overwritten. The requirement is nameable and dispatchable again after the restore. '
       + 'Call it when the person asks to change something based on an archived requirement.',
     parameters: {
@@ -1470,7 +1470,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       }
       const restored = restoreRequirement(root, source, requirementFallback(root, source, reference))
       return {
-        detail: `Restored ${restored.dir} to ${join(root, REQUIREMENTS_DIR, restored.dir)}; its state phase and the archive index now record the restore.`,
+        detail: `Restored ${restored.dir} to ${join(root, REQUIREMENTS_DIR, restored.dir)}; its state and the archive index now record the restore.`,
         ...restored,
       }
     },

@@ -422,6 +422,12 @@ describe('the management route', () => {
     const requirementDir = join(home, 'workspace', 'reqs', '组织基线验证-20261102')
     await mkdir(requirementDir, { recursive: true })
     await writeFile(join(requirementDir, 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    // Development is done and merge is not, so the derived phase is verifying.
+    await writeFile(join(requirementDir, 'state.json'), JSON.stringify({
+      thread: 'REQ-1', name: '组织基线验证',
+      nodes: { 开发: { status: 'done' }, 合并: { status: 'running' } },
+      next: [], events: [],
+    }))
     const platform = makeCtx()
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
@@ -447,8 +453,16 @@ describe('the management route', () => {
     const lead = byId['lead-assistant']
     expect(lead.sessionKey).toBe('requirement')
     expect(lead.order).toBe(10)
+    // A row with a requirement directory carries the phase derived from its nodes; a
+    // legacy row with no directory has no nodes, so it carries none.
     expect(lead.requirements).toEqual([
-      { conversation: 'REQ-1', dir: '组织基线验证-20261102', name: '组织基线验证', sessions: [{ sessionId: 'session-lead-1' }] },
+      {
+        conversation: 'REQ-1',
+        dir: '组织基线验证-20261102',
+        name: '组织基线验证',
+        phase: 'verifying',
+        sessions: [{ sessionId: 'session-lead-1' }],
+      },
       { conversation: 'REQ-2', dir: 'REQ-2', name: 'REQ-2', sessions: [{ sessionId: 'session-lead-2' }] },
     ])
 
@@ -458,8 +472,15 @@ describe('the management route', () => {
     // The row's own mark travels with the record; a record without one says so.
     expect(dev.icon).toBe(ICON)
     expect(lead.icon).toBe('')
+    // One requirement, one state: every role reports the same derived phase.
     expect(dev.requirements).toEqual([
-      { conversation: 'REQ-1', dir: '组织基线验证-20261102', name: '组织基线验证', sessions: [{ sessionId: 'session-dev-1' }] },
+      {
+        conversation: 'REQ-1',
+        dir: '组织基线验证-20261102',
+        name: '组织基线验证',
+        phase: 'verifying',
+        sessions: [{ sessionId: 'session-dev-1' }],
+      },
     ])
   })
 
@@ -495,7 +516,14 @@ describe('the management route', () => {
     expect(tree).toHaveLength(4)
     for (const role of tree) {
       expect(role.requirements).toEqual([
-        { conversation: THREAD, dir: DIR, name: 'cas文档同步', sessions: [{ sessionId: `session-${role.humanId}` }] },
+        {
+          conversation: THREAD,
+          dir: DIR,
+          name: 'cas文档同步',
+          // No state was written yet, so nothing has started.
+          phase: 'planning',
+          sessions: [{ sessionId: `session-${role.humanId}` }],
+        },
       ])
     }
     // Four roles, four Sessions, one requirement: the view merges them by `conversation`.
@@ -536,7 +564,7 @@ describe('the management route', () => {
     await rename(archived, join(home, 'workspace', 'reqs', DIR))
     const restoredTree = await read()
     expect(restoredTree[0].requirements).toEqual([
-      { conversation: THREAD, dir: DIR, name: '归档需求', sessions: [{ sessionId: 'session-dev-arch' }] },
+      { conversation: THREAD, dir: DIR, name: '归档需求', phase: 'planning', sessions: [{ sessionId: 'session-dev-arch' }] },
     ])
   })
 
@@ -586,7 +614,7 @@ describe('the management route', () => {
     const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
     expect(answer.result.ok).toBe(true)
     expect(answer.result.value.humans[0].requirements).toEqual([
-      { conversation: THREAD, dir: NOW, name: '新需求', sessions: [{ sessionId: 'session-dev-reborn' }] },
+      { conversation: THREAD, dir: NOW, name: '新需求', phase: 'planning', sessions: [{ sessionId: 'session-dev-reborn' }] },
     ])
   })
 
@@ -625,7 +653,7 @@ describe('the management route', () => {
     for (const role of tree) {
       const owned = roles.find((entry) => entry.id === role.humanId)!
       expect(role.requirements).toEqual([
-        { conversation: THREAD, dir: DIR, name: 'cas文档同步', sessions: [{ sessionId: owned.session }] },
+        { conversation: THREAD, dir: DIR, name: 'cas文档同步', phase: 'planning', sessions: [{ sessionId: owned.session }] },
       ])
     }
     const rows = tree.flatMap((role) => role.requirements.flatMap((requirement: any) => requirement.sessions.map((entry: any) => entry.sessionId)))
@@ -684,7 +712,7 @@ describe('the management route', () => {
     for (const role of tree) {
       const owned = roles.find((entry) => entry.id === role.humanId)!
       expect(role.requirements).toEqual([
-        { conversation: THREAD, dir: DIR, name: 'cas文档同步', sessions: [{ sessionId: owned.session }] },
+        { conversation: THREAD, dir: DIR, name: 'cas文档同步', phase: 'planning', sessions: [{ sessionId: owned.session }] },
       ])
     }
     // Four sessions, one node, and no invented thread from the broken lines.
