@@ -121,7 +121,7 @@ function shadowUncheckedSkills(ctx: Ctx, human: string, enabled: Set<string>): v
 }
 
 /** Services this plugin reads: the registry, the tool registry, and prompt assembly. */
-export const inject = ['digitalHumans', 'tools', 'systemPrompt', 'skills']
+export const inject = ['digitalHumans', 'tools', 'systemPrompt', 'skills', 'sessionController']
 
 /**
  * Prompt-context order of the memory block. Below the repository-owned context
