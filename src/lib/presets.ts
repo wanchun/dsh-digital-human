@@ -59,7 +59,6 @@ const BASELINE_ROWS = [
     isolate: { workflowEngine: true },
     config: [
       { id: 'tool-subagent-control', name: '@deepseek-ai/dsh-tool-subagent-control' },
-      { id: 'tool-subagent-list-agents', name: '@deepseek-ai/dsh-tool-subagent-control/list-agents' },
       {
         id: 'tool-subagent',
         name: '@deepseek-ai/dsh-tool-subagent',
