@@ -120,6 +120,9 @@ function makeCtx({ dshIm } = {}) {
 }
 
 const home = await mkdtemp(join(tmpdir(), 'dh-apply-'))
+// Skills live in the operator's global root; point it inside this run so a record
+// created here never inherits the skills installed on the machine.
+process.env.DSH_AGENTS_HOME = join(home, 'agents')
 
 console.log('1) platform row mounts')
 const platform = makeCtx()
@@ -236,22 +239,73 @@ check('the memory context renders the rules', scope.contexts[0].text().includes(
 check('refuses an empty human id', (() => { try { applyTools(makeCtx().ctx, {}) ; return false } catch { return true } })())
 
 console.log('7) tools drive the chat system')
+// A send names its requirement; the tool resolves the directory and puts its
+// absolute path at the head of the message.
+const requirement = await scope.tools.get('digital_human_requirement_create')
+  .execute({ thread: 'REQ-1', name: '组织基线验证' })
+check('create returns an absolute requirement directory', requirement.path.startsWith('/'))
 const outbound = await scope.tools.get('digital_human_send')
-  .execute({ to: 'pm-assistant', message: 'status please', conversation_id: 'main' })
+  .execute({
+    to: 'pm-assistant',
+    message: 'status please',
+    requirement: 'REQ-1',
+    task_id: 'w-01',
+    node: '开发',
+    facts: {
+      subsystem: 'RCS-CSA',
+      version: '3.32.0',
+      branch: 'feature/x',
+      environment: 'M1',
+      repo: '/repo',
+      docs: `${requirement.path}/params.md`,
+    },
+    context: '已接单；上一步结论见 nodes/intake.md',
+    // Only a dispatch asks for a receipt, and only when the caller says so.
+    expect_receipt: true,
+  })
 check('send resolves the peer by id', outbound.to === 'pm-assistant' && outbound.accepted === true)
-check('send reports the conversation', outbound.conversationId === 'main')
+check('send reports the requirement thread', outbound.conversationId === 'REQ-1')
+const lastPrompt = platform.prompts.at(-1).content[0].text
+check('the requirement path follows the peer source and precedes the facts',
+  lastPrompt.indexOf('<dsh_peer_source') < lastPrompt.indexOf(`需求目录：${requirement.path}`)
+  && lastPrompt.indexOf(`需求目录：${requirement.path}`) < lastPrompt.indexOf('事实：'))
+check('the head carries task, node, facts and context in one fixed order',
+  lastPrompt.indexOf('工作项：w-01') < lastPrompt.indexOf('节点：开发')
+  && lastPrompt.indexOf('节点：开发') < lastPrompt.indexOf('事实：')
+  && lastPrompt.indexOf('- 子系统：RCS-CSA') < lastPrompt.indexOf('- 版本：3.32.0')
+  && lastPrompt.indexOf('- 文档：') < lastPrompt.indexOf('上下文：已接单；上一步结论见 nodes/intake.md')
+  && lastPrompt.indexOf('上下文：已接单；上一步结论见 nodes/intake.md') < lastPrompt.indexOf('status please'))
+check('the dispatch ends with one fixed receipt request',
+  lastPrompt.indexOf('status please') < lastPrompt.indexOf('—— 完成后请用 digital_human_send 回执给我：requirement=REQ-1，node=开发。写在你自己的会话里我收不到。'))
+// The flag is the only switch. A send without it carries no request, so a receipt
+// never asks for a receipt.
+await scope.tools.get('digital_human_send')
+  .execute({ to: 'pm-assistant', message: 'no receipt', requirement: 'REQ-1' })
+check('a send without expect_receipt carries no receipt request',
+  !platform.prompts.at(-1).content[0].text.includes('完成后请用 digital_human_send 回执给我'))
+await scope.tools.get('digital_human_send')
+  .execute({ to: 'pm-assistant', message: '【回执】REQ-1 done', session_id: outbound.sessionId, requirement: 'REQ-1' })
+check('a receipt carries no receipt request of its own',
+  !platform.prompts.at(-1).content[0].text.includes('完成后请用 digital_human_send 回执给我'))
+check('send refuses a dispatch that carries steps, commands or cautions',
+  await scope.tools.get('digital_human_send').execute({
+    to: 'pm-assistant', message: 'x', requirement: 'REQ-1', steps: ['one', 'two'],
+  }).then(() => false, (error) => error.message.includes('派单只传事实')))
+check('send refuses a missing requirement',
+  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x' }).then(() => false, (error) => error.message.includes('派单必须带需求')))
+check('send refuses an unknown requirement',
+  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x', requirement: 'ghost' }).then(() => false, () => true))
 const byName = await scope.tools.get('digital_human_send')
-  .execute({ to: '研发PM助手', message: 'ping', conversation_id: 'main' })
+  .execute({ to: '研发PM助手', message: 'ping', requirement: 'REQ-1' })
 check('send resolves the peer by display name', byName.to === 'pm-assistant')
-// A send with no address at all would pour every requirement into one shared thread,
-// so the tool refuses it rather than defaulting.
-check('send refuses a missing address',
-  await scope.tools.get('digital_human_send').execute({ to: 'pm-assistant', message: 'x' }).then(() => false, () => true))
-check('send refuses itself', await scope.tools.get('digital_human_send').execute({ to: 'dev-assistant', message: 'x', conversation_id: 'main' }).then(() => false, () => true))
-check('send refuses an unknown peer', await scope.tools.get('digital_human_send').execute({ to: 'nobody', message: 'x', conversation_id: 'main' }).then(() => false, () => true))
+// The requirement is its own address: a send that names none still lands in the one
+// thread every role of that requirement shares.
+check('send uses the requirement thread when no address is given', byName.conversationId === 'REQ-1')
+check('send refuses itself', await scope.tools.get('digital_human_send').execute({ to: 'dev-assistant', message: 'x', requirement: 'REQ-1' }).then(() => false, () => true))
+check('send refuses an unknown peer', await scope.tools.get('digital_human_send').execute({ to: 'nobody', message: 'x', requirement: 'REQ-1' }).then(() => false, () => true))
 const listed = await scope.tools.get('digital_human_list').execute({})
 check('list names the caller as you', listed.detail.includes('you'))
-const mail = await scope.tools.get('digital_human_messages').execute({ to: 'pm-assistant', limit: 5 })
+const mail = await scope.tools.get('digital_human_messages').execute({ to: 'pm-assistant', conversation_id: 'REQ-1', limit: 5 })
 check('messages reads the peer mailbox', mail.detail.includes('status please'), mail.detail)
 
 console.log('8) IM binding')
@@ -420,14 +474,15 @@ console.log('13) bound bots are aligned at startup, without a save')
   aligned.ctx.provide('connection', connection)
   await applyPlatform(aligned.ctx, { home: alignHome })
 
-  check('the workspace is pushed at startup', seen.some((entry) => entry.method === 'bot.workspace.set'))
+  // The platform now has one fixed workspace: a record no longer names its own,
+  // so neither the record's /tmp nor any per-record path may be pushed.
+  const workspacePush = seen.find((entry) => entry.method === 'bot.workspace.set')
+  check('no per-record workspace is pushed', workspacePush === undefined || workspacePush.payload.workspace !== '/tmp')
   check('the preset is pushed at startup', seen.some((entry) => entry.method === 'bot.preset.set'))
   check('the source block is pushed at startup', seen.some((entry) => entry.method === 'bot.context-enhancement.set'))
   const context = seen.find((entry) => entry.method === 'bot.context-enhancement.set')
   check('the startup claim reaches the pushed guidance',
     context.payload.config.group.guidance.includes('wohR_owner'), context.payload.config.group.guidance.slice(-90))
-  check('the pushed workspace is the digital human\'s',
-    seen.find((entry) => entry.method === 'bot.workspace.set').payload.workspace === '/tmp')
 
   await rm(root, { recursive: true, force: true })
 }
@@ -474,7 +529,8 @@ console.log('14) an alignment that found no connection recovers on a later refre
     }),
   })
   await late.provided.get('digitalHumans').refresh()
-  check('the later refresh pushes the workspace', seen.some((entry) => entry.method === 'bot.workspace.set'))
+  // One fixed workspace: the record no longer names a directory to push.
+  check('the later refresh pushes no per-record workspace', seen.every((entry) => entry.method !== 'bot.workspace.set'))
   check('the later refresh pushes the preset', seen.some((entry) => entry.method === 'bot.preset.set'))
   check('the later refresh pushes the source block', seen.some((entry) => entry.method === 'bot.context-enhancement.set'))
 
@@ -573,7 +629,7 @@ console.log('16) a delivered session is filed under its Workspace')
   const bareSent = await bare.provided.get('digitalHumans').send('ws-two', { message: 'hi' })
   const bareRow = bare.sessions.find((entry) => entry.sessionId === bareSent.sessionId)
   check('no roster means no Workspace id', bareRow.workspaceId === undefined)
-  check('no roster still passes the named directory', bareRow.cwd === target, String(bareRow.cwd))
+  check('a record with no roster runs in the fixed workspace', bareRow.cwd === '' || bareRow.cwd === undefined, String(bareRow.cwd))
 
   await rm(root, { recursive: true, force: true })
 }

@@ -1,4 +1,5 @@
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -13,11 +14,14 @@ import { SEED_HUMANS } from '../fixtures/seed.mjs'
 import { readBundle } from '../../src/lib/bundle'
 
 let home = ''
+/** The global skill root a test installs its own skills into. */
+let skillRoot = ''
 /** The directory the stub Workspace resolves to. */
 const WORKSPACE_PATH = '/w'
 
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), 'dh-entry-'))
+  skillRoot = join(home, 'global-skills')
 })
 
 afterEach(async () => {
@@ -107,8 +111,7 @@ function makeCtx(services: Record<string, unknown> = {}) {
       },
     },
     systemPrompt: { context: (entry: any) => { contexts.push(entry); return () => {} } },
-    // The skill registry is what a preset-scoped registration lands in, so the stub
-    // records what was mounted rather than swallowing it.
+    // The preset-scoped whitelist reads this registry and contributes shadows to it.
     skills: { register: (skill: any) => { mounted.push(skill); return () => {} } },
   }
   return { ctx, presets, tools, provided, contexts, listeners, sessions, prompts, services, mounted }
@@ -289,6 +292,84 @@ describe('the chat service', () => {
     expect(second.sessionId).not.toBe(first.sessionId)
   })
 
+  it('files the executing role under the requirement when a lead dispatches to it', async () => {
+    // The reported shape: the person's dispatch reached the lead by name, so its
+    // index was written; the lead's dispatch to the developer did not write one, and
+    // that role kept only a mailbox and an edge.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const service = platform.provided.get('digitalHumans')
+    for (const record of [
+      { id: 'pm-assistant', name: '研发PM助手', memory: false },
+      { id: 'lead-assistant', name: '负责人', memory: false, peers: ['dev-assistant'] },
+      { id: 'dev-assistant', name: '开发', memory: false },
+    ]) await service.upsert(record)
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+    const indexOf = async (id: string) => JSON.parse(await readFile(join(home, 'humans', id, 'sessions.json'), 'utf8'))
+
+    const toLead = await service.send('lead-assistant', {
+      message: '派单', from: 'pm-assistant', fromSession: 'session-pm-1', conversationId: THREAD,
+    })
+    expect(await indexOf('lead-assistant')).toEqual({ [THREAD]: toLead.sessionId })
+
+    // The lead dispatches through the tool it actually calls, with its own Session.
+    const send = buildHumanTools({
+      ctx: platform.ctx, service, humanId: 'lead-assistant', memory: false, im: false,
+    }).find((tool) => tool.name === 'digital_human_send')!
+    const exec = { agent: { session: { header: { id: toLead.sessionId } } } }
+    const receipt = await send.execute({ to: 'dev-assistant', requirement: THREAD, message: '开发节点' }, exec)
+    // The developer's Session is filed under the requirement, with its own id.
+    expect(await indexOf('dev-assistant')).toEqual({ [THREAD]: receipt.sessionId })
+    expect(receipt.sessionId).not.toBe(toLead.sessionId)
+
+    // A second dispatch reuses that Session and leaves the index exactly as it was.
+    const written = await readFile(join(home, 'humans', 'dev-assistant', 'sessions.json'), 'utf8')
+    const again = await send.execute({ to: 'dev-assistant', requirement: THREAD, message: '补充' }, exec)
+    expect(again.sessionId).toBe(receipt.sessionId)
+    expect(await readFile(join(home, 'humans', 'dev-assistant', 'sessions.json'), 'utf8')).toBe(written)
+  })
+
+  it('reuses the Session the executing role already has for the thread', async () => {
+    // The second half of the same failure: the lead's own index entry for the thread
+    // used to be read as the developer's address. Adoption refused it, the Host
+    // minted a new Session, and one thread ran in two Sessions with two contexts.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const service = platform.provided.get('digitalHumans')
+    for (const record of [
+      { id: 'pm-assistant', name: '研发PM助手', memory: false },
+      { id: 'lead-assistant', name: '负责人', memory: false, peers: ['dev-assistant'] },
+      { id: 'dev-assistant', name: '开发', memory: false },
+    ]) await service.upsert(record)
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+
+    // The developer is reached by name first, so its Session exists and is filed.
+    const toDev = await service.send('dev-assistant', {
+      message: '准备', from: 'pm-assistant', fromSession: 'session-pm-1', conversationId: THREAD,
+    })
+    const toLead = await service.send('lead-assistant', {
+      message: '派单', from: 'pm-assistant', fromSession: 'session-pm-1', conversationId: THREAD,
+    })
+    const send = buildHumanTools({
+      ctx: platform.ctx, service, humanId: 'lead-assistant', memory: false, im: false,
+    }).find((tool) => tool.name === 'digital_human_send')!
+    const receipt = await send.execute({
+      to: 'dev-assistant', requirement: THREAD, message: '开发节点',
+    }, { agent: { session: { header: { id: toLead.sessionId } } } })
+    expect(receipt.sessionId).toBe(toDev.sessionId)
+    // One Session for the thread, not a second minted from the lead's own id.
+    const devSessions = platform.sessions.filter((entry) => entry.agentPreset === presetIdOf('dev-assistant'))
+    expect(devSessions).toHaveLength(1)
+    expect(JSON.parse(await readFile(join(home, 'humans', 'dev-assistant', 'sessions.json'), 'utf8')))
+      .toEqual({ [THREAD]: toDev.sessionId })
+  })
+
   it('files a session under the Workspace that owns its directory', async () => {
     const platform = makeCtx({
       workspaceController: {
@@ -341,6 +422,26 @@ describe('the management route', () => {
     return { platform, connection, route: connection.routes[0] }
   }
 
+  /**
+   * Write one mailbox log the way a delivery leaves it: the thread's name on the
+   * inbound line, plus the Session of the side that asked.
+   */
+  const writeMailbox = async (
+    id: string,
+    sessionId: string,
+    conversation: string,
+    { noise = [], tail = '' }: { noise?: string[]; tail?: string } = {},
+  ) => {
+    const dir = join(home, 'humans', id, 'conversations')
+    await mkdir(dir, { recursive: true })
+    const lines = [
+      ...noise,
+      JSON.stringify({ at: '2026-11-03T01:00:00.000Z', kind: 'inbound', from: 'pm-assistant', text: '【新需求】cas 文档同步', session: 'session-pm-1', conversation }),
+      JSON.stringify({ at: '2026-11-03T01:00:01.000Z', kind: 'outbound', text: '收到' }),
+    ]
+    await writeFile(join(dir, `${sessionId}.jsonl`), `${lines.join('\n')}\n${tail}`)
+  }
+
   it('mounts only when the connection service exists', async () => {
     const bare = makeCtx()
     await applyPlatform(bare.ctx, { home, humans: SEED_HUMANS })
@@ -370,6 +471,358 @@ describe('the management route', () => {
     const pm = answer.result.value.humans.find((entry: any) => entry.id === 'pm-assistant')
     expect(pm.resolved.values.self_name).toBe('研发PM助手')
     expect(Array.isArray(pm.alignment)).toBe(true)
+  })
+
+  it('serves the requirement tree: roles in their own order, requirements grouped, chats keyed', async () => {
+    // The tree is the view's whole input: a role's position, what its Sessions are
+    // keyed by, and the requirements it serves. Written through the store before
+    // apply() because startup primes the Session index from these files.
+    const ICON = 'data:image/png;base64,iVBORw0KGgo='
+    const store = new HumanStore(home)
+    const records = [
+      { id: 'pm-assistant', name: 'PM 角色', enabled: true, order: 0, sessionKey: 'chat' },
+      { id: 'lead-assistant', name: '负责人', enabled: true, order: 10, sessionKey: 'requirement' },
+      { id: 'dev-assistant', name: '开发', enabled: true, order: 20, sessionKey: 'requirement', icon: ICON },
+      { id: 'retired-assistant', name: '停用', enabled: false, order: 30, sessionKey: 'requirement' },
+    ]
+    for (const record of records) await store.upsert(record as any)
+    const indexes: Record<string, Record<string, string>> = {
+      'pm-assistant': { 'direct:leader': 'session-pm-direct', 'group:team': 'session-pm-group' },
+      'lead-assistant': { 'REQ-1': 'session-lead-1', 'REQ-2': 'session-lead-2' },
+      'dev-assistant': { 'REQ-1': 'session-dev-1' },
+      'retired-assistant': { 'REQ-1': 'session-retired-1' },
+    }
+    for (const [id, index] of Object.entries(indexes)) {
+      await writeFile(join(home, 'humans', id, 'sessions.json'), JSON.stringify(index))
+    }
+    // One requirement directory carries meta.json; the other is legacy, so the
+    // thread name stays the fallback for both its fields.
+    const requirementDir = join(home, 'workspace', 'reqs', '组织基线验证-20261102')
+    await mkdir(requirementDir, { recursive: true })
+    await writeFile(join(requirementDir, 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '组织基线验证' }))
+    // Development is done and merge is not, so the derived phase is verifying.
+    await writeFile(join(requirementDir, 'state.json'), JSON.stringify({
+      thread: 'REQ-1', name: '组织基线验证',
+      nodes: { 开发: { status: 'done' }, 合并: { status: 'running' } },
+      next: [], events: [],
+    }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const route = connection.routes[0]
+
+    const answer = await (await route.fetch(post(call('tree.read')))).json()
+    // The channel refuses a bare value, so the envelope is part of the contract.
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    // A disabled record is not part of the view.
+    expect(tree.map((entry) => entry.humanId).sort()).toEqual(['dev-assistant', 'lead-assistant', 'pm-assistant'])
+    const byId = Object.fromEntries(tree.map((entry) => [entry.humanId, entry]))
+
+    const pm = byId['pm-assistant']
+    expect(pm.sessionKey).toBe('chat')
+    expect(pm.order).toBe(0)
+    expect(pm.requirements).toEqual([
+      { conversation: 'direct:leader', dir: 'direct:leader', name: 'direct:leader', sessions: [{ sessionId: 'session-pm-direct' }] },
+      { conversation: 'group:team', dir: 'group:team', name: 'group:team', sessions: [{ sessionId: 'session-pm-group' }] },
+    ])
+
+    const lead = byId['lead-assistant']
+    expect(lead.sessionKey).toBe('requirement')
+    expect(lead.order).toBe(10)
+    // A row with a requirement directory carries the phase derived from its nodes; a
+    // legacy row with no directory has no nodes, so it carries none.
+    expect(lead.requirements).toEqual([
+      {
+        conversation: 'REQ-1',
+        dir: '组织基线验证-20261102',
+        name: '组织基线验证',
+        phase: 'verifying',
+        sessions: [{ sessionId: 'session-lead-1' }],
+      },
+      { conversation: 'REQ-2', dir: 'REQ-2', name: 'REQ-2', sessions: [{ sessionId: 'session-lead-2' }] },
+    ])
+
+    // One requirement, many roles: each role reports its own Session for it.
+    const dev = byId['dev-assistant']
+    expect(dev.order).toBe(20)
+    // The row's own mark travels with the record; a record without one says so.
+    expect(dev.icon).toBe(ICON)
+    expect(lead.icon).toBe('')
+    // One requirement, one state: every role reports the same derived phase.
+    expect(dev.requirements).toEqual([
+      {
+        conversation: 'REQ-1',
+        dir: '组织基线验证-20261102',
+        name: '组织基线验证',
+        phase: 'verifying',
+        sessions: [{ sessionId: 'session-dev-1' }],
+      },
+    ])
+  })
+
+  it('files every role of one requirement under the requirement, not a role suffix', async () => {
+    // The requirement's thread is the one conversation its roles share. A Session
+    // filed under the directory name is the same requirement, so it groups with the
+    // rest instead of opening a second node.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const store = new HumanStore(home)
+    const roles = [
+      { id: 'lead-assistant', name: '负责人', order: 10, conversation: THREAD },
+      { id: 'dev-assistant', name: '开发', order: 20, conversation: THREAD },
+      { id: 'qa-assistant', name: '自测', order: 30, conversation: THREAD },
+      { id: 'deploy-assistant', name: '部署', order: 40, conversation: DIR },
+    ]
+    for (const role of roles) {
+      await store.upsert({
+        id: role.id, name: role.name, enabled: true, order: role.order, sessionKey: 'requirement',
+      } as any)
+      await writeFile(join(home, 'humans', role.id, 'sessions.json'), JSON.stringify({ [role.conversation]: `session-${role.id}` }))
+    }
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    expect(tree).toHaveLength(4)
+    for (const role of tree) {
+      expect(role.requirements).toEqual([
+        {
+          conversation: THREAD,
+          dir: DIR,
+          name: 'cas文档同步',
+          // No state was written yet, so nothing has started.
+          phase: 'planning',
+          sessions: [{ sessionId: `session-${role.humanId}` }],
+        },
+      ])
+    }
+    // Four roles, four Sessions, one requirement: the view merges them by `conversation`.
+    expect(tree.map((role) => role.requirements[0].sessions[0].sessionId).sort()).toEqual([
+      'session-deploy-assistant', 'session-dev-assistant', 'session-lead-assistant', 'session-qa-assistant',
+    ])
+  })
+
+  it('keeps an archived requirement off the tree until a restore brings it back', async () => {
+    // Archiving moves the requirement to _archive/, and the tree is the live view:
+    // its Sessions must disappear at once, then reappear after a restore.
+    const THREAD = 'REQ-ARCH'
+    const DIR = '归档需求-20261101'
+    const store = new HumanStore(home)
+    await store.upsert({
+      id: 'dev-assistant', name: '开发', enabled: true, order: 20, sessionKey: 'requirement',
+    } as any)
+    await writeMailbox('dev-assistant', 'session-dev-arch', THREAD)
+    const archived = join(home, 'workspace', '_archive', DIR)
+    await mkdir(archived, { recursive: true })
+    await writeFile(join(archived, 'meta.json'), JSON.stringify({ thread: THREAD, name: '归档需求' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const read = async () => {
+      const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+      expect(answer.result.ok).toBe(true)
+      return answer.result.value.humans
+    }
+
+    const archivedTree = await read()
+    expect(archivedTree).toHaveLength(1)
+    expect(archivedTree[0].requirements).toEqual([])
+
+    // A restore is the same move in reverse, so the tree must pick it up again.
+    await mkdir(join(home, 'workspace', 'reqs'), { recursive: true })
+    await rename(archived, join(home, 'workspace', 'reqs', DIR))
+    const restoredTree = await read()
+    expect(restoredTree[0].requirements).toEqual([
+      { conversation: THREAD, dir: DIR, name: '归档需求', phase: 'planning', sessions: [{ sessionId: 'session-dev-arch' }] },
+    ])
+  })
+
+  it('keeps an archived requirement off the tree by thread, however its Sessions were filed', async () => {
+    // The reported shape: one thread archived, its Sessions filed by thread and by
+    // directory. No row may survive, and no field may carry the thread name alone.
+    const THREAD = 'cas-bind-verify-v0.1.0-20261103'
+    const DIR = '绑定验证-20261103'
+    const store = new HumanStore(home)
+    for (const id of ['lead-assistant', 'dev-assistant']) {
+      await store.upsert({ id, name: id, enabled: true, sessionKey: 'requirement' } as any)
+    }
+    await writeMailbox('lead-assistant', 'session-lead-arch', THREAD)
+    await writeMailbox('dev-assistant', 'session-dev-arch', DIR)
+    const archived = join(home, 'workspace', '_archive', DIR)
+    await mkdir(archived, { recursive: true })
+    await writeFile(join(archived, 'meta.json'), JSON.stringify({ thread: THREAD, name: '绑定验证' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    expect(tree).toHaveLength(2)
+    for (const role of tree) expect(role.requirements).toEqual([])
+    expect(JSON.stringify(tree)).not.toContain(THREAD)
+  })
+
+  it('shows a requirement created again under an archived thread', async () => {
+    // The old copy is archived and a new directory names the same thread. The live
+    // directory is the requirement now, so the archive must not hide it.
+    const THREAD = 'REQ-REBORN'
+    const OLD = '旧需求-20261101'
+    const NOW = '新需求-20261102'
+    const store = new HumanStore(home)
+    await store.upsert({ id: 'dev-assistant', name: '开发', enabled: true, order: 20, sessionKey: 'requirement' } as any)
+    await writeMailbox('dev-assistant', 'session-dev-reborn', THREAD)
+    await mkdir(join(home, 'workspace', '_archive', OLD), { recursive: true })
+    await writeFile(join(home, 'workspace', '_archive', OLD, 'meta.json'), JSON.stringify({ thread: THREAD, name: '旧需求' }))
+    await mkdir(join(home, 'workspace', 'reqs', NOW), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', NOW, 'meta.json'), JSON.stringify({ thread: THREAD, name: '新需求' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    expect(answer.result.value.humans[0].requirements).toEqual([
+      { conversation: THREAD, dir: NOW, name: '新需求', phase: 'planning', sessions: [{ sessionId: 'session-dev-reborn' }] },
+    ])
+  })
+
+  it('serves the requirement tree from the mailbox alone', async () => {
+    // No sessions.json is written here at all: one delivery path creates the
+    // Session, writes the edge and the mailbox, and never writes the index. The
+    // mailbox still knows the thread, so all four roles stay in the tree.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const roles = [
+      { id: 'lead-assistant', name: '负责人', order: 10, session: 'session-lead-1' },
+      { id: 'dev-assistant', name: '开发', order: 20, session: 'session-dev-1' },
+      { id: 'qa-assistant', name: '自测', order: 30, session: 'session-qa-1' },
+      { id: 'deploy-assistant', name: '部署', order: 40, session: 'session-deploy-1' },
+    ]
+    const store = new HumanStore(home)
+    for (const role of roles) {
+      await store.upsert({
+        id: role.id, name: role.name, enabled: true, order: role.order, sessionKey: 'requirement',
+      } as any)
+      await writeMailbox(role.id, role.session, THREAD)
+    }
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    expect(tree).toHaveLength(4)
+    // One requirement node, four rows: every role reports the same thread and its
+    // own Session — the asking side named inside the log is not its address.
+    for (const role of tree) {
+      const owned = roles.find((entry) => entry.id === role.humanId)!
+      expect(role.requirements).toEqual([
+        { conversation: THREAD, dir: DIR, name: 'cas文档同步', phase: 'planning', sessions: [{ sessionId: owned.session }] },
+      ])
+    }
+    const rows = tree.flatMap((role) => role.requirements.flatMap((requirement: any) => requirement.sessions.map((entry: any) => entry.sessionId)))
+    expect(rows.sort()).toEqual(roles.map((role) => role.session).sort())
+    expect(rows).not.toContain('session-pm-1')
+  })
+
+  it('keeps grouping after sessions.json is deleted', async () => {
+    // Today's failure: the Session was created, the mailbox and the edge were
+    // written, and sessions.json was not. A tree that reads only the index loses
+    // the role, so the log must decide what the tree shows.
+    const THREAD = 'cas-doc-sync-1'
+    const DIR = 'cas文档同步-20261103'
+    const roles: Array<{
+      id: string
+      name: string
+      order: number
+      session: string
+      noise?: string[]
+      tail?: string
+    }> = [
+      { id: 'lead-assistant', name: '负责人', order: 10, session: 'session-lead-1' },
+      { id: 'dev-assistant', name: '开发', order: 20, session: 'session-dev-1' },
+      { id: 'qa-assistant', name: '自测', order: 30, session: 'session-qa-1' },
+      {
+        id: 'deploy-assistant',
+        name: '部署',
+        order: 40,
+        session: 'session-deploy-1',
+        // A half-written line and a line that is not JSON: neither may hide a role.
+        noise: ['{"at":"2026-11-03T00:59:00.000Z","kind":"inbound","conversation":"half'],
+        tail: '{"at":"2026-11-03T01:02:00.000Z","kind":"outbound"',
+      },
+    ]
+    const store = new HumanStore(home)
+    for (const role of roles) {
+      await store.upsert({
+        id: role.id, name: role.name, enabled: true, order: role.order, sessionKey: 'requirement',
+      } as any)
+      await writeMailbox(role.id, role.session, THREAD, { noise: role.noise, tail: role.tail })
+      // The index held the address, then the file went missing.
+      await writeFile(join(home, 'humans', role.id, 'sessions.json'), JSON.stringify({ [THREAD]: role.session }))
+      await rm(join(home, 'humans', role.id, 'sessions.json'), { force: true })
+    }
+    await mkdir(join(home, 'workspace', 'reqs', DIR), { recursive: true })
+    await writeFile(join(home, 'workspace', 'reqs', DIR, 'meta.json'), JSON.stringify({ thread: THREAD, name: 'cas文档同步' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    expect(answer.result.ok).toBe(true)
+    const tree: any[] = answer.result.value.humans
+    expect(tree).toHaveLength(4)
+    for (const role of tree) {
+      const owned = roles.find((entry) => entry.id === role.humanId)!
+      expect(role.requirements).toEqual([
+        { conversation: THREAD, dir: DIR, name: 'cas文档同步', phase: 'planning', sessions: [{ sessionId: owned.session }] },
+      ])
+    }
+    // Four sessions, one node, and no invented thread from the broken lines.
+    const rows = tree.flatMap((role) => role.requirements.flatMap((requirement: any) => requirement.sessions))
+    expect(rows).toHaveLength(4)
+    expect(JSON.stringify(tree)).not.toContain('half')
+  })
+
+  it('keeps an older Session whose log names no thread', async () => {
+    // A log written before the thread field existed cannot name its requirement.
+    // The index is the only record of that Session, so reading the mailbox must
+    // not hide it — and a Session the log does name is still listed once.
+    const store = new HumanStore(home)
+    await store.upsert({
+      id: 'dev-assistant', name: '开发', enabled: true, order: 20, sessionKey: 'requirement',
+    } as any)
+    await writeMailbox('dev-assistant', 'session-new-1', 'REQ-NEW')
+    // An outbound-only log: no line names a thread.
+    await writeFile(join(home, 'humans', 'dev-assistant', 'conversations', 'session-old-1.jsonl'),
+      `${JSON.stringify({ at: '2026-10-13T01:00:00.000Z', kind: 'outbound', text: 'done' })}\n`)
+    await writeFile(join(home, 'humans', 'dev-assistant', 'sessions.json'), JSON.stringify({ 'REQ-OLD': 'session-old-1' }))
+    const platform = makeCtx()
+    const connection = connectionStub()
+    platform.ctx.provide('connection', connection)
+    await applyPlatform(platform.ctx, { home, humans: [] })
+
+    const answer = await (await connection.routes[0].fetch(post(call('tree.read')))).json()
+    const [dev] = answer.result.value.humans
+    expect(dev.requirements).toEqual([
+      { conversation: 'REQ-NEW', dir: 'REQ-NEW', name: 'REQ-NEW', sessions: [{ sessionId: 'session-new-1' }] },
+      { conversation: 'REQ-OLD', dir: 'REQ-OLD', name: 'REQ-OLD', sessions: [{ sessionId: 'session-old-1' }] },
+    ])
   })
 
   it('resolves one session to its digital human icon', async () => {
@@ -437,7 +890,7 @@ describe('the management route', () => {
     const { route } = await platformWithRoute()
     expect((await (await route.fetch(post(call('im.bots')))).json()).result.value.bots).toEqual([])
     expect((await (await route.fetch(post(call('im.targets', { botId: 'x' })))).json()).result.value.targets).toEqual([])
-    expect((await (await route.fetch(post(call('skills.list')))).json()).result.value.skills).toEqual([])
+    expect((await (await route.fetch(post(call('skills.catalog')))).json()).result.value.skills).toEqual([])
     expect(Array.isArray((await (await route.fetch(post(call('workspaces.list')))).json()).result.value.workspaces)).toBe(true)
   })
 
@@ -447,52 +900,114 @@ describe('the management route', () => {
     expect(answer.result.ok).toBe(false)
     expect(answer.result.error.message).toContain('unsupported method')
   })
+
+  it('sends a chat message and reports the work item', async () => {
+    const { route } = await platformWithRoute()
+    const answer = await (await route.fetch(post(call('chat.send', {
+      to: 'dev-assistant', message: 'please review 12345', conversation_id: 'REQ-1', from: 'pm-assistant',
+    })))).json()
+    expect(answer.result.ok).toBe(true)
+    expect(answer.result.value.conversation).toBe('REQ-1')
+    expect(answer.result.value.sessionId).toBeTypeOf('string')
+    expect(answer.result.value.taskId).toBeTypeOf('string')
+    expect(answer.result.value.mode).toBe('assign')
+  })
+
+  it('sends a plain message when no sender is named', async () => {
+    const { route } = await platformWithRoute()
+    const answer = await (await route.fetch(post(call('chat.send', {
+      to: 'dev-assistant', message: 'hello', conversation_id: 'REQ-2',
+    })))).json()
+    expect(answer.result.ok).toBe(true)
+    expect(answer.result.value.conversation).toBe('REQ-2')
+    expect(answer.result.value.taskId).toBeUndefined()
+    expect(answer.result.value.mode).toBe('message')
+  })
+
+  it('refuses a send with no target, no message or an unknown target', async () => {
+    const { route } = await platformWithRoute()
+    const noTarget = await (await route.fetch(post(call('chat.send', { message: 'x' })))).json()
+    expect(noTarget.result.ok).toBe(false)
+    expect(noTarget.result.error.code).toBe('bad-request')
+    expect(noTarget.result.error.details).toEqual({})
+    const noMessage = await (await route.fetch(post(call('chat.send', { to: 'dev-assistant' })))).json()
+    expect(noMessage.result.ok).toBe(false)
+    expect(noMessage.result.error.code).toBe('bad-request')
+    const unknown = await (await route.fetch(post(call('chat.send', { to: 'nobody', message: 'x' })))).json()
+    expect(unknown.result.ok).toBe(false)
+    expect(unknown.result.error.code).toBe('bad-request')
+    expect(unknown.result.error.message).toContain('unknown digital human')
+  })
 })
 
-describe('the skill-space route', () => {
-  const withRoute = async () => {
+describe('the skill catalog route', () => {
+  /** A global skill root of the test's own, installed by hand. */
+  const install = (name: string, description: string) => {
+    const dir = join(skillRoot, name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n# Body\n`)
+  }
+  const withRoute = async (config: Record<string, unknown> = {}) => {
     const platform = makeCtx()
     const connection = connectionStub()
     platform.ctx.provide('connection', connection)
-    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS, ...config })
     return { platform, connection, route: connection.routes[0] }
   }
 
-  it('lists an empty library', async () => {
-    const { route } = await withRoute()
-    const answer = await (await route.fetch(post(call('skills.library')))).json()
+  it('lists an empty global root', async () => {
+    const { route } = await withRoute({ skillsDir: join(home, 'no-skills') })
+    const answer = await (await route.fetch(post(call('skills.catalog')))).json()
     expect(answer.result.value.skills).toEqual([])
   })
 
-  it('uploads a skill, then lists it', async () => {
-    const { route } = await withRoute()
-    const saved = await (await route.fetch(post(call('skills.upload', {
-      name: 'qs',
-      files: { 'SKILL.md': '---\nname: qs\ndescription: d\n---\n# Body\n' },
+  it('lists every installed skill, and only its name and description', async () => {
+    install('qs', 'query the platform')
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    const answer = await (await route.fetch(post(call('skills.catalog')))).json()
+    expect(answer.result.value.skills).toEqual([{ name: 'qs', description: 'query the platform' }])
+  })
+
+  it('reads the root on every call, so a hand-installed skill needs no restart', async () => {
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    expect((await (await route.fetch(post(call('skills.catalog')))).json()).result.value.skills).toEqual([])
+    install('late', 'installed after the platform started')
+    expect((await (await route.fetch(post(call('skills.catalog')))).json()).result.value.skills).toEqual([
+      { name: 'late', description: 'installed after the platform started' },
+    ])
+  })
+
+  it('refuses the upload and removal methods that no longer exist', async () => {
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    for (const method of ['skills.upload', 'skills.remove', 'skills.library', 'skills.list']) {
+      const answer = await (await route.fetch(post(call(method)))).json()
+      expect(answer.result.ok, method).toBe(false)
+      expect(answer.result.error.message).toContain('unsupported method')
+    }
+  })
+
+  it('gives a new record every installed skill, and keeps an explicit list as given', async () => {
+    install('qs', 'query the platform')
+    install('git', 'version control')
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    const created = await (await route.fetch(post(call('registry.save', {
+      id: 'all-skills', partial: false, patch: { name: 'All' },
     })))).json()
-    expect(saved.result.ok).toBe(true)
-    expect(saved.result.value.skill.name).toBe('qs')
-    const listed = await (await route.fetch(post(call('skills.library')))).json()
-    expect(listed.result.value.skills[0]).toMatchObject({ name: 'qs', description: 'd' })
+    expect(created.result.value.human.skills).toEqual(['git', 'qs'])
+    const chosen = await (await route.fetch(post(call('registry.save', {
+      id: 'one-skill', partial: false, patch: { name: 'One', skills: [] },
+    })))).json()
+    expect(chosen.result.value.human.skills).toEqual([])
   })
 
-  it('refuses an upload with no files, and one with a name it will not use', async () => {
-    const { route } = await withRoute()
-    const noFiles = await (await route.fetch(post(call('skills.upload', { name: 'x' })))).json()
-    expect(noFiles.result.ok).toBe(false)
-    expect(noFiles.result.error.message).toContain('files must be an object')
-    const badName = await (await route.fetch(post(call('skills.upload', { name: '../x', files: { 'a.md': 'x' } })))).json()
-    expect(badName.result.ok).toBe(false)
-    expect(badName.result.error.message).toContain('skill name')
-  })
-
-  it('removes a skill, and reports one that is not there', async () => {
-    const { route } = await withRoute()
-    await route.fetch(post(call('skills.upload', { name: 'qs', files: { 'SKILL.md': 'x' } })))
-    const removed = await (await route.fetch(post(call('skills.remove', { name: 'qs' })))).json()
-    expect(removed.result.value.removed).toBe(true)
-    const again = await (await route.fetch(post(call('skills.remove', { name: 'qs' })))).json()
-    expect(again.result.value.removed).toBe(false)
+  it('does not change the skills of a record that already exists', async () => {
+    install('qs', 'query the platform')
+    const { route } = await withRoute({ skillsDir: skillRoot })
+    await route.fetch(post(call('registry.save', { id: 'kept', partial: false, patch: { name: 'Kept', skills: [] } })))
+    const saved = await (await route.fetch(post(call('registry.save', {
+      id: 'kept', partial: true, patch: { name: 'Kept 2' },
+    })))).json()
+    expect(saved.result.value.human.skills).toEqual([])
   })
 })
 
@@ -562,15 +1077,12 @@ describe('the bundle route', () => {
     expect(platform.presets.has('dh-pm-copy')).toBe(true)
   })
 
-  it('refuses an id it will not use, and keeps an existing skill when told to', async () => {
+  it('refuses an id it will not use', async () => {
     const { route } = await withRoutes()
     const exported = Buffer.from(await (await route.fetch(new Request('http://x/api/digital-human/bundle?id=pm-assistant'))).arrayBuffer())
     const bad = await route.fetch(post(exported, '?id=../evil'))
     expect(bad.status).toBe(400)
     expect((await bad.json()).error.message).toContain('id must match')
-    const kept = await route.fetch(post(exported, '?id=pm-copy&overwrite=false'))
-    expect(kept.status).toBe(200)
-    expect((await kept.json()).value.ids).toEqual(['pm-copy'])
   })
 
   it('exports the whole registry as one bundle', async () => {
@@ -808,62 +1320,191 @@ describe('the preset-scoped tools row', () => {
     expect(platform.contexts[0].text()).toContain('# now')
   })
 
-  it('mounts the skills the record names, from the plugin skill space', async () => {
-    // The library is shared by every digital human; the record's list is what makes a
-    // skill visible to one of them, because a preset-scoped registration lands in
-    // that preset's layer alone.
-    const { writeSkill } = await import('../../src/lib/skills')
-    await writeSkill(home, 'qs', {
-      'SKILL.md': '---\nname: qs\ndescription: query the platform\nwhenToUse: when asked\n---\n\n# Body\n',
-    })
+
+  it('registers the archive tools only for a record the preset allowed them', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
-    await platform.provided.get('digitalHumans').upsert({ id: 'sk', name: 'Sk', skills: ['qs'], memory: false })
-    applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
-    expect(platform.mounted).toHaveLength(1)
-    // `source` is what the Host's load-time definition check requires: without it the
-    // registration succeeds and every later `skill` call fails to read the body.
-    expect(platform.mounted[0]).toMatchObject({ name: 'qs', description: 'query the platform', whenToUse: 'when asked', source: 'digital-human' })
-    expect(platform.mounted[0].content).toContain('# Body')
+    // A lead: the switch travels on the preset row, because apply is synchronous.
+    applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: true, canArchive: false })
+    expect(platform.tools.has('digital_human_requirement_archive')).toBe(false)
+    expect(platform.tools.has('digital_human_requirement_restore')).toBe(false)
+    expect(platform.tools.has('digital_human_requirement_read')).toBe(true)
+    const pm = makeCtx()
+    await applyPlatform(pm.ctx, { home, humans: SEED_HUMANS })
+    pm.ctx.digitalHumans = pm.provided.get('digitalHumans')
+    applyToolsEntry(pm.ctx, { human: 'pm-assistant', memory: true, canArchive: true })
+    expect(pm.tools.has('digital_human_requirement_archive')).toBe(true)
+    expect(pm.tools.has('digital_human_requirement_restore')).toBe(true)
   })
 
-  it('mounts nothing when the record names none, and reports one that is gone', async () => {
+  it('injects the conversation memory and the shared notes for a session-scoped record', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'm1', name: 'M', memoryScope: 'session' })
+    const firstSend = await service.send('m1', { message: 'a', conversationId: 'REQ-1' })
+    await service.send('m1', { message: 'b', conversationId: 'REQ-2' })
+    const firstSessionId = firstSend.sessionId
+    const secondSessionId = (await service.send('m1', { message: 'c', conversationId: 'REQ-2' })).sessionId
+    const one = memoryPaths(service.store, 'm1', { scope: 'session', conversation: 'REQ-1' })
+    const two = memoryPaths(service.store, 'm1', { scope: 'session', conversation: 'REQ-2' })
+    await mkdir(dirname(one.file), { recursive: true })
+    await writeFile(one.file, '# now\n## State | first only\n', 'utf8')
+    await writeFile(two.file, '# now\n## State | second only\n', 'utf8')
+    await writeFile(one.sharedFile!, '# now\n## Patterns\n- shared rule\n', 'utf8')
+    platform.ctx.digitalHumans = service
+    applyToolsEntry(platform.ctx, { human: 'm1', memory: true, memoryScope: 'session' })
+    // The preset cannot name the Session (assembly scope is opaque), so it registers
+    // no memory context at all for a session-scoped record; the pre-step hook serves
+    // the right file instead.
+    expect(platform.contexts).toHaveLength(0)
+    const hook = platform.listeners.find((entry) => entry.event === 'agent/pre-step')
+    const batch = (sessionId: string) => ({
+      id: 'message-1',
+      role: 'user',
+      source: { kind: 'user', rpcId: 'rpc-1' },
+      content: [{ type: 'text', text: 'work' }],
+    })
+    const firstDecision = await hook!.handler({ agent: { session: { id: firstSessionId } } }, async () => ({ kind: 'enter', messages: [batch('a')] }))
+    const firstText = firstDecision.messages[0].content[0].text
+    expect(firstText).toContain('first only')
+    expect(firstText).not.toContain('second only')
+    expect(firstText).toContain('shared rule')
+    const secondDecision = await hook!.handler({ agent: { session: { id: secondSessionId } } }, async () => ({ kind: 'enter', messages: [batch('b')] }))
+    const secondText = secondDecision.messages[0].content[0].text
+    expect(secondText).toContain('second only')
+    expect(secondText).not.toContain('first only')
+  })
+
+  it('points the memory tools at the calling session file', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'm2', name: 'M2', memoryScope: 'session' })
+    const sent = await service.send('m2', { message: 'a', conversationId: 'REQ-9' })
+    const paths = memoryPaths(service.store, 'm2', { scope: 'session', conversation: 'REQ-9' })
+    const tools = buildHumanTools({ ctx: platform.ctx, service, humanId: 'm2', memory: true, im: false, memoryScope: 'session' })
+    const status = tools.find((tool: any) => tool.name === 'memory_status')!
+    const answer = await status.execute({}, { agent: { session: { header: { id: sent.sessionId } } } })
+    expect(answer.detail).toContain(paths.file)
+  })
+
+  it('shadows every catalog skill the record did not enable', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
-    applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false })
-    expect(platform.mounted).toEqual([])
-    // A name with no skill behind it is reported rather than silently skipped.
+    // The catalog the whitelist compares against: one ordinary skill, one already
+    // hidden, and the one this record enables.
+    platform.ctx.skills.snapshot = async () => ({
+      skills: [
+        { name: 'git', description: 'version control', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } },
+        { name: 'quiet', description: 'already hidden', source: 'user-agents', invocation: { modelInvocable: false, userInvocable: true } },
+        { name: 'qs', description: 'enabled here', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } },
+      ],
+      complete: true,
+    })
+    const providers: any[] = []
+    platform.ctx.skills.registerProvider = (create: any) => {
+      providers.push(create({ signal: new AbortController().signal, invalidate: () => {} }))
+      return () => {}
+    }
+    applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
+    expect(providers).toHaveLength(1)
+    const shadows = await providers[0].list({})
+    // The enabled one keeps its real body; the already-hidden one needs no shadow;
+    // every other model-invocable skill becomes a same-name, rank-0 shadow.
+    expect(shadows.map((entry: any) => entry.name)).toEqual(['git'])
+    expect(shadows[0]).toMatchObject({
+      provider: 'digital-human-whitelist',
+      rank: 0,
+      source: 'digital-human',
+      invocation: { modelInvocable: false, userInvocable: false },
+    })
+    // Loading the shadow yields exactly the disabled sentence.
+    expect(await providers[0].get(shadows[0])).toMatchObject({
+      name: 'git',
+      content: '该技能未在本数字人启用',
+      provider: 'digital-human-whitelist',
+    })
+  })
+
+  it('reads the catalog with the caller scope and skips its own nested read', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    const scope = { opaque: 'scope-key' }
+    const seen: any[] = []
+    platform.ctx.skills.snapshot = async (options: any) => {
+      seen.push(options)
+      return { skills: [{ name: 'git', description: 'vcs', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } }], complete: true }
+    }
+    const providers: any[] = []
+    platform.ctx.skills.registerProvider = (create: any) => {
+      providers.push(create({ signal: new AbortController().signal, invalidate: () => {} }))
+      return () => {}
+    }
+    applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })
+    await providers[0].list({ scope, cwd: '/w' })
+    // The scope is what selects this preset's layer, so it must reach the read.
+    expect(seen[0]).toMatchObject({ scope, cwd: '/w' })
+    // The provider's own read is marked, so answering it with no candidates is what
+    // stops the recursion.
+    expect(seen[0][Object.getOwnPropertySymbols(seen[0])[0]]).toBe(true)
+  })
+
+  it('skips the whitelist when its provider cannot register', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
     const warn = vi.fn()
     platform.ctx.logger = { warn, info: () => {} }
-    applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: ['never-uploaded'] })
-    expect(platform.mounted).toEqual([])
-    expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('never-uploaded'))).toBe(true)
+    platform.ctx.skills.snapshot = async () => ({ skills: [], complete: true })
+    platform.ctx.skills.registerProvider = () => { throw new Error('no provider') }
+    expect(() => applyToolsEntry(platform.ctx, { human: 'sk', memory: false, skills: ['qs'] })).not.toThrow()
+    expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('no provider'))).toBe(true)
   })
 
-  it('ignores a skills config that is not a list, and a registry with no home', async () => {
+  it('shadows every visible skill when the record names none', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    platform.ctx.skills.snapshot = async () => ({
+      skills: [{ name: 'git', description: 'vcs', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } }],
+      complete: true,
+    })
+    const providers: any[] = []
+    platform.ctx.skills.registerProvider = (create: any) => {
+      providers.push(create({ signal: new AbortController().signal, invalidate: () => {} }))
+      return () => {}
+    }
+    applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false })
+    expect((await providers[0].list({})).map((entry: any) => entry.name)).toEqual(['git'])
+  })
+
+  it('treats a skills config that is not a list as an empty whitelist', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
+    platform.ctx.skills.snapshot = async () => ({
+      skills: [{ name: 'git', description: 'vcs', source: 'user-agents', invocation: { modelInvocable: true, userInvocable: true } }],
+      complete: true,
+    })
+    const providers: any[] = []
+    platform.ctx.skills.registerProvider = (create: any) => {
+      providers.push(create({ signal: new AbortController().signal, invalidate: () => {} }))
+      return () => {}
+    }
     applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: 'qs' })
-    expect(platform.mounted).toEqual([])
-    // Without a registry root there is nowhere to read skills from, so mounting is
-    // skipped rather than guessed at.
-    platform.ctx.digitalHumans = { ...platform.provided.get('digitalHumans'), home: undefined }
-    expect(() => applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: ['qs'] })).not.toThrow()
-    expect(platform.mounted).toEqual([])
+    expect((await providers[0].list({})).map((entry: any) => entry.name)).toEqual(['git'])
   })
 
   it('survives an absent skill registry', async () => {
     const platform = makeCtx()
     await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
     platform.ctx.digitalHumans = platform.provided.get('digitalHumans')
-    const warn = vi.fn()
-    platform.ctx.logger = { warn, info: () => {} }
     platform.ctx.skills = undefined
     expect(() => applyToolsEntry(platform.ctx, { human: 'dev-assistant', memory: false, skills: ['qs'] })).not.toThrow()
-    expect(warn.mock.calls.map(([line]) => String(line)).some((line) => line.includes('skill registry is absent'))).toBe(true)
   })
 
   it('omits the memory context and the memory tools when memory is off', async () => {
@@ -1092,6 +1733,50 @@ describe('the work-item ledger', () => {
     await expect(service.tasks('off')).resolves.toHaveLength(0)
   })
 })
+describe('the delivery mode of a send', () => {
+  /** The tools one record holds, against the real service. */
+  const toolsOf = (platform: any, humanId: string) => buildHumanTools({
+    ctx: platform.ctx, service: platform.provided.get('digitalHumans'), humanId, memory: false, im: false,
+  })
+  const toolNamed = (tools: any[], name: string) => tools.find((tool) => tool.name === name)!
+
+  it('steers a busy peer by default and queues it only when asked', async () => {
+    // The peer is mid-turn. Default delivery is steer, so the dispatch reaches that
+    // turn at its next step; "queue" is the explicit choice to wait for its end.
+    for (const [delivery, want] of [[undefined, 'steer'], ['queue', 'queue']] as const) {
+      const platform = makeCtx()
+      await applyPlatform(platform.ctx, { home: join(home, String(want)), humans: SEED_HUMANS })
+      const service = platform.provided.get('digitalHumans')
+      await service.send('dev-assistant', {
+        message: 'work', from: 'pm-assistant', conversationId: 'REQ-1',
+      })
+      const tools = toolsOf(platform, 'pm-assistant')
+      await toolNamed(tools, 'digital_human_requirement_create')
+        .execute({ thread: 'REQ-1', name: 'Delivery probe' })
+      await toolNamed(tools, 'digital_human_send').execute({
+        to: 'dev-assistant', message: 'news', requirement: 'REQ-1', ...(delivery ? { delivery } : {}),
+      })
+      expect(platform.prompts.at(-1)!.mode).toBe(want)
+    }
+  })
+
+  it('queues in a shared-session record even when asked to steer', async () => {
+    // A shared-session record queues every task behind its standing turn. The
+    // tool's parameter must not change that.
+    const platform = makeCtx()
+    const pm = { id: 'pm-assistant', name: 'PM', enabled: true, systemPrompt: '', memory: false, peers: ['qa'] }
+    const qa = { id: 'qa', name: 'QA', enabled: true, systemPrompt: '', memory: false, sessionMode: 'single' }
+    await applyPlatform(platform.ctx, { home: join(home, 'single-session'), humans: [pm, qa] })
+    const tools = toolsOf(platform, 'pm-assistant')
+    await toolNamed(tools, 'digital_human_requirement_create')
+      .execute({ thread: 'REQ-1', name: 'Shared probe' })
+    await toolNamed(tools, 'digital_human_send').execute({
+      to: 'qa', message: 'news', requirement: 'REQ-1', delivery: 'steer',
+    })
+    expect(platform.prompts.at(-1)!.mode).toBe('queue')
+  })
+})
+
 describe('escalation to a human', () => {
   /** Let the fire-and-forget ledger writes settle. */
   const tick = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -1505,6 +2190,28 @@ describe('the memory history archive on turn end', () => {
     expect(after.archiveFiles).toHaveLength(1)
     // The working block is never moved automatically; only the timeline is.
     expect(after.nowSection).toContain('## State | big')
+  })
+
+
+  it('archives a session-scoped timeline into that conversation directory', async () => {
+    const platform = makeCtx()
+    await applyPlatform(platform.ctx, { home, humans: SEED_HUMANS })
+    const service = platform.provided.get('digitalHumans')
+    await service.upsert({ id: 'm3', name: 'M3', memoryScope: 'session' })
+    const sent = await service.send('m3', { message: 'work', from: 'pm-assistant', conversationId: 'REQ-7' })
+    const paths = memoryPaths(service.store, 'm3', { scope: 'session', conversation: 'REQ-7' })
+    await mkdir(dirname(paths.file), { recursive: true })
+    const lines = ['# now', `## State | big\n${'- x\n'.repeat(40000)}`, '', '# History', '']
+    for (let at = 0; at < 61; at += 1) lines.push(`## 2026-10-01-1200 | entry ${at}`, '')
+    await writeFile(paths.file, lines.join('\n'), 'utf8')
+    emit(platform, sent.sessionId, 'turn/end', { reason: { kind: 'completed' } })
+    await tick()
+    const after = buildSnapshot(paths)
+    expect(after.historyEntries).toBe(60)
+    expect(after.archiveFiles).toHaveLength(1)
+    // The record's legacy memory.md is not where a session-scoped record keeps its
+    // timeline, so turning the archive on must not create or touch it.
+    expect(existsSync(memoryPaths(service.store, 'm3').file)).toBe(false)
   })
 
   it('leaves a record that keeps no memory alone', async () => {

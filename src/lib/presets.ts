@@ -15,6 +15,8 @@
  * for workflowEngine" and the Agent fails to load. `test/smoke.mjs` checks this.
  */
 
+import { join } from 'node:path'
+
 /** Prefix applied to every generated preset id, keeping them separable from shipped presets. */
 export const PRESET_PREFIX = 'dh-'
 
@@ -319,7 +321,7 @@ export function renderConfigBlock(human, peerNames = {}) {
  * discover: its own registry identity, where durable memory lives, who its peers
  * are, and which IM target it speaks through.
  */
-export function renderOperatingContext(human, store) {
+export function renderOperatingContext(human, store, peerDescriptions = {}) {
   const lines = [
     '',
     '## Operating context',
@@ -328,13 +330,44 @@ export function renderOperatingContext(human, store) {
     `- Digital humans live under \`${store.file}\`: one directory per human, with \`persona.md\` (identity) and \`config.json\` (settings). Read them when you need the current roster.`,
   ]
   if (human.memory !== false) {
-    lines.push(`- Your durable memory is \`${store.memoryPath(human.id)}\`, and its \`# now\` block is already loaded into your prompt on every step. Update it with edit.`)
+    if (human.memoryScope === 'session') {
+      // The file is per conversation, so the prompt can name the pattern and the
+      // shared file but not one exact path: which one is loaded depends on the
+      // Session this prompt belongs to, and the memory context states that file.
+      const root = typeof store.memoryDir === 'function'
+        ? store.memoryDir(human.id)
+        : join(store.memoryPath(human.id), '..', 'memory')
+      lines.push(`- Your durable memory is per conversation: \`${root}/<conversation>.md\`, with cross-requirement notes in \`${root}/_shared.md\`. The \`# now\` blocks of both are already loaded into your prompt on every step. Update them with edit.`)
+    } else {
+      lines.push(`- Your durable memory is \`${store.memoryPath(human.id)}\`, and its \`# now\` block is already loaded into your prompt on every step. Update it with edit.`)
+    }
   }
   if (human.peers.length > 0) {
-    lines.push(`- Your peers are: ${human.peers.map((peer) => `\`${peer}\``).join(', ')}. Hand work to one with \`digital_human_send\`, then read its reply with \`digital_human_messages\` (or poll \`digital_human_status\`). A message from a peer arrives as a normal turn in this session, prefixed by a \`<dsh_peer_source>\` block naming the sender and the Session it came from — reply with that \`session\` as \`session_id\`, so the answer reaches the Session that asked for the work, and use the same \`conversation_id\` throughout so one subject stays in one thread.`)
+    // One peer per line: a description is a sentence, and a comma list would make
+    // the roster unreadable exactly when it matters. The descriptions come from the
+    // same roster `refresh` already read, so stating them costs no extra disk read.
+    const roster = human.peers.map((peer) => {
+      const description = String(peerDescriptions?.[peer] ?? '').trim()
+      return description ? `- \`${peer}\`（${description}）` : `- \`${peer}\``
+    })
+    lines.push('- Your peers are:', ...roster)
   } else {
     lines.push('- Use `digital_human_list` to see which digital humans you may reach.')
   }
+  // The peer protocol is the platform's, so it travels in the prompt instead of a
+  // skill: a rule a record cannot work without is mechanism, and a mechanism cannot
+  // be unchecked. Addresses, receipts, and failure handling are stated once, here.
+  lines.push(
+    '- 与同伴协作的规则（平台内置，不是可勾选的技能）：',
+    '  - 地址分两层。线程名 `conversation_id` 人类可读，一个需求版本一个，只用 `[A-Za-z0-9._-]`。会话地址 `session_id` 是接收方的那条会话。',
+    '  - 首次派活只带 `conversation_id`。返回的 `sessionId` 记进记忆；后续派活带 `session_id`，或带 `conversation_id`。',
+    '  - 发用 `digital_human_send`。取回复用 `digital_human_messages`。查状态用 `digital_human_status`。停用 `digital_human_stop`。',
+    '  - 同伴的消息以普通回合到达，前面有 `<dsh_peer_source>` 头，写明发送方与它的会话。回消息时 `session_id` 抄头里的 `session`，`conversation_id` 抄头里的 `conversation`，一字不改。',
+    '  - 回执只写三项：结论、证据路径、下一步。不复述过程。',
+    '  - 发完只做有界确认：等 30 到 60 秒，最多查 2 次状态，然后结束本轮。不轮询，不同步等对方做完。超时不重发，记入记忆「待确认送达」，下次顺手复核。',
+    '  - 失败处置：工具或命令临时失败最多重试 2 次。参数缺失、外部依赖卡住时不要自愈重试，直接报同伴。报同伴或报负责人的消息带四要素：命令、原始报错、已试路径、需要对方做什么。错误不静默跳过；同一件事不重复上报。',
+    '  - 返回值里的 `sessionId` 与记录不一致时，立刻回写并说明，不要默默沿用旧值。',
+  )
   if (human.im.botId) {
     lines.push(`- Your outbound IM target is bot \`${human.im.botId}\`${human.im.targetId ? `, target \`${human.im.targetId}\`` : ''}. Use the \`notify_bot\` tool to push a message there.`)
   }
@@ -364,17 +397,16 @@ export function renderOperatingContext(human, store) {
  * The digital human's own row is appended last so the preset scope owns the
  * platform tool's visibility.
  */
-export function buildPresetDefinition(human, { store, toolsPluginName, order, peerNames = {}, platformVariables = [] as string[] }) {
+export function buildPresetDefinition(human, { store, toolsPluginName, order, peerNames = {}, peerDescriptions = {}, platformVariables = [] as string[] }) {
   // Extend, never replace: a deployment that adds a variable must not thereby
   // un-register the two the loop owns.
   const allowedVariables = [...new Set([...PLATFORM_VARIABLES, ...platformVariables])]
   const rows = withoutPersona(BASELINE_ROWS).map((row) => {
     if (row?.id === 'tool-bash' && process.platform === 'win32') return { ...row, disabled: true }
     if (row?.id === 'tool-pwsh' && process.platform !== 'win32') return { ...row, disabled: true }
-    // `skill-filesystem` is left exactly as the deployment configured it, so the
-    // global and project roots keep loading by default. The plugin's own skill space
-    // is a separate, opt-in layer: a skill there is mounted for this digital human
-    // only when the record names it.
+    // `skill-filesystem` is left exactly as the deployment configured it: it mounts
+    // the global root every agent shares, and this preset does not move it. The
+    // whitelist decides which of those skills this digital human may see.
     return row
   })
   const persona = {
@@ -387,7 +419,7 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
       // literal text — as a Halo-authored one is — has no other way to tell an
       // actual value from the example it was written with.
       prefix: neutralizePlaceholders(
-        `${resolveConfig(human.systemPrompt, effectiveConfig(human, peerNames))}${renderOperatingContext(human, store)}${renderConfigBlock(human, peerNames).join('\n')}`,
+        `${resolveConfig(human.systemPrompt, effectiveConfig(human, peerNames))}${renderOperatingContext(human, store, peerDescriptions)}${renderConfigBlock(human, peerNames).join('\n')}`,
         allowedVariables,
       ),
     },
@@ -406,15 +438,23 @@ export function buildPresetDefinition(human, { store, toolsPluginName, order, pe
         // The record is in hand here, so the memory switch travels with the row.
         // The tools row cannot look it up itself: its `apply` is synchronous, and
         // the registry it would have to read is asynchronous.
-        // The mounted skills travel with the row for the same reason the memory
+        // The enabled skills travel with the row for the same reason the memory
         // switch does: `apply` is synchronous, and the registry is not.
         config: {
           human: human.id,
           memory: human.memory !== false,
+          // The memory scope travels with the row for the same reason the switch
+          // does: `apply` is synchronous, and choosing the file needs the record.
+          memoryScope: human.memoryScope === 'session' ? 'session' : 'record',
           skills: [...(human.skills ?? [])],
           // A record with no bot has no outbound channel. Carrying the flag keeps the
           // tools row from offering `notify_bot`, which could only ever fail.
           im: Boolean(human.im?.botId),
+          // Archiving is the PM's action: its link goes past the test environment to
+          // what the person says about production. A lead's link stops at the test
+          // environment, so the lead never archives. The PM is the record keyed by a
+          // chat rather than by a requirement thread, and that is the signal used here.
+          canArchive: human.sessionKey === 'chat',
         },
       },
     ],

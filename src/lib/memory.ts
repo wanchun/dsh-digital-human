@@ -22,12 +22,16 @@
 
 import { mkdirSync, readFileSync, readdirSync, statSync, renameSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { conversationSlug } from './slug.js'
 
 /** Archive a memory file once it grows past this many bytes. */
 export const COMPACTION_THRESHOLD_BYTES = 100 * 1024
 
 /** How much of `# now` one prompt assembly may inject. */
 export const NOW_BUDGET_BYTES = 16 * 1024
+
+/** How much of the shared conversation's `# now` one prompt assembly may inject. */
+export const SHARED_BUDGET_BYTES = 4 * 1024
 
 /** How many of the newest History entries stay in memory.md when the rest is archived. */
 export const HISTORY_KEEP_ENTRIES = 60
@@ -50,10 +54,50 @@ const NOW_HEADING = '# now'
 /** The timeline section, appended to by the model. */
 const HISTORY_HEADING = '# History'
 
-/** Where memory lives for one digital human. */
-export function memoryPaths(store, humanId) {
+/** How one record scopes its memory, and the conversation a session-scoped read names. */
+export interface MemoryPathOptions {
+  scope?: 'record' | 'session' | string
+  memoryScope?: 'record' | 'session' | string
+  conversation?: string
+  conversationId?: string
+}
+
+/** The conversation a session-scoped path uses when the caller names none. */
+const DEFAULT_CONVERSATION_SLUG = 'main'
+
+/**
+ * Where memory lives for one digital human.
+ *
+ * The default stays the single `memory.md` every record already has. A
+ * `session` scope keeps the same directory but names one file per conversation
+ * and one shared file, so a write to one requirement cannot be read by another.
+ *
+ * @param store - registry, read for the record's directory.
+ * @param humanId - the record whose memory to locate.
+ * @param options - `scope` (or its record-level spelling `memoryScope`) and the
+ *   conversation. A plain string is accepted as a conversation for callers that
+ *   only have that.
+ */
+export function memoryPaths(store, humanId, options: MemoryPathOptions | string = {}) {
+  const opts: MemoryPathOptions = typeof options === 'string' ? { conversation: options, scope: 'session' } : options ?? {}
+  const scope = opts.scope ?? opts.memoryScope
   const base = store.dir(humanId)
+  if (scope === 'session') {
+    const slug = conversationSlug(opts.conversation ?? opts.conversationId) || DEFAULT_CONVERSATION_SLUG
+    // `_shared.md` is a reserved file beside the per-conversation ones; a
+    // conversation with that name would overwrite the cross-requirement notes.
+    if (slug === '_shared') throw new Error('conversation "_shared" is reserved for shared memory')
+    const root = join(base, 'memory')
+    return {
+      scope: 'session' as const,
+      file: join(root, `${slug}.md`),
+      sharedFile: join(root, '_shared.md'),
+      archiveDir: join(root, slug),
+      runDir: join(root, slug, 'run'),
+    }
+  }
   return {
+    scope: 'record' as const,
     file: join(base, 'memory.md'),
     archiveDir: join(base, 'memory'),
     runDir: join(base, 'memory', 'run'),
@@ -162,17 +206,17 @@ function historyEntriesOf(lines: string[]): string[] {
 }
 
 /** Name what a cut dropped. A silent cut would read as if the model saw everything. */
-function omittedNote(lines: string[], where: string): string {
+function omittedNote(lines: string[], where: string, source = 'memory.md'): string {
   const bytes = lines.reduce((total, line) => total + bytesOf(line) + 1, 0)
-  return `[… ${lines.length} lines (${bytes} bytes) omitted ${where}; read memory.md for the rest …]`
+  return `[… ${lines.length} lines (${bytes} bytes) omitted ${where}; read ${source} for the rest …]`
 }
 
 /** Name the whole sections a cut left out, so the count is visible next to their size. */
-function droppedSectionsNote(groups: string[][]): string {
+function droppedSectionsNote(groups: string[][], source = 'memory.md'): string {
   const lines = groups.flat()
   const bytes = lines.reduce((total, line) => total + bytesOf(line) + 1, 0)
   const sections = `${groups.length} section${groups.length === 1 ? '' : 's'}`
-  return `[… ${sections}, ${lines.length} lines (${bytes} bytes) of \`# now\` omitted; read memory.md for the rest …]`
+  return `[… ${sections}, ${lines.length} lines (${bytes} bytes) of \`# now\` omitted; read ${source} for the rest …]`
 }
 
 /**
@@ -182,7 +226,7 @@ function droppedSectionsNote(groups: string[][]): string {
  * newest lines, because 06 anchors the current task at the end of `# now`. Only
  * the middle is dropped, and the note says how much.
  */
-function truncateSection(lines: string[], budget: number): string {
+function truncateSection(lines: string[], budget: number, source = 'memory.md'): string {
   const heading = lines[0]
   const body = lines.slice(1)
   const room = Math.max(budget - TRUNCATION_NOTE_RESERVE, 0)
@@ -204,7 +248,7 @@ function truncateSection(lines: string[], budget: number): string {
   }
   const omitted = body.slice(headCount, body.length - tailCount)
   const kept = [heading, ...body.slice(0, headCount)]
-  if (omitted.length > 0) kept.push(omittedNote(omitted, 'in the middle'))
+  if (omitted.length > 0) kept.push(omittedNote(omitted, 'in the middle', source))
   kept.push(...body.slice(body.length - tailCount))
   return kept.join('\n')
 }
@@ -219,7 +263,7 @@ function truncateSection(lines: string[], budget: number): string {
  * keeping its head and its newest lines: a version of `# now` that keeps no State is
  * not worth injecting.
  */
-function truncateNow(now: string, budget: number): string {
+function truncateNow(now: string, budget: number, source = 'memory.md'): string {
   if (bytesOf(now) <= budget) return now
   const lines = now.split('\n')
   // The heading and anything before the first `##` are the first group and are
@@ -231,7 +275,7 @@ function truncateNow(now: string, budget: number): string {
   }
   // Without a `##` the block is one section, and cutting it by line is the only
   // way to keep both its first lines and its newest ones.
-  if (groups.length === 1) return truncateSection(groups[0], budget)
+  if (groups.length === 1) return truncateSection(groups[0], budget, source)
   // The newest section is the one 06 anchors the current task on, so it is kept
   // whole when it fits and cut to its own head and tail when it does not. Only the
   // sections between it and the heading are candidates for being dropped.
@@ -242,7 +286,7 @@ function truncateNow(now: string, budget: number): string {
   const reserved = middle.length > 0 ? TRUNCATION_NOTE_RESERVE : 0
   const tailRoom = Math.max(budget - used - reserved, 0)
   const tailSize = bytesOf(tail.join('\n')) + 1
-  const tailText = tailSize <= tailRoom ? tail.join('\n') : truncateSection(tail, tailRoom)
+  const tailText = tailSize <= tailRoom ? tail.join('\n') : truncateSection(tail, tailRoom, source)
   let left = Math.max(budget - used - (bytesOf(tailText) + 1), 0)
   const keptMiddle: string[][] = []
   for (const [index, group] of middle.entries()) {
@@ -256,7 +300,7 @@ function truncateNow(now: string, budget: number): string {
   }
   const dropped = middle.slice(keptMiddle.length)
   const parts = [...head, ...keptMiddle].map((group) => group.join('\n'))
-  if (dropped.length > 0) parts.push(droppedSectionsNote(dropped))
+  if (dropped.length > 0) parts.push(droppedSectionsNote(dropped, source))
   parts.push(tailText)
   return parts.join('\n')
 }
@@ -567,6 +611,11 @@ only you may drop working memory.
  * pre-loaded `# now` block, and the memory map.
  */
 export function renderMemoryContext(paths) {
+  // A session-scoped file is the one memory artifact this module creates on read.
+  // Unlike `memory.md`, nobody asked for it by path, so without this the first
+  // prompt of a fresh conversation would show an empty memory and the model would
+  // have to invent a file before it could record anything.
+  if (paths.scope === 'session' && paths.file) ensureMemory(paths.file)
   const snapshot = buildSnapshot(paths)
   const parts = [MEMORY_INSTRUCTIONS, '', '### Memory map', '', renderSnapshot(snapshot), '', '### Pre-loaded `# now`', '']
   if (!snapshot.exists) {
@@ -588,7 +637,35 @@ export function renderMemoryContext(paths) {
   } else {
     parts.push('(no `# now` section found — add one)')
   }
+  parts.push(...sharedMemoryBlock(paths))
   return parts.join('\n')
+}
+
+/**
+ * The evergreen part of the shared memory file, as one prompt block.
+ *
+ * Only `# now` travels: its Patterns, Errors and team rules are what applies to
+ * every conversation, while the shared file's timeline is history nobody needs
+ * in a prompt. The smaller budget is stated by the cut note, so the model can
+ * tell a complete shared block from a truncated one.
+ */
+function sharedMemoryBlock(paths) {
+  if (!paths.sharedFile) return []
+  const content = readMemory(paths.sharedFile)
+  if (content === null) return []
+  const now = topLevelSections(content).find((section) => section.heading.toLowerCase() === NOW_HEADING)
+  if (!now) return []
+  const text = `${now.heading}\n${now.lines.join('\n')}`.trimEnd()
+  return [
+    '',
+    '### Shared cross-conversation memory',
+    '',
+    `Context from \`${paths.sharedFile}\`; it applies to every conversation of this digital human.`,
+    '',
+    '```markdown',
+    truncateNow(text, SHARED_BUDGET_BYTES, paths.sharedFile),
+    '```',
+  ]
 }
 
 /** One `## heading` block of a memory file. */
@@ -599,9 +676,13 @@ export interface MemorySection {
 
 /** Where one digital human's memory file and its archive live. */
 export interface MemoryPaths {
+  /** `record` for the single legacy file, `session` for one file per conversation. */
+  scope?: 'record' | 'session'
   file: string
   runDir: string
   archiveDir: string
+  /** The shared cross-conversation file; only a session-scoped path has one. */
+  sharedFile?: string
   [key: string]: unknown
 }
 

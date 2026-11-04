@@ -234,10 +234,7 @@ describe('the page in its remaining states', () => {
       'registry.list': { home: '/h', file: '/h/humans.json', humans: [human] },
       'im.bots': { bots: [] },
       'workspaces.list': { defaultTitle: '数字人', defaultPath: null, workspaces: [] },
-      'skills.list': { skills: [] },
-      'skills.library': () => ({
-            skills: [{ name: 'qs', description: 'q', whenToUse: '', files: ['SKILL.md'], bytes: 10, named: true }],
-      }),
+      'skills.catalog': { skills: [{ name: 'qs', description: 'q' }] },
       'registry.save': { human, presetId: 'dh-pm' },
       'registry.remove': { removed: true },
     }
@@ -272,11 +269,13 @@ describe('the page in its remaining states', () => {
     mount({
       'registry.list': () => ({
         home: '/h', file: '/h/humans.json',
-        humans: [{ ...human, workspace: '/gone', }],
+        humans: [{ ...human, permissionPreset: 'gone' }],
       }),
     })
     await open()
-    expect(screen.getByText('/gone（不在选项中）')).toBeTruthy()
+    // A stored value the picker cannot offer must still be visible: showing the
+    // placeholder would claim the field is unset while it is set.
+    expect(screen.getByText('gone（不在选项中）')).toBeTruthy()
   })
 
   it('reports a bot load that failed', async () => {
@@ -286,15 +285,17 @@ describe('the page in its remaining states', () => {
   })
 
   it('reports a skill load that failed', async () => {
-    mount({ 'skills.list': () => new Error('skills down') })
+    mount({ 'skills.catalog': () => new Error('skills down') })
     await open()
     expect(screen.getByText(/技能目录读取失败：skills down/)).toBeTruthy()
   })
 
-  it('reports a workspace load that failed even when a directory is set', async () => {
+  it('keeps the one shared workspace note when the roster cannot be read', async () => {
+    // There is no picker to fail: every role runs in the single Workspace, and the
+    // page says so even when the roster read failed.
     mount({ 'workspaces.list': () => new Error('ws down') })
     await open()
-    expect(screen.getByText(/工作区列表读取失败：ws down（这条记录仍在 \/w 里跑）/)).toBeTruthy()
+    expect(screen.getByText(/所有数字人都在「数字人」工作区里运行，不可更改。/)).toBeTruthy()
   })
 
   it('shows a declared number field with its description', async () => {
@@ -379,7 +380,7 @@ describe('the permission roster the page offers', () => {
       'registry.list': { home: '/h', file: '/h/humans.json', humans: [human] },
       'im.bots': { bots: [] },
       'workspaces.list': { defaultTitle: '数字人', defaultPath: null, workspaces: [] },
-      'skills.list': { skills: [] },
+      'skills.catalog': { skills: [] },
       'permissions.list': { default: 'x', presets: [{ value: 'custom-one', label: '自定义一', description: '说明' }] },
     }
     const rpc = vi.fn(async (method: string) => {
@@ -422,5 +423,4 @@ describe('the permission roster the page offers', () => {
     expect(within(field).getByText(/danger-full-access（不在选项中）/)).toBeTruthy()
   })
 })
-
 

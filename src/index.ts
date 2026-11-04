@@ -15,12 +15,14 @@
  *   already deliver a due task back into its original Session.
  */
 
-import { dirname } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 import { HumanStore, deadlineMinutesOf, defaultHome } from './lib/store.js'
 import { DEFAULT_CONVERSATION, HumanChat, requireConversation } from './lib/chat.js'
 import { splitPeerSourceMessages } from './lib/peer-source.js'
-import { archiveHistoryOnTurnEnd, memoryPaths } from './lib/memory.js'
+import { randomUUID } from 'node:crypto'
+import { archiveHistoryOnTurnEnd, memoryPaths, renderMemoryContext } from './lib/memory.js'
 import { HumanLedger } from './lib/ledger.js'
 import type { TaskRow } from './lib/ledger.js'
 import {
@@ -28,14 +30,16 @@ import {
 } from './lib/escalation.js'
 import { buildPresetDefinition, presetIdOf, resolveConfigValues } from './lib/presets.js'
 import { buildRegistryTool } from './lib/tools.js'
-import { listLibrary, removeSkill, writeSkill } from './lib/skills.js'
+import { globalSkillsDir, readSkillCatalog } from './lib/skills.js'
 import { packHumans, readBundle, unpackHumans } from './lib/bundle.js'
 import { applyTitlePlan } from './lib/titles.js'
 import { RPC_PATH } from './lib/rpc.js'
 import { registerRpc } from './lib/rpc.js'
 import { directSenderOf, directSenders, syncBotToHuman } from './lib/im.js'
 import type { ImSyncResult } from './lib/im.js'
-import { DEFAULT_WORKSPACE_TITLE, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
+import { DEFAULT_WORKSPACE_TITLE, defaultWorkspacePath, ensureDefaultWorkspace, listWorkspaces, readBotMeta } from './lib/workspaces.js'
+import { REQUIREMENTS_DIR, phaseOf, readArchivedRequirementDirs, readRequirementDirs, readState } from './lib/requirements.js'
+import type { RequirementPhase } from './lib/requirements.js'
 import type { Config, Ctx, Human, HumanPatch, WorkspaceView } from './lib/types.js'
 import { DEFAULT_PERMISSION_PRESET } from './lib/types.js'
 
@@ -156,6 +160,9 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // Empty unless the caller supplies examples. A fresh install grows no digital
   // humans: they are configured in the page or imported as a bundle.
   const seed: Human[] = Array.isArray(config.humans) ? config.humans : []
+  // The one root skills live in. Read on every use, never cached: an operator
+  // installs a skill by hand, so the page must see it without a restart.
+  const skillsRoot = globalSkillsDir(typeof config.skillsDir === 'string' ? config.skillsDir : undefined)
   const store = new HumanStore(home)
   const log = (message: string): void => { ctx.logger?.warn?.(`digital-human: ${message}`) }
   /**
@@ -171,6 +178,44 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   const chat = new HumanChat(ctx, store, log, {
     defaultWorkspacePath: () => defaultWorkspace?.path,
     workspaceIdOf: (path: string) => workspaceIdByPath.get(path),
+    // A requirement directory is born on first delivery, so it cannot be in the
+    // roster refresh() read. Registering it here is what files its Sessions under
+    // their own entry instead of leaving them ungrouped.
+    ensureWorkspace: async (path: string, title?: string) => {
+      const known = workspaceIdByPath.get(path)
+      if (known !== undefined) {
+        // A requirement's Workspace is named after the thread, so the sidebar reads
+        // "requirement -> its Sessions" instead of four paths that differ by a slug.
+        if (typeof title === 'string' && title.trim() !== '') {
+          try {
+            await ctx.get?.('workspaceController')?.rename?.({ workspaceId: known, title })
+          } catch (error) {
+            log(`could not name workspace "${path}": ${error.message}`)
+          }
+        }
+        return known
+      }
+      const controller = ctx.get?.('workspaceController')
+      if (typeof controller?.create !== 'function') return undefined
+      try {
+        const created = await controller.create({ path })
+        const workspaceId = created?.workspace?.workspaceId
+        if (typeof workspaceId !== 'string') return undefined
+        workspaceIdByPath.set(path, workspaceId)
+        if (typeof title === 'string' && title.trim() !== '') {
+          try {
+            await controller.rename?.({ workspaceId, title })
+          } catch (error) {
+            log(`could not name workspace "${path}": ${error.message}`)
+          }
+        }
+        log(`registered workspace "${path}" (${title ?? ''}) for a requirement`)
+        return workspaceId
+      } catch (error) {
+        log(`requirement workspace "${path}" is unavailable: ${error.message}`)
+        return undefined
+      }
+    },
   })
   const ledger = new HumanLedger(store, log)
 
@@ -199,6 +244,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
 
   /** Records that keep durable memory, so a turn end knows whose timeline to reclaim. */
   const memoryEnabled = new Set<string>()
+  /** Records whose memory is split by conversation, kept beside the switch it refines. */
+  const memoryScoped = new Set<string>()
 
   /**
    * human id -> display name.
@@ -300,9 +347,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     // its binding changed or the record was removed.
     alignmentByHuman.clear()
     memoryEnabled.clear()
+    memoryScoped.clear()
     nameById.clear()
     const humans = await store.list(seed)
     for (const human of humans) if (human.memory !== false) memoryEnabled.add(human.id)
+    for (const human of humans) if (human.memoryScope === 'session') memoryScoped.add(human.id)
     for (const human of humans) nameById.set(human.id, human.name)
     defaultWorkspace = await ensureDefaultWorkspace(ctx, { home, log })
     workspaceIdByPath.clear()
@@ -311,33 +360,15 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         workspaceIdByPath.set(item.path, item.workspaceId)
       }
     }
-    // A record may name a directory the roster does not know yet. Register it, or
-    // the session it creates carries a `cwd` but no `workspaceId` — and the UI
-    // groups by the id, so the session shows up as ungrouped even though it runs in
-    // the right place.
-    const workspaceController = ctx.get?.('workspaceController')
-    if (typeof workspaceController?.create === 'function') {
-      for (const human of humans) {
-        const path = human.workspace
-        if (!human.enabled || !path || workspaceIdByPath.has(path)) continue
-        try {
-          const created = await workspaceController.create({ path })
-          const workspaceId = created?.workspace?.workspaceId
-          if (typeof workspaceId === 'string') {
-            workspaceIdByPath.set(path, workspaceId)
-            log(`registered workspace "${path}" for ${human.id}`)
-          }
-        } catch (error) {
-          log(`workspace "${path}" for ${human.id} is unavailable: ${error.message}`)
-        }
-      }
-    }
     let order = PRESET_ORDER_BASE
     const bound: Human[] = []
     // A persona names its counterpart, and the counterpart's display name is
     // already in this list — so `{{peer_name}}` resolves from the same picker the
     // settings page edits, instead of a second copy the operator must keep in step.
     const peerNames = Object.fromEntries(humans.map((entry) => [entry.id, entry.name]))
+    // Read beside the names from the same in-memory roster: a second `store.get`
+    // per peer would be a disk read per peer for a field already in hand.
+    const peerDescriptions = Object.fromEntries(humans.map((entry) => [entry.id, entry.description ?? '']))
     for (const human of humans) {
       if (!human.enabled) continue
       // A fresh binding has no owner: the IM platform never reveals who created a
@@ -368,6 +399,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         toolsPluginName: toolsPlugin,
         order: order++,
         peerNames,
+        peerDescriptions,
         ...(platformVariables ? { platformVariables } : {}),
       })
       permissionByPreset.set(definition.id, permissionPresetOf(record))
@@ -628,10 +660,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
    * memory. Only `# History` moves: dropping working memory is the model's decision,
    * so `# now` is left for `memory_compact` to handle.
    */
-  function reclaimHistory(humanId: string): void {
+  function reclaimHistory(humanId: string, conversation: string): void {
     if (!memoryEnabled.has(humanId)) return
     try {
-      const archived = archiveHistoryOnTurnEnd(memoryPaths(store, humanId))
+      const scope = memoryScoped.has(humanId) ? 'session' : 'record'
+      const archived = archiveHistoryOnTurnEnd(memoryPaths(store, humanId, { scope, conversation }))
       if (archived) log(`archived ${archived.moved} memory history entries of ${humanId} to ${archived.archive}`)
     } catch (error) {
       log(`memory history archive failed for ${humanId}: ${error.message}`)
@@ -645,7 +678,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     /** Registry root, exposed so the prompt can name the file. */
     home,
     /** Which digital human and conversation a session belongs to, if any. */
-    ownerOf: (sessionId: string) => chat.ownerOf(sessionId),
+    ownerOf: (sessionId: string, humanId?: string) => chat.ownerOf(sessionId, humanId),
     store,
     chat,
     presetIdOf,
@@ -663,8 +696,16 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     /** Create or update one digital human, then re-register presets. */
     async upsert(patch, { partial = false } = {}) {
       if (!patch?.id) throw new Error('id is required')
+      const existing = await store.get(patch.id, seed)
       const merged = partial ? await merge(patch.id, patch) : patch
-      const saved = await store.upsert(merged, seed)
+      // A new record starts with every global skill enabled. Skills are installed by
+      // hand, so starting empty would hide all of them and nobody would learn they
+      // exist; an explicit list — including an empty one — is the operator's answer
+      // and is kept as given.
+      const filled = existing || Array.isArray(merged.skills)
+        ? merged
+        : { ...merged, skills: readSkillCatalog(skillsRoot).map((skill) => skill.name) }
+      const saved = await store.upsert(filled, seed)
       // refresh() owns both the owner claim and the IM alignment, so the record to
       // report is the one it left behind, not the pre-claim write.
       await refresh()
@@ -691,7 +732,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
      */
     async send(
       idOrName: string,
-      { conversationId, sessionId, message, from, fromSession, mode, taskId, note, deadline }: {
+      { conversationId, sessionId, message, from, fromSession, mode, taskId, note, deadline, deliveryMode }: {
         conversationId?: string
         sessionId?: string
         message?: string
@@ -700,6 +741,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         mode?: 'new' | 'amend' | 'cancel'
         taskId?: string
         note?: string
+        /** How the peer reads the message: injected into the running turn, or after it. */
+        deliveryMode?: 'steer' | 'queue'
         /** Explicit due time. Omitted means the record's escalation window. */
         deadline?: string
       },
@@ -717,6 +760,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         // The caller's own Session rides along, so the answer can come back to it.
         fromSession,
         presetId: presetIdOf(human.id),
+        ...(deliveryMode ? { deliveryMode } : {}),
       }
       // A person or a record talking to itself is a message, not a work item: the
       // ledger tracks work handed over between digital humans.
@@ -768,9 +812,12 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           : deadlineIn(new Date(), deadlineMinutesOf(human, deadlineMinutes)),
       })
       try {
-        // A queued task must not steer the running turn: it is the next turn, not
-        // news for this one.
-        const delivered = await chat.deliver(human, { ...delivery, deliveryMode: busy ? 'queue' : 'steer' })
+        // A caller that named a mode gets it. Otherwise a queued task must not steer
+        // the running turn: it is the next turn, not news for this one.
+        const delivered = await chat.deliver(human, {
+          ...delivery,
+          deliveryMode: deliveryMode ?? (busy ? 'queue' : 'steer'),
+        })
         return { ...delivered, task: { id: assigned.id, state: assigned.state, intent, queued: busy } }
       } catch (error) {
         // The row is already on the ledger. Say it never arrived instead of leaving
@@ -873,6 +920,119 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   registerRpc(ctx, async (method, payload) => {
     const ok = (value) => ({ ok: true, value })
     const bad = (message) => ({ ok: false, error: { code: 'bad-request', message, details: {} } })
+    // The tree a person reads: each digital human, the requirements it serves, and
+    // the Sessions behind each one. The sidebar is flat, so the grouping is served
+    // here instead of being guessed from Workspace paths.
+    if (method === 'tree.read') {
+      const humans = (await store.list(seed)).filter((human) => human.enabled !== false)
+      // The requirement root is the directory the digital humans share: `reqs/`
+      // sits in it, and each directory's `meta.json` names its thread.
+      const requirementRoot = defaultWorkspace?.path ?? defaultWorkspacePath(home)
+      const liveDirs = readRequirementDirs(requirementRoot)
+      // An archived requirement moved out of `reqs/`, so it is no longer a node of
+      // the live tree. Its `meta.json` moved with it, and the name it holds is the
+      // only thing that still labels its old Sessions: read both roots, or the row
+      // falls back to the thread name with no way to tell it is archived.
+      const archivedDirs = readArchivedRequirementDirs(requirementRoot)
+      // The live root wins a thread named in both: a requirement created again after
+      // its old copy was archived is a new requirement, and the archive must not
+      // hide it.
+      const metaByThread = new Map([...archivedDirs, ...liveDirs])
+      // A Session is filed by a conversation name, and the requirement it belongs to
+      // may be named by the thread or by the directory. Both resolve to the thread,
+      // so one requirement is one node even when its Sessions were filed two ways.
+      const threadByLabel = new Map<string, string>()
+      for (const [thread, meta] of [...archivedDirs, ...liveDirs]) threadByLabel.set(meta.dir, thread)
+      const requirementOf = (label: string) =>
+        label ? (metaByThread.has(label) ? label : threadByLabel.get(label) ?? '') : ''
+      // Filtering reads the thread alone, never the label a Session was filed under:
+      // a directory name would otherwise answer for a requirement it no longer names.
+      const isArchived = (thread: string) =>
+        Boolean(thread) && !liveDirs.has(thread) && archivedDirs.has(thread)
+      // The phase is derived from each requirement's nodes, never stored: one state
+      // read serves every role's row, so all of them report the same phase. A row
+      // that names no requirement directory — a chat-keyed role — has no nodes and
+      // therefore no phase.
+      const phaseByRequirement = new Map<string, RequirementPhase>()
+      const phaseOfRequirement = (conversation: string): RequirementPhase | undefined => {
+        const known = phaseByRequirement.get(conversation)
+        if (known) return known
+        const meta = metaByThread.get(conversation)
+        const dir = join(requirementRoot, REQUIREMENTS_DIR, meta?.dir ?? conversation)
+        if (!existsSync(dir)) return undefined
+        const phase = phaseOf(readState(dir, { thread: conversation, name: meta?.name ?? conversation }))
+        phaseByRequirement.set(conversation, phase)
+        return phase
+      }
+      const tree: Array<{
+        humanId: string
+        name: string
+        description: string
+        icon: string
+        order: number
+        sessionKey: string
+        requirements: Array<{
+          conversation: string
+          dir: string
+          name: string
+          sessions: Array<{ sessionId: string }>
+        }>
+      }> = []
+      for (const human of humans) {
+        // The mailbox is where every delivery leaves the thread name, and the index
+        // beside it is a cache that not every path writes. Read the logs first: a
+        // Session they name once is listed once. The index then fills in only what a
+        // log cannot name — one written before the thread field existed — so no
+        // earlier Session disappears from the view.
+        const fromMailbox = await chat.addressesFromMailbox(human.id)
+        const listed = new Set(fromMailbox.map((address) => address.sessionId))
+        const addresses = [
+          ...fromMailbox,
+          ...(await chat.addresses(human.id)).filter((address) => !listed.has(address.sessionId)),
+        ]
+        const byRequirement = new Map<string, Array<{ sessionId: string }>>()
+        for (const address of addresses) {
+          // An address the index does not name is a Session reached by id; it has no
+          // thread, and the view decides whether that is a chat or not a requirement.
+          // A named one is grouped by the requirement it belongs to, not by the label
+          // it was filed under: the thread and the directory are the same requirement.
+          const label = address.conversationId ?? ''
+          // The thread is the requirement's key; a directory name resolves to it here.
+          const conversation = requirementOf(label) || label
+          // The requirement is archived, so this row is not part of the live tree.
+          if (isArchived(conversation)) continue
+          const bucket = byRequirement.get(conversation) ?? []
+          bucket.push({ sessionId: address.sessionId })
+          byRequirement.set(conversation, bucket)
+        }
+        tree.push({
+          humanId: human.id,
+          name: human.name,
+          description: human.description ?? '',
+          // The row's own mark, when the record carries one: the tree then reads
+          // like the native list instead of four identical rows.
+          icon: human.icon ?? '',
+          order: human.order ?? 100,
+          sessionKey: human.sessionKey ?? 'requirement',
+          // A requirement without meta.json keeps its thread name for both fields,
+          // which is exactly the legacy `reqs/<thread>/` layout.
+          requirements: [...byRequirement].map(([conversation, sessions]) => {
+            const meta = metaByThread.get(conversation)
+            const phase = phaseOfRequirement(conversation)
+            return {
+              conversation,
+              dir: meta?.dir ?? conversation,
+              name: meta?.name ?? conversation,
+              ...(phase ? { phase } : {}),
+              sessions,
+            }
+          }),
+        })
+      }
+      // The envelope is the contract the client's channel validates: a bare value
+      // here fails the response parse and surfaces as a transport error.
+      return ok({ humans: tree })
+    }
     if (method === 'registry.list') {
       const humans = await service.list()
       return ok({ home, file: store.file, humans: humans.map((entry) => withResolved(entry, humans)) })
@@ -937,30 +1097,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         })),
       })
     }
-    if (method === 'skills.library') {
-      // The plugin's own skill space: what a digital human can be given, as opposed
-      // to what the deployment mounts for everyone.
-      return ok({ skills: listLibrary(home) })
-    }
-    if (method === 'skills.upload') {
-      const name = String(payload?.name ?? '').trim()
-      const files = payload?.files
-      if (!files || typeof files !== 'object' || Array.isArray(files)) {
-        return bad('files must be an object of relative path to text')
-      }
-      try {
-        const skill = await writeSkill(home, name, files as Record<string, string>)
-        // Presets carry the mounted list, so they are re-registered to pick it up.
-        await refresh()
-        return ok({ skill })
-      } catch (error) {
-        return bad(error.message)
-      }
-    }
-    if (method === 'skills.remove') {
-      const removed = await removeSkill(home, String(payload?.name ?? '').trim())
-      if (removed) await refresh()
-      return ok({ removed })
+    if (method === 'skills.catalog') {
+      // Every skill the deployment has installed, as one flat list. Skills have a
+      // single home, so this read is the whole catalog and the page writes nothing
+      // back: an operator installs one by hand, under the global skill root.
+      return ok({ skills: readSkillCatalog(skillsRoot) })
     }
     if (method === 'permissions.list') {
       // Read from the platform, never from a list copied into the page: a renamed or
@@ -977,18 +1118,38 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         })),
       })
     }
-    if (method === 'skills.list') {
-      const skills = ctx.get('skills')
-      if (!skills || typeof skills.list !== 'function') return ok({ skills: [] })
-      const entries = await skills.list()
-      return ok({
-        skills: (Array.isArray(entries) ? entries : []).map((entry) => ({
-          name: entry.name,
-          description: entry.description ?? '',
-          whenToUse: entry.whenToUse ?? '',
-          source: entry.source ?? '',
-        })),
-      })
+    if (method === 'chat.send') {
+      const to = typeof payload?.to === 'string' ? payload.to.trim() : ''
+      if (!to) return bad('to is required')
+      if (typeof payload?.message !== 'string' || !payload.message.trim()) return bad('message is required')
+      const target = await service.resolve(to)
+      if (!target) return bad(`unknown digital human: ${JSON.stringify(payload.to)}`)
+      // The tool and this route share one delivery path; only the caller differs.
+      // Hence the same `service.send` call, so a work item, a queue and an amend
+      // decision cannot diverge between an agent and an automation.
+      try {
+        const delivered = await service.send(target.id, {
+          ...(typeof payload.conversation_id === 'string' && payload.conversation_id.trim()
+            ? { conversationId: payload.conversation_id.trim() }
+            : {}),
+          ...(typeof payload.session_id === 'string' && payload.session_id.trim()
+            ? { sessionId: payload.session_id.trim() }
+            : {}),
+          message: payload.message,
+          ...(typeof payload.from === 'string' && payload.from.trim() ? { from: payload.from.trim() } : {}),
+        })
+        const task = 'task' in delivered ? delivered.task : undefined
+        return ok({
+          ...(task?.id ? { taskId: task.id } : {}),
+          sessionId: delivered.sessionId ?? '',
+          conversation: delivered.conversationId,
+          // The resolved intent, not the requested one: a reply can become an amend
+          // and a busy peer can queue a new item, so the caller needs what happened.
+          mode: task?.intent ?? 'message',
+        })
+      } catch (error) {
+        return bad(error.message)
+      }
     }
     if (method === 'im.targets') {
       const dshIm = ctx.get('dshIm')
@@ -1051,7 +1212,6 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           }
           const result = await unpackHumans(home, archive, {
             id: url.searchParams.get('id') ?? undefined,
-            overwrite: url.searchParams.get('overwrite') !== 'false',
           })
           for (const record of result.records) await store.upsert(record as HumanPatch, seed)
           await refresh()
@@ -1185,19 +1345,48 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   //
   // A failed rewrite returns the decision untouched. The inline block is readable;
   // a message lost on the way into a step is not recoverable.
-  ctx.on('agent/pre-step', async (_payload, next) => {
+  ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision?.kind !== 'enter') return decision
     try {
       const messages = splitPeerSourceMessages(decision.messages, {
         nameOf: (id) => nameById.get(id),
       })
-      return messages === null ? decision : { ...decision, messages }
+      const withSource = messages === null ? decision : { ...decision, messages }
+      return await withSessionMemory(withSource, payload?.agent?.session?.id)
     } catch (error) {
       log(`could not lift a peer source block: ${error.message}`)
       return decision
     }
   }, { global: true })
+
+  /**
+   * Put the Session's own memory in front of the batch.
+   *
+   * The assembly context cannot name the Session (its scope is opaque), so a
+   * session-scoped record is served here, where the Agent is known. Only a batch
+   * that carries a fresh user message is served: the later steps of one turn would
+   * otherwise pay for the same snapshot again.
+   */
+  async function withSessionMemory(decision, sessionId?: string) {
+    if (typeof sessionId !== 'string') return decision
+    const owner = chat.ownerOf(sessionId)
+    if (!owner) return decision
+    const human = await store.get(owner.humanId, seed)
+    if (!human || human.memory === false || human.memoryScope !== 'session') return decision
+    const isTurnStart = decision.messages.some((message) => message?.source?.kind === 'user')
+    if (!isTurnStart) return decision
+    const paths = memoryPaths(store, human.id, { scope: 'session', conversation: owner.conversationId })
+    const text = renderMemoryContext(paths)
+    if (!text) return decision
+    const message = {
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin:digital-human', form: 'notice', summary: '记忆快照' },
+    }
+    return { ...decision, messages: [message, ...decision.messages] }
+  }
 
   // The creation header names the preset the session started with, so this is
   // the normal path. A session may still change preset while it is blank, which
@@ -1262,7 +1451,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
         // Only this turn's own item is closed; the queue behind it is untouched.
         // The same boundary reclaims the timeline, so memory maintenance shares the
         // one subscription instead of adding a timer of its own.
-        reclaimHistory(owner.humanId)
+        reclaimHistory(owner.humanId, owner.conversationId)
         return settleTurn(owner.humanId, sessionId, event.data?.reason)
       }).catch((error) => log(`work item end failed for ${sessionId}: ${error.message}`))
       return

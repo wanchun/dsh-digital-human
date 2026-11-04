@@ -9,10 +9,14 @@
  * transcript — is what peers read back, so a conversation survives compaction.
  */
 
-import { appendFile, readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { appendFile, mkdir, open, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { peerSource } from './peer-source.js'
+import { conversationSlug } from './slug.js'
 import type { HumanStore } from './store.js'
 import type { Ctx, Human, MailboxEntry } from './types.js'
 
@@ -107,6 +111,28 @@ function record(kind, fields) {
   return JSON.stringify({ at: new Date().toISOString(), kind, ...fields })
 }
 
+/** Bytes read per step while looking for the thread name in one mailbox log. */
+const MAILBOX_CHUNK = 64 * 1024
+
+/** The thread one mailbox line belongs to, or null when the line names none. */
+function conversationOf(line: string): string | null {
+  if (!line.trim()) return null
+  try {
+    const entry = JSON.parse(line)
+    const conversation = entry?.conversation
+    return typeof conversation === 'string' && conversation.trim() ? conversation : null
+  } catch {
+    return null
+  }
+}
+
+/** What one mailbox file has already reported, so a large log is read once. */
+interface MailboxScan {
+  mtimeMs: number
+  size: number
+  conversation: string | null
+}
+
 /** Owns every Session and mailbox a digital human uses. */
 export class HumanChat {
   #ctx
@@ -120,6 +146,9 @@ export class HumanChat {
   // Every peer message seen, per human: appended to edges.jsonl and read back by
   // prime, so a restart keeps the routing.
   #edges = new Map<string, PeerEdge[]>()
+  // What each mailbox log has already reported, per human and per file: a thread
+  // name is read once, not on every tree read.
+  #mailboxes = new Map<string, Map<string, MailboxScan>>()
   // One write at a time per human. The index is rewritten whole, so two concurrent
   // writers would drop each other's line.
   #writes = new Map<string, Promise<unknown>>()
@@ -141,6 +170,7 @@ export class HumanChat {
    * A session created with a `cwd` alone is not filed under any Workspace, so the
    * UI cannot group it. This is the lookup that fixes that.
    */
+  #ensureWorkspace
   #workspaceIdOf
 
   constructor(
@@ -150,14 +180,24 @@ export class HumanChat {
     {
       defaultWorkspacePath,
       workspaceIdOf,
+      ensureWorkspace,
     }: {
       defaultWorkspacePath?: () => string | undefined
       workspaceIdOf?: (path: string) => string | undefined
+      /**
+       * Register a directory as a Workspace and return its id.
+       *
+       * A per-requirement directory is created on the fly, so it is not in the
+       * roster yet; without an id the Session runs in the right place but the UI
+       * cannot group it, and it shows up ungrouped.
+       */
+      ensureWorkspace?: (path: string, title?: string) => Promise<string | undefined>
     } = {},
   ) {
     this.#ctx = ctx
     this.#defaultWorkspacePath = defaultWorkspacePath
     this.#workspaceIdOf = workspaceIdOf
+    this.#ensureWorkspace = ensureWorkspace
     this.#store = store
     this.#log = log
   }
@@ -206,7 +246,22 @@ export class HumanChat {
     return next
   }
 
-  async #remember(humanId, conversationId, sessionId) {
+  /**
+   * File one Session under the conversation it serves.
+   *
+   * The only place the name index is written. A Session opened by a conversation
+   * name and a Session reached by its id both come through here, so the index cannot
+   * drift from the traffic: a delivery that skipped it left the record's Session
+   * unnameable, and only the mailbox still knew the thread.
+   *
+   * @param takeOver - whether this delivery owns the thread and may move its name to
+   *   this Session. `false` only fills a gap: a thread another Session already holds
+   *   keeps it, because a message that merely landed in a Session is not its owner.
+   * @returns the Session, and the reason when nothing was written.
+   * @throws when the write itself fails. A delivery must not report success while the
+   *   index does not carry it; that silence is how a role lost its Session.
+   */
+  async #remember(humanId, conversationId, sessionId, { takeOver = true } = {}) {
     const index = await this.#index(humanId)
     // One Session carries one thread: two names for it merge two subjects into one
     // history, and the second thread's replies land in the first thread's mailbox.
@@ -214,19 +269,38 @@ export class HumanChat {
     const owner = Object.keys(index).find((name) => name !== conversationId && index[name] === sessionId)
     if (owner !== undefined) {
       const problem = `conversation "${conversationId}" resolved to ${sessionId}, which already belongs to "${owner}"`
-      this.#log(problem)
-      throw new Error(problem)
+      if (takeOver) {
+        this.#log(problem)
+        throw new Error(problem)
+      }
+      this.#log(`${problem}; the index is left as it is`)
+      return { sessionId, refused: problem }
     }
-    index[conversationId] = sessionId
+    const held = index[conversationId]
+    if (held !== undefined && held !== sessionId && !takeOver) {
+      const problem = `conversation "${conversationId}" is filed under ${held}, not ${sessionId}`
+      this.#log(`${problem}; the thread keeps its Session and this delivery is not filed under it`)
+      return { sessionId, refused: problem }
+    }
     this.#bySession.set(sessionId, { humanId, conversationId })
+    // Already filed under this name: the next write would repeat the same line.
+    if (held === sessionId) return { sessionId }
+    index[conversationId] = sessionId
     await this.#serial(humanId, async () => {
       await this.#store.ensureDir(this.#store.dir(humanId))
       const path = this.#store.sessionIndexPath(humanId)
+      // Merge into what is on disk now, not into the cached map: a reloaded
+      // plugin instance may have filed another thread since this map was read,
+      // and writing the stale copy would drop that entry.
+      let onDisk = {}
+      try { onDisk = JSON.parse(await readFile(path, 'utf8')) } catch { onDisk = {} }
+      const merged = { ...onDisk, [conversationId]: sessionId }
       const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
-      await writeFile(temp, `${JSON.stringify(index, null, 2)}\n`, 'utf8')
+      await writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
       await rename(temp, path)
+      this.#indexes.set(humanId, merged)
     })
-    return sessionId
+    return { sessionId }
   }
 
   /** The edge list for one human, in arrival order. */
@@ -270,7 +344,7 @@ export class HumanChat {
    *    continuation stays in the thread it opened;
    * 3. the newest edge with that peer on that thread, from any of this human's
    *    Sessions — a call from another window still finds the thread's home;
-   * 4. the legacy name index, for a thread that only ever existed before edges.
+   * 4. the peer's legacy name index, for a thread that only ever existed before edges.
    *
    * @returns the target and how it was found, or null when nothing is known.
    */
@@ -297,7 +371,10 @@ export class HumanChat {
       : undefined
     if (thread) return { sessionId: thread.peerSession, conversationId: thread.conversation, via: 'thread' as const }
     if (conversationId !== undefined) {
-      const legacy = await this.lookup(humanId, conversationId)
+      // The peer's own index: a thread's legacy name is filed in the record that
+      // answers in it. Reading this record's index would hand back its own Session as
+      // the peer's address, which opened a Session for the peer under a wrong id.
+      const legacy = await this.lookup(peer, conversationId)
       if (typeof legacy === 'string') return { sessionId: legacy, conversationId, via: 'legacy' as const }
     }
     return null
@@ -365,9 +442,163 @@ export class HumanChat {
     return found
   }
 
-  /** Map a Session back to the digital human and conversation that own it. */
-  ownerOf(sessionId) {
-    return this.#bySession.get(sessionId)
+  /**
+   * Every address the mailbox itself proves for one digital human.
+   *
+   * `sessions.json` is a cache of the same fact, and a delivery path that never
+   * writes it leaves a Session the index cannot name. The mailbox is written on
+   * every delivery, so it is read here instead: one file per Session, and each
+   * inbound line names the thread the message belongs to.
+   *
+   * The file name is the authority for the Session. `conversationPath` keys the
+   * log by Session, while the `session` field of a line names the *peer* that
+   * asked — the two do not confirm each other, and the name is what this side of
+   * the exchange is called. A log filed under a conversation name predates the
+   * Session key: it gives no Session of its own, so its thread is left to the
+   * index rather than guessed here.
+   *
+   * @returns one address per Session, or an empty list when nothing is logged.
+   */
+  async addressesFromMailbox(humanId: string) {
+    const dir = join(this.#store.dir(humanId), 'conversations')
+    let names: string[]
+    try {
+      names = await readdir(dir)
+    } catch {
+      this.#mailboxes.delete(humanId)
+      return []
+    }
+    const scans = this.#mailboxScans(humanId)
+    const found: Array<{ conversationId: string | null; sessionId: string }> = []
+    const present = new Set<string>()
+    for (const name of names.sort()) {
+      if (!name.endsWith('.jsonl')) continue
+      let sessionId: string
+      try {
+        sessionId = decodeURIComponent(name.slice(0, -'.jsonl'.length))
+      } catch {
+        continue
+      }
+      if (!isSessionAddress(sessionId)) continue
+      const path = join(dir, name)
+      present.add(path)
+      const conversation = await this.#mailboxConversation(path, scans)
+      if (conversation) found.push({ conversationId: conversation, sessionId })
+    }
+    // A log that is gone must not keep answering after it is deleted.
+    for (const path of [...scans.keys()]) if (!present.has(path)) scans.delete(path)
+    return found
+  }
+
+  /** The per-file scan cache of one digital human. */
+  #mailboxScans(humanId: string) {
+    let scans = this.#mailboxes.get(humanId)
+    if (scans === undefined) {
+      scans = new Map<string, MailboxScan>()
+      this.#mailboxes.set(humanId, scans)
+    }
+    return scans
+  }
+
+  /**
+   * The thread one mailbox log names, read only when the file may have changed.
+   *
+   * @param path - the log to read.
+   * @param scans - the per-file cache this call fills.
+   * @returns the thread name, or null when the log names none yet.
+   */
+  async #mailboxConversation(path: string, scans: Map<string, MailboxScan>) {
+    let handle
+    try {
+      handle = await open(path, 'r')
+      const stats = await handle.stat()
+      const known = scans.get(path)
+      if (known && known.mtimeMs === stats.mtimeMs && known.size === stats.size) {
+        return known.conversation
+      }
+      // A thread name is fixed once it is known: rewriting the log cannot move its
+      // Session to another requirement.
+      if (known?.conversation) {
+        scans.set(path, { ...known, mtimeMs: stats.mtimeMs, size: stats.size })
+        return known.conversation
+      }
+      const conversation = await this.#threadIn(handle)
+      scans.set(path, { mtimeMs: stats.mtimeMs, size: stats.size, conversation })
+      return conversation
+    } catch {
+      // A log that cannot be opened or read says nothing; the other logs still do.
+      scans.delete(path)
+      return null
+    } finally {
+      await handle?.close().catch(() => {})
+    }
+  }
+
+  /**
+   * Read one log far enough to find its thread name.
+   *
+   * The log is read in chunks and stops at the first line that names a thread, so
+   * the size a mailbox reaches does not decide the cost of a tree read. A line that
+   * a chunk edge splits is joined before it is parsed; a line that is not JSON, and
+   * a line still being written, are skipped.
+   */
+  async #threadIn(handle: FileHandle): Promise<string | null> {
+    const decoder = new StringDecoder('utf8')
+    const buffer = Buffer.alloc(MAILBOX_CHUNK)
+    let position = 0
+    let carry = ''
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position)
+      if (bytesRead === 0) break
+      position += bytesRead
+      // The decoder keeps a UTF-8 sequence that a chunk edge splits, and `carry`
+      // keeps a line that the edge splits, so neither is lost or parsed half.
+      const lines = (carry + decoder.write(buffer.subarray(0, bytesRead))).split('\n')
+      carry = lines.pop() as string
+      for (const line of lines) {
+        const conversation = conversationOf(line)
+        if (conversation !== null) return conversation
+      }
+    }
+    return null
+  }
+
+  /**
+   * Map a Session back to the digital human and conversation that own it.
+   *
+   * The in-memory map only covers Sessions this process has already delivered
+   * into; after a restart, or on the very first assembly of a reused Session, it
+   * is empty. A caller that knows which record it is asking about passes the id,
+   * and the persisted index answers instead of falling back to a default thread.
+   */
+  ownerOf(sessionId, humanId?: string) {
+    const known = this.#bySession.get(sessionId)
+    if (known !== undefined || typeof humanId !== 'string') return known
+    const index = this.#indexSync(humanId)
+    for (const [conversationId, value] of Object.entries(index)) {
+      if (value !== sessionId) continue
+      const owner = { humanId, conversationId }
+      this.#bySession.set(sessionId, owner)
+      return owner
+    }
+    return undefined
+  }
+
+  /** Read one record's session index without waiting, for a synchronous caller. */
+  #indexSync(humanId) {
+    if (this.#indexes.has(humanId)) return this.#indexes.get(humanId)
+    const path = this.#store.sessionIndexPath(humanId)
+    let index = {}
+    if (existsSync(path)) {
+      try {
+        const parsed = JSON.parse(readFileSync(path, 'utf8'))
+        if (parsed && typeof parsed === 'object') index = parsed
+      } catch (error) {
+        this.#log(`session index unreadable for ${humanId}: ${error.message}`)
+      }
+    }
+    this.#indexes.set(humanId, index)
+    return index
   }
 
   /**
@@ -488,7 +719,8 @@ export class HumanChat {
     const existing = await this.lookup(human.id, conversationId)
     if (existing) {
       try {
-        return this.#remember(human.id, conversationId, await this.#adopt(human, existing, presetId))
+        const adopted = await this.#adopt(human, existing, presetId, conversationId)
+        return (await this.#remember(human.id, conversationId, adopted)).sessionId
       } catch (error) {
         // A Session cannot change its preset or its directory, so a record that now
         // declares a different one cannot reuse it. That is the only reason to
@@ -502,7 +734,8 @@ export class HumanChat {
     }
     // The id is passed through: an address that does not exist yet still gets created
     // under it, so the caller's record of it stays true.
-    return this.#remember(human.id, conversationId, await this.#create(human, presetId, existing))
+    const created = await this.#create(human, presetId, existing, conversationId)
+    return (await this.#remember(human.id, conversationId, created)).sessionId
   }
 
   /**
@@ -528,19 +761,26 @@ export class HumanChat {
       const named = conversationId === undefined ? undefined : requireConversation(conversationId)
       let resolved
       try {
-        resolved = await this.#adopt(human, text, presetId)
+        resolved = await this.#adopt(human, text, presetId, named)
       } catch (error) {
         this.#log(
           `session ${text} could not receive for ${human.id} (${error.message}); opening a new one`,
         )
-        resolved = await this.#create(human, presetId, text)
+        resolved = await this.#create(human, presetId, text, named)
       }
       const conversation = named ?? (await this.#conversationOf(human.id, resolved)) ?? resolved
       // The reverse entry is needed even though nothing was filed: without it this
       // Session's own replies would not reach a mailbox, and it would be invisible to
       // a caller asking which Sessions this digital human answers in.
       this.#bySession.set(resolved, { humanId: human.id, conversationId: conversation })
-      return { sessionId: resolved, conversation }
+      // The name index is written on this path too, through the same call a
+      // name-addressed delivery uses. A Session reached by id is filed under the
+      // thread it serves; skipping this is what left a role's Session out of the
+      // index while its mailbox and edge were written. No name means nothing to file,
+      // and a thread another Session owns is reported, never taken over.
+      if (named === undefined) return { sessionId: resolved, conversation }
+      const filed = await this.#remember(human.id, named, resolved, { takeOver: false })
+      return { sessionId: filed.sessionId, conversation, ...(filed.refused ? { notice: filed.refused } : {}) }
     }
     const conversation = requireConversation(text)
     return { sessionId: await this.ensureSession(human, conversation, presetId), conversation }
@@ -564,13 +804,13 @@ export class HumanChat {
    * work in it into a second Session with its own context. Resume is what `prompt`
    * does anyway; this only has to fail early, before a message lands somewhere else.
    */
-  async #adopt(human, sessionId, presetId) {
+  async #adopt(human, sessionId, presetId, conversation) {
     const resolved = await this.#resume(sessionId)
     // No resolution entry point: the Host cannot say, and `prompt` still resumes the
     // Session. A genuinely unknown id fails there rather than being silently replaced.
     if (resolved === undefined) return sessionId
     const header = resolved?.agent?.session?.header
-    const wanted = human.workspace || this.#defaultWorkspacePath?.()
+    const wanted = this.#cwdOf(human, conversation)
     if (wanted !== undefined && header?.cwd !== undefined && header.cwd !== wanted) {
       throw new Error(`session "${sessionId}" runs in "${header.cwd}", not "${wanted}"`)
     }
@@ -601,16 +841,36 @@ export class HumanChat {
    * the Session does not exist yet. When it does exist and cannot be reused, the Host
    * mints a different id; the caller sees the returned one.
    */
-  async #create(human, presetId, sessionId) {
+  async #create(human, presetId, sessionId, conversation) {
+    const location = this.#location(human, conversation)
+    // The Host creates a Workspace's directory for it, but a requirement directory
+    // is ours: without this the first turn would start in a cwd that does not exist.
+    if (location.cwd && human.sessionWorkspace === 'requirement') {
+      await mkdir(location.cwd, { recursive: true })
+      // A directory created here is not in the Workspace roster, and the UI groups
+      // by id: registering it (and passing the id instead of the cwd) is what puts
+      // the requirement's Sessions under their own entry in the menu.
+      const workspaceId = await this.#ensureWorkspace?.(location.cwd, conversation)
+      if (workspaceId !== undefined) {
+        delete location.cwd
+        location.workspaceId = workspaceId
+      }
+    }
     const created = await this.#ctx.sessionController.create({
       ...(sessionId ? { sessionId } : {}),
-      ...this.#location(human),
+      ...location,
       ...(presetId ? { agentPreset: presetId } : {}),
     })
     // A different id is legal here — a Session that cannot be reused is replaced —
     // but it must not be silent: the caller's record of the address just changed.
     if (sessionId && created.sessionId !== sessionId) {
       this.#log(`session ${sessionId} could not carry ${human.id}; the Host opened ${created.sessionId}`)
+    }
+    // The Session's first turn assembles its prompt before the mailbox is written,
+    // so the reverse index must know this thread now: otherwise the memory context
+    // cannot name the requirement and falls back to the default file.
+    if (typeof conversation === 'string' && conversation !== '') {
+      this.#bySession.set(created.sessionId, { humanId: human.id, conversationId: conversation })
     }
     this.#fresh.add(created.sessionId)
     return created.sessionId
@@ -619,15 +879,39 @@ export class HumanChat {
   /**
    * Where the Session runs.
    *
-   * The Workspace id files it under the Workspace's list, which is what the UI
-   * groups by, and is passed *instead of* `cwd`: the Host resolves the directory
-   * from the Workspace and rejects a request that names both.
+   * A record-scoped Session is filed by Workspace id, which is what the UI groups
+   * by, and is passed *instead of* `cwd`: the Host resolves the directory from the
+   * Workspace and rejects a request that names both. A requirement-scoped Session
+   * must pass `cwd` alone, because its directory is under the Workspace but is not
+   * the Workspace itself.
    */
-  #location(human) {
-    const cwd = human.workspace || this.#defaultWorkspacePath?.() || undefined
-    const workspaceId = cwd ? this.#workspaceIdOf?.(cwd) : undefined
+  #location(human, conversation) {
+    const base = human.workspace || this.#defaultWorkspacePath?.() || undefined
+    if (human.sessionWorkspace === 'requirement' && base) {
+      const slug = conversationSlug(conversation)
+      // No conversation (a direct Session address) keeps the old location: there is
+      // no thread to name a directory after, and inventing one would split it later.
+      if (slug) return { cwd: join(base, 'reqs', slug) }
+    }
+    const workspaceId = base ? this.#workspaceIdOf?.(base) : undefined
     if (workspaceId) return { workspaceId }
-    return cwd ? { cwd } : {}
+    return base ? { cwd: base } : {}
+  }
+
+  /**
+   * The directory one conversation's Session must run in.
+   *
+   * Used only to decide whether a recorded Session can still carry the record.
+   * It mirrors {@link #location}: a requirement record compares the per-thread
+   * directory, and every other record compares the workspace it always did.
+   */
+  #cwdOf(human, conversation) {
+    const base = human.workspace || this.#defaultWorkspacePath?.() || undefined
+    if (human.sessionWorkspace === 'requirement' && base) {
+      const slug = conversationSlug(conversation)
+      if (slug) return join(base, 'reqs', slug)
+    }
+    return base
   }
 
   /**
@@ -693,8 +977,14 @@ export class HumanChat {
     // own session from the IM source and would lose that here. A shared-session
     // record is named after itself: its one Session is the record, not a subject.
     if (this.#fresh.delete(target.sessionId)) {
+      // One requirement holds one Session per role, and the sidebar lists them flat
+      // inside the requirement's Workspace: the role has to be readable from the
+      // title, or four Sessions look alike.
       if (single) await this.#setTitle(target.sessionId, human.name)
-      else if (!human.im?.botId) await this.#name(target.sessionId, conversation, text)
+      // A bot-less record serves requirement threads, not one chat: its Sessions
+      // are told apart by the custom tree, so the title names the role. An
+      // IM-bound record keeps naming the person it is talking to.
+      else if (!human.im?.botId) await this.#setTitle(target.sessionId, human.name)
     }
     await this.#append(human.id, target.sessionId, conversation, record('inbound', {
       from,
@@ -732,6 +1022,9 @@ export class HumanChat {
       sessionId: target.sessionId,
       conversationId: conversation,
       accepted: accepted?.accepted === true,
+      // A thread another Session owns is not taken over, and the caller is told: the
+      // receipt is the only place a model reads what the transport did not record.
+      ...(target.notice ? { notice: target.notice } : {}),
     }
   }
 

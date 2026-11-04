@@ -90,12 +90,11 @@ export interface Human {
   icon?: string
   workspace: string
   /**
-   * The plugin-space skills this digital human mounts, by name.
+   * The skills this digital human enables, by name: a whitelist.
    *
-   * Only these are added: the deployment's own roots — the global directory, the
-   * project's, the bundled set — keep loading for every agent as they always did.
-   * So a skill in the plugin's space is opt-in per digital human, while everything
-   * outside it needs no configuration at all.
+   * Skills live only in the global root (`~/.agents/skills`); a name here enables
+   * the skill of that name. Every other skill the catalog offers is shadowed in
+   * this digital human's preset layer, so the model cannot see it.
    */
   skills: string[]
   peers: string[]
@@ -139,6 +138,27 @@ export interface Human {
    * window belongs to a record whose work is expected back quickly.
    */
   escalationDeadlineMinutes?: number
+  /**
+   * Where this record's Sessions run.
+   *
+   * `record` (default) keeps every Session in the record's workspace, which is
+   * the behaviour every existing record already has. `requirement` gives each
+   * conversation its own `reqs/<conversation>/` directory, so one requirement's
+   * documents and worktrees live together instead of beside every other one.
+   */
+  sessionWorkspace?: 'record' | 'requirement'
+  /**
+   * Which memory file this record reads and writes.
+   *
+   * `record` (default) keeps the single `memory.md` every existing record uses.
+   * `session` splits it into one file per conversation plus a shared file, so a
+   * requirement's working memory does not leak into the next one.
+   */
+  memoryScope?: 'record' | 'session'
+  /** What a Session is keyed by: a chat, or a requirement thread. */
+  sessionKey?: 'chat' | 'requirement'
+  /** Sidebar order; smaller comes first. No role is named in code. */
+  order?: number
 }
 
 /**
@@ -222,6 +242,13 @@ export interface Ctx {
 /** Plugin configuration, as the loader passes it. */
 export interface Config {
   home?: string
+  /**
+   * The global skill root, when the deployment's is not the default.
+   *
+   * Defaults to `$DSH_AGENTS_HOME/skills`, then `~/.agents/skills`. The plugin
+   * reads this root and never writes it: an operator installs a skill by hand.
+   */
+  skillsDir?: string
   /**
    * Records to start from, for a caller that supplies its own examples.
    *

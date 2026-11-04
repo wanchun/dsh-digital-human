@@ -82,6 +82,9 @@ function call(method, payload, rpcId = 'rpc-1') {
 }
 
 const home = await mkdtemp(join(tmpdir(), 'dh-wiring-'))
+// The skill root belongs to the machine. Point it inside this run's own directory, so
+// a record created here never inherits the operator's own skills.
+process.env.DSH_AGENTS_HOME = join(home, 'agents')
 // The IM integration keeps bot aliases and served directories beside its
 // credentials. One bot carries both; the other carries neither. Every scenario
 // gets its own copy, because each runs against its own home.
@@ -126,10 +129,6 @@ const dshIm = {
   listBots: async () => [{ botId: 'bot-a', name: 'Bot A' }, { botId: 'bot-b', name: 'Bot B' }],
   listTargets: async (botId) => (botId === 'bot-a' ? [{ targetId: 'group-1', name: 'Dev Group', kind: 'group' }] : []),
 }
-const skills = { list: async () => [
-  { name: 'qs-assistant', description: '千手平台助手', source: 'filesystem' },
-  { name: 'dpms-cli', description: 'DPMS 需求平台', source: 'filesystem' },
-] }
 const workspaceController = {
   follow: async function* () {
     yield { type: 'baseline', value: { items: [
@@ -140,8 +139,16 @@ const workspaceController = {
   create: async ({ path }) => ({ workspace: { workspaceId: 'ws-new', title: path, path }, created: true }),
   rename: async ({ workspaceId, title }) => ({ workspace: { workspaceId, title, path: '/x' } }),
 }
-const wired = makeCtx({ connection, dshIm, skills, workspaceController })
-await applyPlatform(wired, { home: join(home, 'wired'), humans: SEED_HUMANS })
+// Skills live only in the global root, installed by hand: write two of them there.
+const skillsRoot = join(home, 'global-skills')
+const installSkill = async (name, description) => {
+  await mkdir(join(skillsRoot, name), { recursive: true })
+  await writeFile(join(skillsRoot, name, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n# Body\n`)
+}
+await installSkill('qs-assistant', '千手平台助手')
+await installSkill('dpms-cli', 'DPMS 需求平台')
+const wired = makeCtx({ connection, dshIm, workspaceController })
+await applyPlatform(wired, { home: join(home, 'wired'), humans: SEED_HUMANS, skillsDir: skillsRoot })
 // `route` is overwritten every time another ctx mounts on the same connection,
 // so keep this one under its own name for the checks that follow.
 const wiredRoute = route
@@ -226,15 +233,15 @@ check('workspaces.list projects id, title, path',
   && wsList.result.value.workspaces[1].path === '/Users/harrywan')
 
 console.log('4b) the skill catalog')
-const skillList = await (await wiredRoute.fetch(request(call('skills.list', {})))).json()
-check('skills.list returns the catalog', skillList.result.value.skills.length === 2)
-check('skills.list projects name, description, source', skillList.result.value.skills[0].name === 'qs-assistant'
-  && skillList.result.value.skills[0].description === '千手平台助手'
-  && skillList.result.value.skills[0].source === 'filesystem')
+const skillList = await (await wiredRoute.fetch(request(call('skills.catalog', {})))).json()
+check('skills.catalog returns the installed skills', skillList.result.value.skills.length === 2, JSON.stringify(skillList.result.value))
+check('skills.catalog projects name and description', skillList.result.value.skills[0].name === 'dpms-cli'
+  && skillList.result.value.skills[0].description === 'DPMS 需求平台'
+  && Object.keys(skillList.result.value.skills[0]).sort().join(',') === 'description,name')
 const noSkills = makeCtx({ connection })
-await applyPlatform(noSkills, { home: join(home, 'no-skills'), humans: SEED_HUMANS })
-check('skills.list degrades to empty without the skill plugin',
-  (await (await route.fetch(request(call('skills.list', {})))).json()).result.value.skills.length === 0)
+await applyPlatform(noSkills, { home: join(home, 'no-skills'), humans: SEED_HUMANS, skillsDir: join(home, 'no-skills', 'missing') })
+check('skills.catalog answers empty when the root does not exist',
+  (await (await route.fetch(request(call('skills.catalog', {})))).json()).result.value.skills.length === 0)
 
 console.log('5) the browser bundle registers its slots')
 let loaded = null

@@ -88,23 +88,21 @@ Agent preset（`dh-<id>`），所以新增、修改、停用、删除数字人�
 
 ### 技能空间
 
-技能分两层，互不干扰：
+技能只有一个来源：全局 `~/.agents/skills/`。手工放进去，插件只读。记录里的 `skills` 是**白名单**：
 
 ```
-全局 ~/.agents/skills/  ─┐
-项目目录的 skills/       ─┼─→  每个数字人默认加载，不用配置
-bundled 内置技能        ─┘
-
-插件技能空间            ──→  只有记录里勾选的才挂给这个数字人
-~/.dsh/digital-human/skills/
+~/.agents/skills/<名字>/SKILL.md   技能只在这里，手工安装
+                                   │
+                     勾选的 ───────┴─→ 正常加载
+                     没勾选的 ─────────→ 预设层注册同名影子，模型看不到
 ```
 
-- 挂在 `~/.dsh/digital-human/skills/<名字>/SKILL.md`（+ `references/` 等资源）
-- 通过**预设作用域**的 `ctx.skills.register` 注册 —— 只对该数字人可见，
-  不碰全局目录，也不用符号链接
-- runtime 注册**压过** user（全局）同名技能，所以私有技能能覆盖全局的
-- 界面可**上传**（选目录，保留相对路径）、**勾选**启用、**移除**
-- 缺 `SKILL.md` 的目录照样列出（上传出错要看得见）；路径逃逸、超 2000 文件/32MB 会被拒
+- 配置页列出全局全部技能：已勾的高亮，未勾的灰显。勾选结果写进记录的 `config.skills`。
+- 新建记录默认勾选全部全局技能。
+- 没勾选的技能由预设作用域的白名单 provider 贡献同名影子：`modelInvocable: false`，正文只有一句「该技能未在本数字人启用」。
+- 插件不再维护第二份技能库，也没有上传入口。
+- 判定标准：一条规则若「不勾选就没法工作」，它属于机制，不属于技能。`digital-human-comms` 已内置进插件的操作上下文：不进库、不进勾选列表、不进 `config.skills`。
+- 人设里的「依赖技能：…」只作说明，插件不解析、不校验。
 
 ### 导入导出
 
@@ -112,11 +110,10 @@ bundled 内置技能        ─┘
 
 ```
 pm-assistant-202610131954.dh.tar.gz
-├── manifest.json              格式版本（dsh-digital-human/2）、导出时间、id、带了哪些技能
+├── manifest.json              格式版本（dsh-digital-human/2）、导出时间、id、是否带记忆
 ├── humans/<id>/persona.md     人设（剥掉本机字段）
 ├── humans/<id>/config.json    机器配置
-├── memory/<id>.md             可选
-└── skills/<名字>/…            勾选的那些技能，原样目录树
+└── memory/<id>.md             可选
 ```
 
 旧格式（`humans/<id>.json` 合并记录）仍可导入，按文件布局自动识别。
@@ -126,6 +123,7 @@ pm-assistant-202610131954.dh.tar.gz
 - 长路径用 tar 的 `prefix` 字段承载，超长**拒绝**而不是截断
 - 符号链接/设备条目**跳过不跟随**
 - 导出**剥掉** `im.botId` / `im.targetId` / `im.owner`（都指向本机）
+- 包里不带技能：技能属于装它的机器，记录只带勾选的名字。旧包里的 `skills/` 目录读取时忽略
 - 两个二进制端点，浏览器就是普通下载/上传，不走 base64：
 
   ```
@@ -153,7 +151,7 @@ pm-assistant-202610131954.dh.tar.gz
 ### 宿主能力
 
 - **RPC**（一条 `/api/digital-human` 精确路由）：`registry.list/get/save/remove/sessionIcon`、
-  `im.bots`、`im.targets`、`skills.list`、`skills.library/upload/remove`、
+  `im.bots`、`im.targets`、`skills.catalog`、
   `workspaces.list`、`permissions.list`
 - **订阅事件**：`session/created`（上权限、重试对齐）、`session/event`（记信箱、识别 preset 切换）、
   `session/disposed`（清理）
@@ -191,7 +189,6 @@ pm-assistant-202610131954.dh.tar.gz
 │   ├── tasks.jsonl                工作项账本（一行一次状态变化）
 │   └── conversations/<会话>.jsonl  信箱
 ├── humans.json.legacy-<时间>      迁移备份（迁移后才有）
-├── skills/                        插件技能空间
 └── workspace/                     数字人共享的工作区
 ```
 

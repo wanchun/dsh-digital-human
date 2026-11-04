@@ -5,7 +5,6 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { BUNDLE_FORMAT, packHumans, readBundle, readTar, unpackHumans, writeTar } from '../../src/lib/bundle'
-import { libraryDir, listLibrary, writeSkill } from '../../src/lib/skills'
 import { normalizeHuman } from '../../src/lib/store'
 
 let home = ''
@@ -21,8 +20,6 @@ afterEach(() => {
 const human = (patch: Record<string, unknown> = {}) => normalizeHuman({
   id: 'pm', name: '研发PM助手', systemPrompt: '你是 {{bot}}。', skills: [], ...patch,
 })
-
-const skillMd = (name: string) => `---\nname: ${name}\ndescription: d\n---\n# Body\n`
 
 describe('the tar container', () => {
   it('round-trips files, nested paths and empty content', () => {
@@ -69,18 +66,20 @@ describe('the tar container', () => {
 })
 
 describe('packing', () => {
-  it('carries the records and their skills, and strips the local fields', async () => {
-    await writeSkill(home, 'qs', { 'SKILL.md': skillMd('qs'), 'references/x.md': 'r' })
-    const record = human({ skills: ['qs'], im: { botId: 'wecom_1', targetId: 'group', owner: 'wohR' } })
+  it('carries the records and strips the local fields', () => {
+    const record = human({ im: { botId: 'wecom_1', targetId: 'group', owner: 'wohR' } })
     const { archive, manifest } = packHumans(home, [record])
-    expect(manifest).toMatchObject({ format: BUNDLE_FORMAT, skills: ['qs'], memory: false })
-    expect(manifest.humans).toEqual([{ id: 'pm', name: '研发PM助手' }])
+    expect(manifest).toEqual({
+      format: BUNDLE_FORMAT,
+      exportedAt: expect.any(String),
+      humans: [{ id: 'pm', name: '研发PM助手' }],
+      memory: false,
+    })
     const preview = readBundle(archive)
     expect(preview.humans).toHaveLength(1)
     expect(preview.humans[0].systemPrompt).toContain('{{bot}}')
     // A binding is the machine's, not the record's.
     expect(preview.humans[0].im).toEqual({ botId: '', targetId: '' })
-    expect(preview.skills).toEqual([{ name: 'qs', files: 2, bytes: expect.any(Number) }])
   })
 
   it('writes the persona and the config, never a combined record', async () => {
@@ -99,15 +98,11 @@ describe('packing', () => {
     expect(JSON.parse(files['humans/pm/config.json'].toString('utf8')).icon).toBe(icon)
   })
 
-  it('carries many records in one bundle, with the union of their skills', async () => {
-    await writeSkill(home, 'a', { 'SKILL.md': skillMd('a') })
-    await writeSkill(home, 'b', { 'SKILL.md': skillMd('b') })
+  it('carries many records in one bundle', () => {
     const { manifest } = packHumans(home, [
-      human({ id: 'one', name: 'One', skills: ['a'] }),
-      human({ id: 'two', name: 'Two', skills: ['a', 'b'] }),
+      human({ id: 'one', name: 'One' }),
+      human({ id: 'two', name: 'Two' }),
     ])
-    // The shared skill travels once, not once per record.
-    expect(manifest.skills).toEqual(['a', 'b'])
     expect(manifest.humans.map((entry) => entry.id)).toEqual(['one', 'two'])
   })
 
@@ -135,19 +130,6 @@ describe('packing', () => {
     // `two` has no memory file: the export must not invent one.
     const { manifest } = packHumans(home, [human({ id: 'one' }), human({ id: 'two' })], { includeMemory: true })
     expect(manifest.memory).toBe(true)
-  })
-
-  it('skips a mounted skill that is not in the library', () => {
-    expect(packHumans(home, [human({ skills: ['never-uploaded'] })]).manifest.skills).toEqual([])
-  })
-
-  it('skips a mounted name that could not be a directory', () => {
-    expect(packHumans(home, [human({ skills: ['../etc'] })]).manifest.skills).toEqual([])
-  })
-
-  it('skips a skill directory with nothing in it', () => {
-    mkdirSync(join(libraryDir(home), 'empty'), { recursive: true })
-    expect(packHumans(home, [human({ skills: ['empty'] })]).manifest.skills).toEqual([])
   })
 
   it('packs a raw record with no binding at all', () => {
@@ -187,19 +169,16 @@ describe('reading', () => {
     expect(() => readBundle(broken)).toThrow(/unreadable/)
   })
 
-  it('counts the skills it carries, and ignores anything outside skills/', () => {
+  it('ignores a skills/ tree and anything outside humans/ and manifest.json', () => {
     const files = {
       'manifest.json': Buffer.from(`{"format":"${BUNDLE_FORMAT}"}`),
       'humans/pm.json': Buffer.from('{"id":"pm","name":"x"}'),
       'skills/a/SKILL.md': Buffer.from('a'),
-      'skills/b/SKILL.md': Buffer.from('b'),
-      'skills/b/ref.md': Buffer.from('r'),
       'notes.md': Buffer.from('ignored'),
     }
-    expect(readBundle(gzipSync(writeTar(files))).skills).toEqual([
-      { name: 'a', files: 1, bytes: 1 },
-      { name: 'b', files: 2, bytes: 2 },
-    ])
+    const preview = readBundle(gzipSync(writeTar(files)))
+    expect(preview.humans.map((entry) => entry.id)).toEqual(['pm'])
+    expect(preview).not.toHaveProperty('skills')
   })
 
   it('reads a directory record with no persona as an id-named record', () => {
@@ -230,15 +209,14 @@ describe('reading', () => {
 })
 
 describe('unpacking', () => {
-  it('writes the skills and returns the records to store', async () => {
-    await writeSkill(home, 'qs', { 'SKILL.md': skillMd('qs') })
+  it('returns the records to store, without a skill tree', async () => {
     const { archive } = packHumans(home, [human({ skills: ['qs'] })])
-    rmSync(libraryDir(home), { recursive: true, force: true })
-    expect(listLibrary(home)).toEqual([])
     const result = await unpackHumans(home, archive)
-    expect(result).toMatchObject({ ids: ['pm'], renamed: false, skills: ['qs'], memory: false })
+    expect(result).toMatchObject({ ids: ['pm'], renamed: false, memory: false })
     expect(result.records[0].id).toBe('pm')
-    expect(readFileSync(join(libraryDir(home), 'qs', 'SKILL.md'), 'utf8')).toContain('# Body')
+    // The name travels with the record; the skill itself is the machine's business.
+    expect(result.records[0].skills).toEqual(['qs'])
+    expect(existsSync(join(home, 'skills'))).toBe(false)
   })
 
   it('writes many records from one bundle', async () => {
@@ -261,27 +239,19 @@ describe('unpacking', () => {
     await expect(unpackHumans(home, archive, { id: 'x' })).rejects.toThrow(/exactly one digital human/)
   })
 
-  it('keeps an existing skill when overwrite is off, and mounts only what it wrote', async () => {
-    await writeSkill(home, 'qs', { 'SKILL.md': 'MINE\n' })
-    const other = mkdtempSync(join(tmpdir(), 'dh-bundle-src-'))
-    await writeSkill(other, 'qs', { 'SKILL.md': skillMd('qs') })
-    const { archive } = packHumans(other, [human({ skills: ['qs'] })])
-    const result = await unpackHumans(home, archive, { overwrite: false })
-    expect(result.skills).toEqual([])
-    // The record must not name a skill the import skipped.
-    expect(result.records[0].skills).toEqual([])
-    expect(readFileSync(join(libraryDir(home), 'qs', 'SKILL.md'), 'utf8')).toBe('MINE\n')
-    rmSync(other, { recursive: true, force: true })
-  })
-
-  it('refuses a skill carrying a binary file rather than mangling it', async () => {
+  it('ignores a skills/ tree an older bundle still carries', async () => {
+    // Skills are installed by hand in the global root now, so an import must not
+    // write one: the older package is read and its tree is dropped.
     const archive = gzipSync(writeTar({
       'manifest.json': Buffer.from(`{"format":"${BUNDLE_FORMAT}"}`),
-      'humans/pm.json': Buffer.from('{"id":"pm","name":"x","skills":["bin"]}'),
-      'skills/bin/SKILL.md': Buffer.from('---\nname: bin\n---\n'),
-      'skills/bin/logo.png': Buffer.from([0x89, 0x50, 0x00, 0x4e]),
+      'humans/pm.json': Buffer.from('{"id":"pm","name":"x","skills":["qs"]}'),
+      'skills/qs/SKILL.md': Buffer.from('---\nname: qs\n---\n'),
+      'skills/qs/logo.png': Buffer.from([0x89, 0x50, 0x00, 0x4e]),
     }))
-    await expect(unpackHumans(home, archive)).rejects.toThrow(/binary file/)
+    const result = await unpackHumans(home, archive)
+    expect(result.records[0].skills).toEqual(['qs'])
+    expect(result.ids).toEqual(['pm'])
+    expect(existsSync(join(home, 'skills'))).toBe(false)
   })
 
   it('carries one memory file per record', async () => {
@@ -297,13 +267,4 @@ describe('unpacking', () => {
     expect(readFileSync(join(home, 'humans', 'two', 'memory.md'), 'utf8')).toContain('# now two')
   })
 
-  it('reports a bundle whose skill carries no files', async () => {
-    const archive = gzipSync(writeTar({
-      'manifest.json': Buffer.from(`{"format":"${BUNDLE_FORMAT}"}`),
-      'humans/pm.json': Buffer.from('{"id":"pm","name":"x","skills":["empty"]}'),
-    }))
-    const result = await unpackHumans(home, archive)
-    expect(result.skills).toEqual([])
-    expect(existsSync(join(libraryDir(home), 'empty'))).toBe(false)
-  })
 })

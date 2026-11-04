@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -113,8 +113,9 @@ function controllerStub() {
 const chatWith = (controller: any, options: Record<string, unknown> = {}) => {
   const log = vi.fn()
   const chat = new HumanChat({ sessionController: controller, ...(options.ctx as object ?? {}) } as any, store, log, {
+    // Every record shares one Workspace, so the default is the one the Host knows.
     defaultWorkspacePath: () => '/default',
-    workspaceIdOf: (path: string) => (path === '/w' ? 'ws-1' : undefined),
+    workspaceIdOf: (path: string) => (path === '/default' ? 'ws-1' : undefined),
     ...options,
   } as any)
   return { chat, log }
@@ -265,15 +266,21 @@ describe('ensureSession', () => {
     expect(target).toMatchObject({ sessionId: 'session-pm-1', via: 'thread' })
   })
 
-  it('falls back to the legacy name index when no edge exists', async () => {
+  it('falls back to the name index of the record that answers when no edge exists', async () => {
+    // The thread's legacy name is filed in the record that answers in it. Reading the
+    // caller's own index handed back the caller's Session as the peer's address — a
+    // real dispatch then opened the peer's Session under that wrong id.
     const { chat } = chatWith(controllerStub())
-    const opened = await chat.ensureSession(human({ id: 'dev' }), 'REQ-1', 'dh-dev')
+    const opened = await chat.ensureSession(human({ id: 'pm' }), 'REQ-1', 'dh-pm')
     const target = await chat.threadTarget('dev', {
       selfSession: 'session-dev-9',
       peer: 'pm',
       conversationId: 'REQ-1',
     })
     expect(target).toMatchObject({ sessionId: opened, via: 'legacy' })
+    // The caller's own entry for the same thread is not the peer's address.
+    await chat.ensureSession(human({ id: 'dev' }), 'REQ-1', 'dh-dev')
+    expect(await chat.threadTarget('dev', { peer: 'nobody', conversationId: 'REQ-1' })).toBeNull()
   })
 
   it('ignores an incomplete edge and survives a malformed line', async () => {
@@ -371,8 +378,9 @@ describe('ensureSession', () => {
 
   it('falls back to the default directory and no workspace', async () => {
     const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    await chat.ensureSession(human({ workspace: '' }), 'main', 'dh-pm')
+    // A Host whose roster does not name the directory: it is passed as a cwd.
+    const { chat } = chatWith(controller, { workspaceIdOf: () => undefined })
+    await chat.ensureSession(human(), 'main', 'dh-pm')
     expect(controller.created[0]).toMatchObject({ cwd: '/default' })
     expect(controller.created[0].workspaceId).toBeUndefined()
   })
@@ -387,9 +395,10 @@ describe('ensureSession', () => {
 })
 
 describe('naming a conversation', () => {
-  it('names a fresh peer conversation after the requirement it carries', async () => {
-    // The list is otherwise titled from whatever the first prompt happened to say,
-    // which for a peer delivery is the transport block itself.
+  it('names a fresh bot-less conversation after the role it belongs to', async () => {
+    // A bot-less record serves requirement threads; the custom tree tells them
+    // apart, so the title names the role rather than a subject. Otherwise the list
+    // would be titled from the transport block the first prompt carried.
     const controller = controllerStub()
     const { chat } = chatWith(controller)
     await chat.deliver(human(), {
@@ -398,15 +407,8 @@ describe('naming a conversation', () => {
       from: 'pm',
     })
     expect(controller.renamed).toEqual([
-      { sessionId: expect.any(String), title: 'micrometer-core 安全升级' },
+      { sessionId: expect.any(String), title: 'PM' },
     ])
-  })
-
-  it('falls back to the thread name when the message names no subject', async () => {
-    const controller = controllerStub()
-    const { chat } = chatWith(controller)
-    await chat.deliver(human(), { conversationId: 'REQ-42', message: '进度如何' })
-    expect(controller.renamed[0].title).toBe('REQ-42')
   })
 
   it('never renames an established conversation', async () => {
@@ -462,6 +464,18 @@ describe('session modes', () => {
     const unnamed = await chat.deliver(qa, { message: 'y' })
     expect(unnamed.conversationId).toBe('main')
     expect(controller.prompted.every((request: any) => request.mode === 'queue')).toBe(true)
+  })
+
+  it('queues in single mode even when the delivery asks to steer', async () => {
+    // A shared-session record's tasks are work items, so the transport's own rule
+    // wins: an explicit steer must not interrupt the turn they queue behind.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const qa = human({ id: 'qa', name: 'QA', systemPrompt: 'x', sessionMode: 'single' })
+    await chat.deliver(qa, {
+      conversationId: 'task-a', message: 'one', from: 'pm', deliveryMode: 'steer',
+    })
+    expect(controller.prompted.map((request: any) => request.mode)).toEqual(['queue'])
   })
 
   it('keeps one Session per thread and steers in thread mode', async () => {
@@ -647,6 +661,68 @@ describe('addressing a Session directly', () => {
     expect(controller.sessions.map((entry) => entry.sessionId)).toEqual(['session-fresh-1'])
   })
 
+  it('files a Session reached by id under its thread, like one opened by name', async () => {
+    // The missed half of the reported bug: a delivery addressed to a Session id
+    // created the Session and wrote the mailbox and the edge, but never the index.
+    // Only the role that was reached by conversation name kept one.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const delivered = await chat.deliver(human({ id: 'dev' }), {
+      sessionId: 'session-dev-1', conversationId: 'REQ-1', message: 'work', from: 'lead',
+    })
+    const index = JSON.parse(readFileSync(store.sessionIndexPath('dev'), 'utf8'))
+    expect(index).toEqual({ 'REQ-1': delivered.sessionId })
+    expect(await chat.lookup('dev', 'REQ-1')).toBe(delivered.sessionId)
+  })
+
+  it('does not rewrite the line when the same Session is addressed again', async () => {
+    // Reuse must file nothing new: the index already says what the second delivery
+    // would write, and rewriting it is how a concurrent writer loses another entry.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    const first = await chat.deliver(human({ id: 'dev' }), {
+      sessionId: 'session-dev-1', conversationId: 'REQ-1', message: 'one', from: 'lead',
+    })
+    const path = store.sessionIndexPath('dev')
+    const written = readFileSync(path, 'utf8')
+    const again = await chat.deliver(human({ id: 'dev' }), {
+      sessionId: first.sessionId, conversationId: 'REQ-1', message: 'two', from: 'lead',
+    })
+    expect(again.sessionId).toBe(first.sessionId)
+    expect(readFileSync(path, 'utf8')).toBe(written)
+    expect(JSON.parse(written)).toEqual({ 'REQ-1': first.sessionId })
+    // A later delivery by name reuses the same Session instead of opening a second.
+    expect(await chat.lookup('dev', 'REQ-1')).toBe(first.sessionId)
+  })
+
+  it('reports a thread another Session owns instead of rewriting it', async () => {
+    // A name belongs to the Session that opened the thread. The delivery still
+    // arrives, but the index is not moved and the caller is told why.
+    const controller = controllerStub()
+    const { chat, log } = chatWith(controller)
+    const opened = await chat.ensureSession(human(), 'REQ-9', 'dh-pm')
+    const delivered = await chat.deliver(human(), {
+      sessionId: 'session-elsewhere', conversationId: 'REQ-9', message: 'x',
+    })
+    expect(delivered.sessionId).toBe('session-elsewhere')
+    expect(delivered.notice).toContain('is filed under')
+    expect(await chat.lookup('pm', 'REQ-9')).toBe(opened)
+    expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes('is filed under'))).toBe(true)
+  })
+
+  it('fails the delivery when the index cannot be written', async () => {
+    // A write that fails must not look like success: the record would carry a
+    // Session nothing can name again, which is the failure this path exists to stop.
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await store.ensureDir(store.dir('dev'))
+    // A directory where the index file belongs: the rename cannot replace it.
+    mkdirSync(store.sessionIndexPath('dev'), { recursive: true })
+    await expect(chat.deliver(human({ id: 'dev' }), {
+      sessionId: 'session-dev-1', conversationId: 'REQ-1', message: 'x',
+    })).rejects.toThrow()
+  })
+
   it('reports and replaces a Session it cannot adopt', async () => {
     const controller = controllerStub()
     const { chat, log } = chatWith(controller)
@@ -719,6 +795,47 @@ describe('the address list', () => {
     const named = await chat.ensureSession(human(), 'main', 'dh-pm')
     await chat.deliver(human(), { sessionId: named, message: 'x' })
     expect(await chat.addresses('pm')).toHaveLength(1)
+  })
+})
+
+describe('the mailbox addresses', () => {
+  it('reads the thread from each log, and skips what is not an address', async () => {
+    const { chat } = chatWith(controllerStub())
+    // Nothing is logged yet.
+    expect(await chat.addressesFromMailbox('pm')).toEqual([])
+    const dir = join(store.dir('pm'), 'conversations')
+    await store.ensureDir(dir)
+
+    // A log filed under a conversation name predates the Session key: the name is
+    // not an address, so its thread stays the index's business.
+    writeFileSync(join(dir, 'REQ-1.jsonl'), `${JSON.stringify({ at: 'x', kind: 'inbound', conversation: 'REQ-1' })}\n`)
+    // An escape that does not decode cannot name a Session.
+    writeFileSync(join(dir, 'session-%E0%A4%A.jsonl'), `${JSON.stringify({ at: 'x', conversation: 'REQ-1' })}\n`)
+    // A log that cannot be read says nothing, and must not fail the whole read.
+    symlinkSync(join(dir, 'gone.jsonl'), join(dir, 'session-broken-1.jsonl'))
+    // Blank lines, a line that is not JSON, a thread that is not text, and a log
+    // with only outbound lines all name no thread.
+    writeFileSync(join(dir, 'session-empty-1.jsonl'), [
+      '',
+      '{ not json',
+      JSON.stringify({ at: 'x', kind: 'inbound', conversation: 7 }),
+      JSON.stringify({ at: 'x', kind: 'inbound', conversation: '   ' }),
+      JSON.stringify({ at: 'x', kind: 'outbound', text: 'hi' }),
+    ].join('\n') + '\n')
+    // The inbound line names the thread; the half-written tail is skipped.
+    writeFileSync(join(dir, 'session-1.jsonl'), `${JSON.stringify({ at: 'x', kind: 'inbound', conversation: 'REQ-1', session: 'session-peer' })}\n{"at":"x","kind":"outb`)
+    expect(await chat.addressesFromMailbox('pm')).toEqual([{ conversationId: 'REQ-1', sessionId: 'session-1' }])
+    // A second read takes the cached answer instead of the log again.
+    expect(await chat.addressesFromMailbox('pm')).toEqual([{ conversationId: 'REQ-1', sessionId: 'session-1' }])
+
+    // A log that gains its thread is read again; a known one keeps its thread.
+    writeFileSync(join(dir, 'session-empty-1.jsonl'), `${JSON.stringify({ at: 'x', kind: 'inbound', conversation: 'REQ-2' })}\n`)
+    writeFileSync(join(dir, 'session-1.jsonl'), `${JSON.stringify({ at: 'x', kind: 'inbound', conversation: 'REQ-1', session: 'session-peer' })}\n${JSON.stringify({ at: 'x', kind: 'outbound', text: 'more' })}\n`)
+    expect((await chat.addressesFromMailbox('pm')).map((entry) => entry.conversationId).sort()).toEqual(['REQ-1', 'REQ-2'])
+
+    // A log that is gone stops answering.
+    rmSync(join(dir, 'session-empty-1.jsonl'))
+    expect((await chat.addressesFromMailbox('pm')).map((entry) => entry.sessionId)).toEqual(['session-1'])
   })
 })
 
@@ -835,5 +952,79 @@ describe('the conversation index', () => {
     await chat.prime([human()])
     expect(chat.ownerOf('session-1')).toEqual({ humanId: 'pm', conversationId: 'main' })
     expect(chat.ownerOf(42)).toBeUndefined()
+  })
+})
+
+describe('requirement workspace', () => {
+  const workspace = () => join(home, 'ws')
+  // The record no longer names a directory: every role shares the one Workspace,
+  // and a requirement thread is the only thing that gets a directory of its own.
+  const inWorkspace = () => ({ defaultWorkspacePath: () => workspace() })
+
+  it('runs the session in reqs/<conversation> and creates the directory', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller, inWorkspace())
+    await chat.ensureSession(human({ sessionWorkspace: 'requirement' }), 'REQ-1', 'dh-pm')
+    const expected = join(workspace(), 'reqs', 'REQ-1')
+    expect(controller.created[0].cwd).toBe(expected)
+    // A cwd is passed alone: naming a Workspace would make the Host resolve the
+    // directory from the Workspace and ignore the requirement directory.
+    expect(controller.created[0].workspaceId).toBeUndefined()
+    expect(existsSync(expected)).toBe(true)
+    expect(statSync(expected).isDirectory()).toBe(true)
+  })
+
+  it('files the requirement directory as its own Workspace when one can be registered', async () => {
+    // A directory born on first delivery is not in the roster, and the UI groups by
+    // Workspace id: registering it is what keeps the Session out of "ungrouped".
+    const controller = controllerStub()
+    const ensureWorkspace = vi.fn(async (path: string) => (path.endsWith('reqs/REQ-1') ? 'ws-req' : undefined))
+    const { chat } = chatWith(controller, { ...inWorkspace(), ensureWorkspace })
+    await chat.ensureSession(human({ sessionWorkspace: 'requirement' }), 'REQ-1', 'dh-pm')
+    // The thread is passed too: the Host names the Workspace after it.
+    expect(ensureWorkspace).toHaveBeenCalledWith(join(workspace(), 'reqs', 'REQ-1'), 'REQ-1')
+    expect(controller.created[0].workspaceId).toBe('ws-req')
+    expect(controller.created[0].cwd).toBeUndefined()
+  })
+
+  it('turns a conversation into one safe path segment', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller, inWorkspace())
+    await chat.ensureSession(human({ sessionWorkspace: 'requirement' }), 'REQ 1/2', 'dh-pm')
+    expect(controller.created[0].cwd).toBe(join(workspace(), 'reqs', 'REQ-1-2'))
+  })
+
+  it('refuses a conversation that would escape the requirement directory', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller, inWorkspace())
+    await expect(chat.ensureSession(human({ sessionWorkspace: 'requirement' }), '..', 'dh-pm'))
+      .rejects.toThrow(/\.\./)
+  })
+
+  it('keeps two requirement threads in different directories', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller, inWorkspace())
+    const humanRecord = human({ sessionWorkspace: 'requirement' })
+    await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')
+    await chat.ensureSession(humanRecord, 'REQ-2', 'dh-pm')
+    expect(controller.created[0].cwd).toBe(join(workspace(), 'reqs', 'REQ-1'))
+    expect(controller.created[1].cwd).toBe(join(workspace(), 'reqs', 'REQ-2'))
+  })
+
+  it('reuses the requirement session instead of reopening it', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller, inWorkspace())
+    const humanRecord = human({ sessionWorkspace: 'requirement' })
+    const first = await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')
+    expect(await chat.ensureSession(humanRecord, 'REQ-1', 'dh-pm')).toBe(first)
+    expect(controller.created).toHaveLength(1)
+  })
+
+  it('runs a record-scoped session in the shared Workspace when the switch is off', async () => {
+    const controller = controllerStub()
+    const { chat } = chatWith(controller)
+    await chat.ensureSession(human({ sessionWorkspace: 'record' }), 'REQ-1', 'dh-pm')
+    expect(controller.created[0].workspaceId).toBe('ws-1')
+    expect(controller.created[0].cwd).toBeUndefined()
   })
 })

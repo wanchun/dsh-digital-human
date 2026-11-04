@@ -31,6 +31,22 @@ export function IconChevronDownOutlineRegular() {
   return <span data-icon="chevron" />
 }
 
+export function IconChevronRightOutlineRegular() {
+  return <span data-icon="chevron-right" />
+}
+
+export function IconFolderCloseRegular() {
+  return <span data-icon="folder" />
+}
+
+export function IconNewChatOutlineRegular() {
+  return <span data-icon="chat" />
+}
+
+export function IconUserOutlineRegular() {
+  return <span data-icon="user" />
+}
+
 export function Input(props: any) {
   return (
     <span className={props.className}>
@@ -70,7 +86,7 @@ export function Pill(props: any) {
 }
 
 export function StateDot(props: any) {
-  return <span data-state={props.state} />
+  return <span data-state={props.state} data-size={props.size} />
 }
 
 export function Switch(props: any) {

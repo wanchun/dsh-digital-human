@@ -1,10 +1,14 @@
 /**
  * Import and export of one digital human, as a `.tar.gz` bundle.
  *
- * A record is not enough to move a digital human: its persona, its declared config,
- * its mounted skills and — optionally — its memory all belong to it. A single JSON
- * file could hold the record but not the skills, which are directory trees that may
- * carry binary resources.
+ * A record is not enough to move a digital human: its persona, its declared config
+ * and — optionally — its memory belong to it. A single JSON file could not say which
+ * half is the human-editable prose, so the bundle keeps the same two files the
+ * registry keeps.
+ *
+ * Skills are not part of a bundle. They live in the deployment's global root,
+ * installed by hand, so the record travels with the list of names it enables and
+ * the behaviour of those skills is the destination machine's business.
  *
  * The container is `tar` + `gzip`, both written with node builtins: the package
  * keeps zero runtime dependencies, and the result is a file anyone can inspect with
@@ -17,7 +21,6 @@
  * humans/<id>/persona.md     one persona each, with local-only fields stripped
  * humans/<id>/config.json    the machine configuration beside it
  * memory/<id>.md             optional
- * skills/<name>/…            one directory per mounted skill, shared by every record
  * ```
  *
  * An older bundle carries `humans/<id>.json` instead of the two files; the reader
@@ -28,12 +31,11 @@
  */
 
 import { gunzipSync, gzipSync } from 'node:zlib'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Human } from './types.js'
-import { libraryDir, validSkillName } from './skills.js'
-import { composeRecord, configText, normalizeHuman, parsePersona, personaText } from './store.js'
+import { composeRecord, configText, normalizeHuman, parsePersona, personaText, requireSlug } from './store.js'
 
 /** Bundle format identifier, so a foreign archive is refused rather than guessed at. */
 export const BUNDLE_FORMAT = 'dsh-digital-human/2'
@@ -154,8 +156,6 @@ export interface BundleManifest {
   humans: Array<{ id: string; name: string }>
   /** Whether the bundle carries any memory file. */
   memory: boolean
-  /** The skills it carries, by name, shared by every record. */
-  skills: string[]
 }
 
 /** What a bundle holds, as the import page shows it before anything is written. */
@@ -163,20 +163,7 @@ export interface BundlePreview {
   manifest: BundleManifest
   /** Every record the bundle carries. */
   humans: Human[]
-  /** Files per skill, for a size-and-shape summary. */
-  skills: Array<{ name: string; files: number; bytes: number }>
   bytes: number
-}
-
-/** Every file under one directory, as paths relative to it. */
-function filesUnder(root: string, at = root): string[] {
-  const found: string[] = []
-  for (const entry of readdirSync(at, { withFileTypes: true })) {
-    const path = join(at, entry.name)
-    if (entry.isDirectory()) found.push(...filesUnder(root, path))
-    else if (entry.isFile()) found.push(path.slice(root.length + 1))
-  }
-  return found
 }
 
 /**
@@ -204,21 +191,6 @@ export function packHumans(
     files[`humans/${human.id}/config.json`] = Buffer.from(configText(stripped), 'utf8')
   }
 
-  const carried: string[] = []
-  for (const name of [...new Set(records.flatMap((human) => human.skills ?? []))]) {
-    if (!validSkillName(name)) continue
-    const dir = join(libraryDir(home), name)
-    if (!existsSync(dir)) continue
-    const members = filesUnder(dir)
-    // A skill with no files is not a skill: listing it would promise something the
-    // bundle does not hold, and the import would silently mount nothing.
-    if (members.length === 0) continue
-    carried.push(name)
-    for (const relative of members) {
-      files[`skills/${name}/${relative}`] = readFileSync(join(dir, relative))
-    }
-  }
-
   let memory = false
   if (includeMemory) {
     for (const human of records) {
@@ -234,7 +206,6 @@ export function packHumans(
     exportedAt: new Date().toISOString(),
     humans: records.map((human) => ({ id: human.id, name: human.name })),
     memory,
-    skills: carried,
   }
   files['manifest.json'] = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
   return { archive: gzipSync(writeTar(files)), manifest }
@@ -305,22 +276,10 @@ export function readBundle(archive: Buffer): BundlePreview {
     }
   }
   if (humans.length === 0) throw new Error('the bundle holds no digital human record')
-  const bySkill = new Map<string, { files: number; bytes: number }>()
-  for (const [path, content] of Object.entries(files)) {
-    if (!path.startsWith('skills/')) continue
-    const name = path.split('/')[1]
-    if (!name) continue
-    const entry = bySkill.get(name) ?? { files: 0, bytes: 0 }
-    entry.files += 1
-    entry.bytes += content.length
-    bySkill.set(name, entry)
-  }
-  return {
-    manifest,
-    humans,
-    skills: [...bySkill].map(([name, entry]) => ({ name, ...entry })),
-    bytes: archive.length,
-  }
+  // A package exported by an older version may still hold a `skills/` tree. Its
+  // files are read and ignored: skills are installed by hand now, so an import must
+  // not write into a root the operator owns.
+  return { manifest, humans, bytes: archive.length }
 }
 
 /** What an import did, so the page can report it rather than guess. */
@@ -329,7 +288,6 @@ export interface ImportResult {
   ids: string[]
   /** Whether any id differs from the one the bundle carried. */
   renamed: boolean
-  skills: string[]
   memory: boolean
   /** The records to store, with the ids the import actually used. */
   records: Human[]
@@ -338,64 +296,30 @@ export interface ImportResult {
 /**
  * Write one bundle's contents into the registry.
  *
+ * Only the records and the memory are written. A bundle's skill tree, if it has
+ * one, is untouched: skills belong to the machine's global root now.
+ *
  * @param home - the registry root.
  * @param archive - the uploaded bundle, holding one record or many.
  * @param options.id - an id to write a **single-record** bundle under.
- * @param options.overwrite - whether an existing skill of the same name is replaced.
  * @returns what was written.
  */
 export async function unpackHumans(
   home: string,
   archive: Buffer,
-  { id, overwrite = true }: { id?: string; overwrite?: boolean } = {},
+  { id }: { id?: string } = {},
 ): Promise<ImportResult> {
   const preview = readBundle(archive)
   if (id !== undefined && preview.humans.length !== 1) {
     throw new Error('an id can only be given when the bundle holds exactly one digital human')
   }
   const files = readTar(gunzipSync(archive))
-  const written: string[] = []
-  for (const skill of preview.skills) {
-    const prefix = `skills/${skill.name}/`
-    const entries: Record<string, string> = {}
-    let binary = false
-    for (const [path, content] of Object.entries(files)) {
-      if (!path.startsWith(prefix) || path === prefix) continue
-      // A skill the plugin can mount is text: a binary resource would be registered
-      // as mojibake, so it is reported instead of silently mangled.
-      if (content.includes(0)) {
-        binary = true
-        continue
-      }
-      entries[path.slice(prefix.length)] = content.toString('utf8')
-    }
-    if (binary) throw new Error(`skill ${JSON.stringify(skill.name)} carries a binary file, which the skill space does not hold`)
-    if (Object.keys(entries).length === 0) continue
-    const dir = join(libraryDir(home), skill.name)
-    if (existsSync(dir) && !overwrite) continue
-    const staging = `${dir}.${process.pid}.tmp`
-    await rm(staging, { recursive: true, force: true })
-    for (const [path, content] of Object.entries(entries)) {
-      const target = join(staging, path)
-      await mkdir(dirname(target), { recursive: true })
-      await writeFile(target, content, 'utf8')
-    }
-    await rm(dir, { recursive: true, force: true })
-    await rename(staging, dir)
-    written.push(skill.name)
-  }
-
   const records: Human[] = []
   let memory = false
   for (const carried of preview.humans) {
     const target = id ?? carried.id
-    if (!validSkillName(target)) {
-      throw new Error(`id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}: ${JSON.stringify(target)}`)
-    }
-    // Only the skills this import actually wrote are mounted: naming one that was
-    // skipped would leave the record pointing at nothing.
-    const record: Human = { ...carried, id: target, skills: (carried.skills ?? []).filter((name) => written.includes(name)) }
-    records.push(record)
+    requireSlug(target, 'digital human id')
+    records.push({ ...carried, id: target })
     const memoryFile = files[`memory/${carried.id}.md`]
     if (memoryFile) {
       const dir = join(home, 'humans', target)
@@ -407,7 +331,6 @@ export async function unpackHumans(
   return {
     ids: records.map((record) => record.id),
     renamed: records.some((record, at) => record.id !== preview.humans[at].id),
-    skills: written,
     memory,
     records,
   }
