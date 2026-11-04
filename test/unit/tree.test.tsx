@@ -395,4 +395,17 @@ describe('the live refresh', () => {
     expect(screen.getByText('组织基线验证')).toBeTruthy()
     expect(screen.queryByText(/读取需求失败/)).toBeNull()
   })
+  it('labels a chat row with the Host title when the catalog has one', async () => {
+    await mountTree({ rows: { 's-live': { title: '企业微信-纯哥', running: false } } })
+    await waitFor(() => expect(document.querySelector('[title="s-live"]')).toBeTruthy())
+    expect(document.querySelector('[title="s-live"]')?.textContent).toContain('企业微信-纯哥')
+  })
+
+  it('falls back to the thread name when the catalog has no title', async () => {
+    await mountTree({ rows: { 's-live': { running: false } } })
+    await waitFor(() => expect(document.querySelector('[title="s-live"]')).toBeTruthy())
+    const label = document.querySelector('[title="s-live"]')?.textContent ?? ''
+    expect(label).not.toContain('聊天')
+  })
+
 })

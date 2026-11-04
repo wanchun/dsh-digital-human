@@ -1528,6 +1528,13 @@ function runningSessionIds(status: any, workspace: any): Set<string> {
   return found
 }
 
+/** The Host title of one Session, from the Workspace catalog. */
+function sessionTitle(workspace: any, sessionId: string): string | undefined {
+  const row = workspace?.sessions?.list?.getSnapshot?.()?.byId?.[sessionId]
+  const title = typeof row?.title === 'string' ? row.title.trim() : ''
+  return title || undefined
+}
+
 /** Whether two catalogs name the same Sessions, whatever their order. */
 function sameSessionIds(left: Set<string>, right: Set<string>) {
   if (left.size !== right.size) return false
@@ -1699,9 +1706,11 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace, 
         const row: TreeRow = { label: role, sessionId, order: human.order ?? 100, icon: human.icon }
         if (chat) {
           // "direct:…" and "group:…" name the kind of chat; what follows the prefix
-          // is the name the operator reads.
-          const name = conversation.replace(/^(group|direct):/, '')
-          chat.rows.push({ ...row, label: name || '聊天' })
+          // is the name the operator reads. A title the Host knows (set once by
+          // set_session_title, or by the Host itself) outranks the thread name: it is
+          // the name a person chose for this conversation.
+          const threadName = conversation.replace(/^(group|direct):/, '')
+          chat.rows.push({ ...row, label: sessionTitle(workspace, sessionId) ?? (threadName || '聊天') })
           continue
         }
         // A Session reached by id has no thread, so it belongs to no requirement.
