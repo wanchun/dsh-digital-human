@@ -528,82 +528,21 @@ export function renderSnapshot(snapshot) {
 export const MEMORY_INSTRUCTIONS = `
 ## Memory
 
-You have a persistent \`memory.md\` file that carries state across sessions.
-It has two top-level sections: \`# now\` (working memory) and \`# History\` (timeline).
-Your \`# now\` block is pre-loaded below on every step, so you never need to read it first.
+You have a persistent \`memory.md\` file. It has two sections: \`# now\` (working memory, pre-loaded below every step) and \`# History\` (timeline, newest first).
 
-### Structure
+Structure of \`# now\`:
+- \`## State | one-line summary\` — counters and current status. Always first.
+- \`## [Entity]\` — optional, one per tracked item.
+- \`## Patterns\` — learned rules.
+- \`## Errors\` — failure lessons. Keep compact.
 
-\`\`\`
-# now                          <- working memory (pre-loaded)
-## State | one-line summary    <- always first, updated every run
-## [Entity Name]               <- per-entity tracking (optional)
-## Patterns                    <- learned rules (accumulates)
-## Errors                      <- failure lessons (compact)
+History: one \`## YYYY-MM-DD-HHmm | summary\` entry per run, above older ones. Detail only important events.
 
-# History                      <- timeline (newest first)
-## YYYY-MM-DD-HHmm | summary   <- one entry per run
-### details heading            <- optional, for important events
-\`\`\`
+Update memory after the work, before you report. Use edit for routine updates, so the rest of the file stays untouched; use write only to create or fully restructure. Record what helps future runs — discoveries, pattern changes, error fixes. Remove obsolete fields.
 
-**\`# now\`** holds your current state. Use \`- key: value\` format, one field per line.
-Each field is one fact. Each line is independently editable.
+Archives: \`memory.md\` → \`memory/\` (compaction snapshots) → \`memory/run/\` (raw logs; grep, never read whole). The host archives the oldest History entries past 100 KB; \`# now\` is never moved automatically.
 
-- **\`## State | description\`** — counters, current status, last result. The \`| description\`
-  is your one-line summary of the current situation.
-- **\`## [Entity Name]\`** — per-entity tracking when you monitor several items.
-- **\`## Patterns\`** — learned rules that improve future runs.
-- **\`## Errors\`** — what went wrong and the fix that worked.
-
-**\`# History\`** is your timeline, newest first.
-
-- Add one \`## YYYY-MM-DD-HHmm | summary\` entry per run, above the previous entries.
-- Important events get a \`###\` sub-heading with details. Routine runs need one line.
-
-### When to Update
-
-Update memory **after finishing the work, before reporting**. This is required.
-
-Workflow: receive task -> do work -> compare results with memory -> update memory -> report.
-
-- **Every run**: update the State fields that changed and the \`| description\`.
-- **When you learn something new**: add a line to Patterns or Errors.
-- **When tracking a new entity**: add a \`##\` section under \`# now\`.
-- **When a field is obsolete**: remove it.
-
-Record what helps future runs. Important discoveries, pattern changes, and error
-resolutions deserve detail. An unchanged routine check can be a single line.
-
-### How to Update
-
-Use edit for routine updates, so the rest of the file is untouched:
-
-\`\`\`
-edit(memory.md, "- current_price: 1199", "- current_price: 1099")
-edit(memory.md, "## State | old description", "## State | new description")
-\`\`\`
-
-Use write only for the first creation or a full restructure.
-
-### Archives
-
-Access by priority: \`memory.md\` -> \`memory/\` -> \`memory/run/\` — coarse to fine.
-
-- **\`memory.md\`** — always start here.
-- **\`memory/\`** — compaction archives: past snapshots of your working memory.
-- **\`memory/run/\`** — raw run logs. You rarely need them; filter with grep, never read whole.
-
-### Growth and Consolidation
-
-Keep \`# now\` compact. Consolidate a section once it passes about 20 lines: merge
-related Patterns into general rules, delete Patterns that proved wrong, and drop
-obsolete fields. When \`memory_status\` reports that compaction is needed, call
-\`memory_compact\` to archive the file, then rewrite \`# now\` from the archive.
-\`memory_compact\` with \`scope: "history"\` archives only the timeline.
-
-The host moves the oldest \`# History\` entries into \`memory/\` once the file passes
-100 KB, so the timeline maintains itself. \`# now\` is never moved automatically:
-only you may drop working memory.
+Keep \`# now\` under about 20 lines per section. Consolidate when a section grows: merge related Patterns, delete wrong ones, drop obsolete fields. When \`memory_status\` says compaction is needed, call \`memory_compact\`, then rewrite \`# now\` from the archive.
 `.trim()
 
 /**
