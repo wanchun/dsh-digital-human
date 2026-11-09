@@ -36,6 +36,20 @@ export interface RequirementDir {
 /** Directory under the requirement root that holds one directory per requirement. */
 export const REQUIREMENTS_DIR = 'reqs'
 
+/**
+ * Files a requirement keeps in its own root.
+ *
+ * Everything else belongs in a folder: material in `files/`, analysis products in
+ * `analysis/`, design work in `design/`, and conclusion evidence in `nodes/`.
+ */
+export const PROTOCOL_FILES = ['meta.json', 'params.md', 'state.json', 'brief.md', 'progress.md'] as const
+
+/** The file names the protocol reserves, for a constant-time lookup. */
+const PROTOCOL_FILE_SET = new Set<string>(PROTOCOL_FILES)
+
+/** Folders the scaffold creates on day one, so every product has an obvious home. */
+const SCAFFOLD_DIRS = ['files', 'nodes'] as const
+
 /** Directory under the requirement root that holds archived requirements and their index. */
 export const ARCHIVE_DIR = '_archive'
 
@@ -170,7 +184,32 @@ export function createRequirement(
     '',
   ].join('\n')
   writeFileSync(join(path, 'params.md'), params, 'utf8')
+  // The two landing folders every role shares. `analysis/` and `design/` are not
+  // created here: their owners write them, and an empty folder would only invite
+  // someone else to put a file in it.
+  for (const folder of SCAFFOLD_DIRS) mkdirSync(join(path, folder), { recursive: true })
   return { dir, path, metaPath }
+}
+
+/**
+ * List the files that sit in a requirement's root but do not belong there.
+ *
+ * The root holds protocol files only. This is a read for tests and for a manual
+ * health check: it never moves a file and blocks no write, so a misplaced document
+ * is reported where it is instead of being deleted or silently relocated.
+ *
+ * Directories are not violations — the scaffold and the role folders live at the
+ * root on purpose. A name that starts with a dot is skipped: it is an OS or editor
+ * artifact, not a requirement document.
+ *
+ * @param dirPath - the requirement directory to inspect.
+ * @returns the offending file names, sorted; empty when the root is clean.
+ */
+export function layoutViolations(dirPath: string): string[] {
+  return readdirSync(dirPath, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith('.') && !PROTOCOL_FILE_SET.has(entry.name))
+    .map((entry) => entry.name)
+    .sort()
 }
 
 /** The person a requirement was filed for, as `meta.json` records them. */

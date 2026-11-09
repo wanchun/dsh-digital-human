@@ -1,5 +1,5 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -7,8 +7,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   archiveRequirement,
   attachFile,
+  createRequirement,
   findArchivedRequirementDir,
   findRequirementDir,
+  layoutViolations,
   phaseOf,
   readArchivedRequirementDirs,
   readRequirementDirs,
@@ -59,6 +61,31 @@ describe('requirement directory metadata', () => {
   it('answers an empty map without a requirement root', () => {
     expect(readRequirementDirs(undefined).size).toBe(0)
     expect(readRequirementDirs(join(root, 'absent')).size).toBe(0)
+  })
+})
+describe('requirement layout', () => {
+  it('creates the protocol files and the two landing folders, and nothing else', () => {
+    const created = createRequirement(root, { thread: 'REQ-LAYOUT', name: '分层校验' })
+    expect(readdirSync(created.path).sort()).toEqual(['files', 'meta.json', 'nodes', 'params.md'].sort())
+    // The role folders are written by their owners, not by the scaffold.
+    expect(existsSync(join(created.path, 'analysis'))).toBe(false)
+    expect(existsSync(join(created.path, 'design'))).toBe(false)
+  })
+
+  it('reports a misplaced document at the root and accepts the protocol files', async () => {
+    const created = createRequirement(root, { thread: 'REQ-CLEAN', name: '干净目录' })
+    expect(layoutViolations(created.path)).toEqual([])
+    // A protocol file and a folder are both in place.
+    await writeFile(join(created.path, 'state.json'), '{}')
+    await mkdir(join(created.path, 'files', 'srs'), { recursive: true })
+    expect(layoutViolations(created.path)).toEqual([])
+    // Material left in the root is the violation the check exists for.
+    await writeFile(join(created.path, 'SRS.md'), 'x')
+    await writeFile(join(created.path, '原型.png'), 'x')
+    await writeFile(join(created.path, '.DS_Store'), 'x')
+    const violations = layoutViolations(created.path)
+    expect(violations).toHaveLength(2)
+    expect(violations).toEqual(expect.arrayContaining(['SRS.md', '原型.png']))
   })
 })
 describe('requirement trigger', () => {
