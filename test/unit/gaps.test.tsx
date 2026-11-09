@@ -94,6 +94,7 @@ const post = (value: unknown) => new Request('http://127.0.0.1:3080/api/digital-
 describe('platform options', () => {
   it('extends the renderer allow-list from the plugin config', async () => {
     const platform = makeCtx()
+    rmSync('/tmp/dh-opt', { recursive: true, force: true })
     await applyPlatform(platform.ctx, { home: '/tmp/dh-opt', humans: SEED_HUMANS, platformVariables: ['tenant', 7, ''] })
     const definition = [...platform.presets.values()][0]
     const prefix = definition.plugins[0].config.prefix
@@ -109,6 +110,7 @@ describe('platform options', () => {
 
   it('accepts a custom preset and tools plugin name', async () => {
     const platform = makeCtx()
+    rmSync('/tmp/dh-opt2', { recursive: true, force: true })
     await applyPlatform(platform.ctx, { home: '/tmp/dh-opt2', humans: SEED_HUMANS, basePreset: 'minimal', toolsPlugin: '@x/tools', permissionPreset: 'read-only' })
     const definition = [...platform.presets.values()][0]
     expect(definition.plugins.at(-1).name).toBe('@x/tools')
