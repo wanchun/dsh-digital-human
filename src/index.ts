@@ -679,6 +679,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     home,
     /** Which digital human and conversation a session belongs to, if any. */
     ownerOf: (sessionId: string, humanId?: string) => chat.ownerOf(sessionId, humanId),
+    /** The Session one trigger person's chat already runs in, if any. */
+    chatTarget: (humanId: string, chatId: string) => chat.sessionForChat(humanId, chatId),
     store,
     chat,
     presetIdOf,
@@ -732,9 +734,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
      */
     async send(
       idOrName: string,
-      { conversationId, sessionId, message, from, fromSession, mode, taskId, note, deadline, deliveryMode }: {
+      { conversationId, sessionId, triggerChat, message, from, fromSession, mode, taskId, note, deadline, deliveryMode }: {
         conversationId?: string
         sessionId?: string
+        /** The trigger person's chat id, for a chat-keyed record. */
+        triggerChat?: string
         message?: string
         from?: string
         fromSession?: string
@@ -755,6 +759,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       const delivery = {
         conversationId,
         sessionId,
+        ...(triggerChat ? { triggerChat } : {}),
         message,
         from,
         // The caller's own Session rides along, so the answer can come back to it.

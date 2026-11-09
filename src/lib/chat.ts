@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+import { sessionForChat } from './im.js'
 import { peerSource } from './peer-source.js'
 import { conversationSlug } from './slug.js'
 import type { HumanStore } from './store.js'
@@ -754,8 +755,26 @@ export class HumanChat {
    *
    * @returns the Session id and the conversation name it belongs to, if any.
    */
-  async #resolve(human, { conversationId, sessionId }, presetId) {
+  async #resolve(human, { conversationId, sessionId, triggerChat }, presetId) {
     const text = String(sessionId ?? conversationId ?? '').trim()
+    // A chat-keyed record serves people, not threads, and the person who filed the
+    // requirement is the address. The Session the platform already opened for that
+    // chat answers; a chat nobody has written from yet has no Session, and guessing
+    // one would deliver the question to whoever wrote last.
+    if (human.sessionKey === 'chat' && String(triggerChat ?? '').trim()) {
+      const conversation = requireConversation(triggerChat)
+      const resolved = typeof sessionId === 'string' && sessionId.trim()
+        ? sessionId.trim()
+        : await this.#sessionOfChat(human, conversation)
+      if (resolved === undefined) {
+        throw new Error(
+          `no Session for trigger chat "${conversation}" of ${human.id}: `
+          + 'nobody has written from that chat yet, and an unknown address is never guessed',
+        )
+      }
+      this.#bySession.set(resolved, { humanId: human.id, conversationId: conversation })
+      return { sessionId: resolved, conversation }
+    }
     if (isSessionAddress(text)) {
       // "Passed an id that exists → use it; passed one that does not → a new one."
       const named = conversationId === undefined ? undefined : requireConversation(conversationId)
@@ -790,20 +809,36 @@ export class HumanChat {
       if (typeof existing === 'string') {
         return { sessionId: existing, conversation: DEFAULT_CONVERSATION }
       }
-      // A front-desk record talks to people, and its chats are named per person
-      // (an IM address, a workspace thread); none of them is called `main`. The
-      // newest one is the conversation this person is in right now, so a peer's
-      // question lands there instead of opening a Session named after a thread.
-      const chats = await this.#index(human.id)
-      const newest = Object.entries(chats)
-        .filter(([name, id]) => typeof id === 'string' && name !== DEFAULT_CONVERSATION)
-        .pop()
-      if (newest !== undefined) return { sessionId: newest[1] as string, conversation: newest[0] }
+      // No trigger chat and no default: name the conversation the caller passed.
+      // The newest index entry is deliberately not an answer — it is a heuristic,
+      // and it delivered a question to whoever happened to write last.
       const chatName = requireConversation(text)
       return { sessionId: await this.ensureSession(human, chatName, presetId), conversation: chatName }
     }
     const conversation = requireConversation(text)
     return { sessionId: await this.ensureSession(human, conversation, presetId), conversation }
+  }
+
+  /**
+   * The Session one chat id already runs in, or undefined.
+   *
+   * A chat-keyed peer is addressed by the person's chat, never by a Session id from
+   * memory. The index may already name the chat; otherwise the IM integration's own
+   * state says which Session the platform opened for it.
+   */
+  async sessionForChat(humanId, chatId) {
+    const human = await this.#store.get(humanId)
+    if (!human) return undefined
+    return this.#sessionOfChat(human, chatId)
+  }
+
+  /** The Session recorded for one chat id: the index first, the IM state second. */
+  async #sessionOfChat(human, chatId) {
+    const wanted = String(chatId ?? '').trim()
+    if (!wanted) return undefined
+    const filed = (await this.#index(human.id))[wanted]
+    if (typeof filed === 'string') return filed
+    return sessionForChat(this.#store.home, human.im?.botId, wanted)
   }
 
   /** The conversation name a recorded Session was filed under, if any. */
@@ -969,9 +1004,11 @@ export class HumanChat {
    */
   async deliver(
     human: Human,
-    { conversationId, sessionId, message, from = 'user', fromSession, presetId, deliveryMode }: {
+    { conversationId, sessionId, triggerChat, message, from = 'user', fromSession, presetId, deliveryMode }: {
       conversationId?: string
       sessionId?: string
+      /** The trigger person's chat id, for a chat-keyed record. */
+      triggerChat?: string
       message?: string
       from?: string
       fromSession?: string
@@ -988,16 +1025,18 @@ export class HumanChat {
     // name still rides the message, so both sides keep the subject's label.
     const label = single ? (String(conversationId ?? '').trim() || DEFAULT_CONVERSATION) : conversationId
     // A front-desk record serves people in the chat they are already in. A peer
-    // that quotes a requirement — and the edge that remembers which Session
-    // answered it — must not steer the message into a thread-shaped Session: the
-    // person would have to find a second window to read one answer. Dropping both
-    // addresses here sends resolution through the record's own chat.
+    // that quotes a requirement — or an edge that remembers which Session answered
+    // it — must not steer the message into a thread-shaped Session: the person
+    // would have to find a second window to read one answer. Only the trigger
+    // person's chat is an address here.
     const chatKeyed = human.sessionKey === 'chat'
+    const trigger = chatKeyed ? String(triggerChat ?? '').trim() || undefined : undefined
     const target = await this.#resolve(human, {
       conversationId: chatKeyed
-        ? undefined
+        ? trigger
         : single && sessionId === undefined ? DEFAULT_CONVERSATION : conversationId,
       sessionId: chatKeyed ? undefined : sessionId,
+      triggerChat: trigger,
     }, presetId)
     const conversation = single ? label : target.conversation
     // Name a conversation the moment it opens: only a peer-only record (no bot of

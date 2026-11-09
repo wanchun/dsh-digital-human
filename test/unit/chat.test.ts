@@ -1028,3 +1028,64 @@ describe('requirement workspace', () => {
     expect(controller.created[0].cwd).toBeUndefined()
   })
 })
+
+describe('chat-keyed delivery', () => {
+  const parents: string[] = []
+
+  afterEach(() => {
+    for (const parent of parents.splice(0)) rmSync(parent, { recursive: true, force: true })
+  })
+
+  /** A registry under its own temp parent, so the IM state sits in a temp root. */
+  async function imSetup(chatId = 'wohR_trigger', session = 'session-chat-1') {
+    const parent = mkdtempSync(join(tmpdir(), 'dh-chat-im-'))
+    parents.push(parent)
+    const registry = new HumanStore(join(parent, 'registry'))
+    const botId = 'wecom_test'
+    const stateDir = join(parent, 'integrations', 'dsh-wecom', 'bots', botId)
+    mkdirSync(stateDir, { recursive: true })
+    writeFileSync(join(stateDir, 'state.json'), JSON.stringify({
+      sessions: { ['direct:' + chatId]: session },
+    }))
+    const record = human({ sessionKey: 'chat', im: { botId, targetId: '' } })
+    await registry.write([record])
+    return { registry, record }
+  }
+
+  it('delivers into the Session the trigger chat already runs in', async () => {
+    const { registry, record } = await imSetup()
+    const controller = controllerStub()
+    await controller.create({ sessionId: 'session-chat-1' })
+    const chat = new HumanChat({ sessionController: controller } as any, registry, () => {})
+    const delivered = await chat.deliver(record, { message: 'question', triggerChat: 'wohR_trigger' })
+    expect(delivered).toMatchObject({ sessionId: 'session-chat-1', conversationId: 'wohR_trigger' })
+    expect(controller.prompted[0].sessionId).toBe('session-chat-1')
+    // No second Session was opened: the person reads one window.
+    expect(controller.created).toHaveLength(1)
+  })
+
+  it('refuses a chat with no Session instead of taking the newest conversation', async () => {
+    const { registry, record } = await imSetup('wohR_trigger', 'session-chat-1')
+    // A newer, unrelated conversation is in the index. It is not an address.
+    writeFileSync(registry.sessionIndexPath('pm'), JSON.stringify({ 'REQ-OLD': 'session-old' }))
+    const controller = controllerStub()
+    const chat = new HumanChat({ sessionController: controller } as any, registry, () => {})
+    await expect(chat.deliver(record, { message: 'question', triggerChat: 'wohR_nobody' }))
+      .rejects.toThrow(/no Session for trigger chat/)
+    expect(controller.prompted).toHaveLength(0)
+  })
+
+  it('reads the chat the index already filed under its id', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dh-chat-im-'))
+    parents.push(parent)
+    const registry = new HumanStore(join(parent, 'registry'))
+    const record = human({ sessionKey: 'chat' })
+    await registry.write([record])
+    writeFileSync(registry.sessionIndexPath('pm'), JSON.stringify({ wohR_trigger: 'session-chat-9' }))
+    const controller = controllerStub()
+    await controller.create({ sessionId: 'session-chat-9' })
+    const chat = new HumanChat({ sessionController: controller } as any, registry, () => {})
+    const delivered = await chat.deliver(record, { message: 'question', triggerChat: 'wohR_trigger' })
+    expect(delivered).toMatchObject({ sessionId: 'session-chat-9', conversationId: 'wohR_trigger' })
+  })
+})

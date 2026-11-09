@@ -128,7 +128,7 @@ export interface CreatedRequirement {
  */
 export function createRequirement(
   root: string,
-  input: { thread: string; name: string; subsystems?: Array<Record<string, string>> },
+  input: { thread: string; name: string; subsystems?: Array<Record<string, string>>; trigger?: { name?: string; chatId?: string } },
 ): CreatedRequirement {
   const thread = String(input.thread || '').trim()
   const name = String(input.name || '').trim()
@@ -139,7 +139,19 @@ export function createRequirement(
   const path = join(root, REQUIREMENTS_DIR, dir)
   mkdirSync(path, { recursive: true })
   const metaPath = join(path, 'meta.json')
-  const meta = { thread, name, createdAt: new Date().toISOString(), subsystems: input.subsystems ?? [] }
+  const trigger = {
+    ...(input.trigger?.name ? { name: String(input.trigger.name).trim() } : {}),
+    ...(input.trigger?.chatId ? { chatId: String(input.trigger.chatId).trim() } : {}),
+  }
+  const meta = {
+    thread,
+    name,
+    createdAt: new Date().toISOString(),
+    subsystems: input.subsystems ?? [],
+    // Who filed it: the one person a front-desk record must reach. Filled at intake
+    // and read back when a peer's question has to land in that person's chat.
+    ...(Object.keys(trigger).length > 0 ? { trigger } : {}),
+  }
   writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n', 'utf8')
   const rows = (input.subsystems ?? []).map((row) =>
     `| ${row.subsystem ?? ''} | ${row.version ?? ''} | ${row.deployBranch ?? ''} | ${row.env ?? ''} |`)
@@ -148,6 +160,7 @@ export function createRequirement(
     '',
     `- 需求名称：${name}`,
     `- 线程名：${thread}`,
+    `- 触发人：${trigger.name ?? '待补充'}${trigger.chatId ? `（${trigger.chatId}）` : ''}`,
     '',
     '## 子系统参数',
     '',
@@ -158,6 +171,37 @@ export function createRequirement(
   ].join('\n')
   writeFileSync(join(path, 'params.md'), params, 'utf8')
   return { dir, path, metaPath }
+}
+
+/** The person a requirement was filed for, as `meta.json` records them. */
+export interface RequirementTrigger {
+  name?: string
+  /** The IM chat the trigger person answers, and the address a chat-keyed peer uses. */
+  chatId?: string
+}
+
+/**
+ * Read the trigger person one requirement's `meta.json` records.
+ *
+ * The chat key addresses a peer by the person who filed the requirement, so this is
+ * the only address a chat-keyed delivery has. A missing or malformed file reads as
+ * "no trigger": the caller refuses the send instead of guessing a chat.
+ */
+export function readRequirementTrigger(dirPath: string): RequirementTrigger {
+  let parsed: any
+  try {
+    parsed = JSON.parse(readFileSync(join(dirPath, 'meta.json'), 'utf8'))
+  } catch {
+    return {}
+  }
+  const trigger = parsed?.trigger
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return {}
+  const name = typeof trigger.name === 'string' ? trigger.name.trim() : ''
+  const chatId = typeof trigger.chatId === 'string' ? trigger.chatId.trim() : ''
+  return {
+    ...(name ? { name } : {}),
+    ...(chatId ? { chatId } : {}),
+  }
 }
 
 /** The phase a requirement is in: derived from its nodes, never stored. */

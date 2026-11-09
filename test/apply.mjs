@@ -284,7 +284,7 @@ await scope.tools.get('digital_human_send')
 check('a send without expect_receipt carries no receipt request',
   !platform.prompts.at(-1).content[0].text.includes('完成后请用 digital_human_send 回执给我'))
 await scope.tools.get('digital_human_send')
-  .execute({ to: 'pm-assistant', message: '【回执】REQ-1 done', session_id: outbound.sessionId, requirement: 'REQ-1' })
+  .execute({ to: 'pm-assistant', message: '【回执】REQ-1 done', requirement: 'REQ-1' })
 check('a receipt carries no receipt request of its own',
   !platform.prompts.at(-1).content[0].text.includes('完成后请用 digital_human_send 回执给我'))
 check('send refuses a dispatch that carries steps, commands or cautions',

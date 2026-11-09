@@ -12,6 +12,7 @@ import {
   phaseOf,
   readArchivedRequirementDirs,
   readRequirementDirs,
+  readRequirementTrigger,
   readState,
   renderDigest,
   restoreRequirement,
@@ -58,6 +59,23 @@ describe('requirement directory metadata', () => {
   it('answers an empty map without a requirement root', () => {
     expect(readRequirementDirs(undefined).size).toBe(0)
     expect(readRequirementDirs(join(root, 'absent')).size).toBe(0)
+  })
+})
+describe('requirement trigger', () => {
+  it('reads the trigger person and chat id from meta.json', async () => {
+    await meta('组织基线验证-20261102', JSON.stringify({
+      thread: 'qs-org-baseline-verify-20261102',
+      name: '组织基线验证',
+      trigger: { name: '万纯', chatId: 'wohR_trigger' },
+    }))
+    expect(readRequirementTrigger(join(root, 'reqs', '组织基线验证-20261102')))
+      .toEqual({ name: '万纯', chatId: 'wohR_trigger' })
+  })
+
+  it('reads no trigger from a missing or plain meta.json', async () => {
+    expect(readRequirementTrigger(join(root, 'reqs', 'absent'))).toEqual({})
+    await meta('half', JSON.stringify({ thread: 't-only', name: '名字' }))
+    expect(readRequirementTrigger(join(root, 'reqs', 'half'))).toEqual({})
   })
 })
 describe('derived phase', () => {
