@@ -790,6 +790,15 @@ export class HumanChat {
       if (typeof existing === 'string') {
         return { sessionId: existing, conversation: DEFAULT_CONVERSATION }
       }
+      // A front-desk record talks to people, and its chats are named per person
+      // (an IM address, a workspace thread); none of them is called `main`. The
+      // newest one is the conversation this person is in right now, so a peer's
+      // question lands there instead of opening a Session named after a thread.
+      const chats = await this.#index(human.id)
+      const newest = Object.entries(chats)
+        .filter(([name, id]) => typeof id === 'string' && name !== DEFAULT_CONVERSATION)
+        .pop()
+      if (newest !== undefined) return { sessionId: newest[1] as string, conversation: newest[0] }
       const chatName = requireConversation(text)
       return { sessionId: await this.ensureSession(human, chatName, presetId), conversation: chatName }
     }
