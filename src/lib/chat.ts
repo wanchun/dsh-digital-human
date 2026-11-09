@@ -987,9 +987,17 @@ export class HumanChat {
     // A shared-session record ignores the thread name when choosing its Session; the
     // name still rides the message, so both sides keep the subject's label.
     const label = single ? (String(conversationId ?? '').trim() || DEFAULT_CONVERSATION) : conversationId
+    // A front-desk record serves people in the chat they are already in. A peer
+    // that quotes a requirement — and the edge that remembers which Session
+    // answered it — must not steer the message into a thread-shaped Session: the
+    // person would have to find a second window to read one answer. Dropping both
+    // addresses here sends resolution through the record's own chat.
+    const chatKeyed = human.sessionKey === 'chat'
     const target = await this.#resolve(human, {
-      conversationId: single && sessionId === undefined ? DEFAULT_CONVERSATION : conversationId,
-      sessionId,
+      conversationId: chatKeyed
+        ? undefined
+        : single && sessionId === undefined ? DEFAULT_CONVERSATION : conversationId,
+      sessionId: chatKeyed ? undefined : sessionId,
     }, presetId)
     const conversation = single ? label : target.conversation
     // Name a conversation the moment it opens: only a peer-only record (no bot of
