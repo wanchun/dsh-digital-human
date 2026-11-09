@@ -711,7 +711,13 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         // name is the requirement's own thread, so the lookup is scoped to it.
         const address = await addressOf(service, humanId, peer, {
           conversationId: typeof args.conversation_id === 'string' ? conversation : undefined,
-          sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
+          // A requirement names its own conversation, and that name alone decides
+          // which Session of the peer answers: a remembered id belongs to whichever
+          // thread it was minted for, so honouring it here would deliver this
+          // requirement's work into another requirement's Session. The name wins.
+          sessionId: requirement !== undefined || typeof args.session_id !== 'string'
+            ? undefined
+            : args.session_id,
           exec,
         })
         // A requirement always names its own thread, so a send that found no edge

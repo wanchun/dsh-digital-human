@@ -476,11 +476,21 @@ describe('the chat tools', () => {
     expect(service.calls.filter((entry) => entry.method === 'send')[1].args[1].deadline).toBeUndefined()
   })
 
-  it('passes a Session address through as the address', async () => {
+  it('drops a Session address when the send names a requirement', async () => {
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
     await send.execute({ to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBe('session-them-1')
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
+  })
+
+  it('lets the requirement thread outrank a remembered Session id', async () => {
+    // A remembered id belongs to the thread it was minted for; the requirement that
+    // names this send decides which Session answers, or the work lands in another
+    // requirement's Session.
+    const service = serviceStub()
+    const send = toolOf(build(service), 'digital_human_send')
+    await send.execute({ to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ })
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
   })
 
   it('ignores a Session address that is not a string', async () => {
@@ -514,13 +524,11 @@ describe('the chat tools', () => {
       .toMatchObject({ dir: 'out', selfSession: 'session-me-1', peer: 'dev', peerSession: 'session-pm-work' })
   })
 
-  it('lets an explicit Session address win over the edge', async () => {
-    const service = serviceStub({
-      threadTarget: async () => { throw new Error('must not be asked when an address is given') },
-    })
+  it('lets the requirement thread win over an explicit Session address', async () => {
+    const service = serviceStub()
     await toolOf(build(service), 'digital_human_send')
       .execute({ to: 'dev', message: 'x', session_id: 'session-them-2', requirement: REQ })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBe('session-them-2')
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
   })
 
   it('refuses to reach a digital human outside the declared peers', async () => {
@@ -717,10 +725,10 @@ describe('the chat tools', () => {
     expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
   })
 
-  it('accepts a Session address in place of the conversation', async () => {
+  it('names the requirement conversation even when a Session address is passed', async () => {
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({ to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBe('session-them-1')
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].conversationId).toBe(REQ)
   })
 
   it('refuses an unknown peer, a self-send and an empty target', async () => {
