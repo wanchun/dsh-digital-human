@@ -99,9 +99,9 @@ describe('project list', () => {
     })
     const body = readFileSync(listPath(), 'utf8')
     expect(body).toContain('# 需求清单')
-    expect(body).toContain('| 需求名 | 线程名 | 触发人 | 日期 |')
+    expect(body).toContain('| 需求名 | 线程名 | 状态 | 日期 |')
     const row = body.split('\n').find((line) => line.startsWith('| 需求一'))
-    expect(row).toMatch(/^\| 需求一 \| REQ-ONE \| 万纯 \| \d{4}-\d{2}-\d{2} \|$/)
+    expect(row).toMatch(/^\| 需求一 \| REQ-ONE \| 已建档 \| \d{4}-\d{2}-\d{2} \|$/)
   })
 
   it('adds a row per requirement without repeating the header', () => {
@@ -119,9 +119,9 @@ describe('project list', () => {
     expect(readFileSync(listPath(), 'utf8').match(/\| REQ-ONE \|/g)).toHaveLength(1)
   })
 
-  it('records the trigger chat id when the trigger has no name', () => {
+  it('opens the row at 已建档, the state a person scans for', () => {
     createRequirement(root, { thread: 'REQ-CHAT', name: '聊天需求', trigger: { chatId: 'wohR_2' } })
-    expect(readFileSync(listPath(), 'utf8')).toContain('| 聊天需求 | REQ-CHAT | wohR_2 |')
+    expect(readFileSync(listPath(), 'utf8')).toContain('| 聊天需求 | REQ-CHAT | 已建档 |')
   })
 })
 describe('requirement trigger', () => {

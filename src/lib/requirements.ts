@@ -60,7 +60,7 @@ export const PROJECT_LIST_FILE = 'project-list.md'
 const PROJECT_LIST_HEADER = [
   '# 需求清单',
   '',
-  '| 需求名 | 线程名 | 触发人 | 日期 |',
+  '| 需求名 | 线程名 | 状态 | 日期 |',
   '|---|---|---|---|',
 ]
 
@@ -204,7 +204,7 @@ export function createRequirement(
   appendProjectRow(root, {
     name,
     thread,
-    trigger: trigger.name ?? trigger.chatId ?? '—',
+    state: '已建档',
     date: new Date().toISOString().slice(0, 10),
   })
   return { dir, path, metaPath }
@@ -218,17 +218,17 @@ export function createRequirement(
  * already names the thread is left alone, so a retry cannot duplicate a row.
  *
  * @param root - the requirement root, which is also the workspace root.
- * @param row - the four cells the row records.
+ * @param row - the four cells the row records: the name, its thread, the state a person scans, and the date.
  */
 function appendProjectRow(
   root: string,
-  row: { name: string; thread: string; trigger: string; date: string },
+  row: { name: string; thread: string; state: string; date: string },
 ): void {
   const path = join(root, PROJECT_LIST_FILE)
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
   if (projectRowExists(existing, row.thread)) return
   const header = existing ? '' : PROJECT_LIST_HEADER.join('\n') + '\n'
-  const line = `| ${cell(row.name)} | ${cell(row.thread)} | ${cell(row.trigger)} | ${row.date} |`
+  const line = `| ${cell(row.name)} | ${cell(row.thread)} | ${cell(row.state)} | ${row.date} |`
   appendFileSync(path, header + line + '\n', 'utf8')
 }
 
