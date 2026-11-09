@@ -1400,7 +1400,19 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // The creation header names the preset the session started with, so this is
   // the normal path. A session may still change preset while it is blank, which
   // the `agent-preset/selected` branch below catches.
+/**
+ * Whether a Session is a subagent task rather than a digital-human conversation.
+ *
+ * The Host stamps every spawned task with the same origin the subagent runtime uses.
+ * A digital-human record never serves one: its rows belong to people and requirements.
+ */
+function isSubagentSession(session: any): boolean {
+  const header = session?.header ?? session
+  return header?.origin === 'subagent'
+}
+
   ctx.on('session/created', (session) => {
+    if (isSubagentSession(session)) return
     grantPermission(session)
     // A session means IM is delivering messages, so anything that failed while it
     // was still starting up can be pushed now. This is the exact signal the retry
@@ -1417,6 +1429,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
   // Mirror each digital human's own turns into its mailbox. Without this the log
   // would hold only what peers sent, and `/chat/messages` could not return a reply.
   ctx.on('session/event', (session, event) => {
+    if (isSubagentSession(session)) return
     const sessionId = session?.id ?? session?.header?.id
     if (typeof sessionId !== 'string') return
     const kind = event?.type
