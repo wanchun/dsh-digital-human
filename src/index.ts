@@ -1381,7 +1381,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     if (!human || human.memory === false || human.memoryScope !== 'session') return decision
     const isTurnStart = decision.messages.some((message) => message?.source?.kind === 'user')
     if (!isTurnStart) return decision
-    const paths = memoryPaths(store, human.id, { scope: 'session', conversation: owner.conversationId })
+    const paths = memoryPaths(store, human.id, {
+      scope: 'session',
+      conversation: owner.conversationId,
+      requirementRoot: human.workspace || join(store.home, 'workspace'),
+    })
     const text = renderMemoryContext(paths)
     if (!text) return decision
     const message = {

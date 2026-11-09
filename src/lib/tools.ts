@@ -482,6 +482,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     const owner = sessionId ? service.ownerOf?.(sessionId) : undefined
     return memoryPaths(service.store, humanId, {
       scope: 'session',
+      requirementRoot: requirementRoot(await self()),
       ...(owner?.humanId === humanId && owner?.conversationId ? { conversation: owner.conversationId } : {}),
     })
   }

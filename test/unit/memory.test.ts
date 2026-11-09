@@ -474,6 +474,48 @@ describe('session memory scope', () => {
     expect(context).toMatch(/omitted/)
   })
 
+  it('names the thread and the requirement on the shard first line', () => {
+    const requirementRoot = join(home, 'workspace')
+    const dir = join(requirementRoot, 'reqs', '需求一-20260101')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '需求一' }))
+    const paths = memoryPaths(store, 'pm', { scope: 'session', conversation: 'REQ-1', requirementRoot })
+    renderMemoryContext(paths)
+    expect(readFileSync(paths.file, 'utf8').split('\n')[0]).toBe('线程：REQ-1 ｜ 需求：需求一')
+  })
+
+  it('prepends a missing header once and keeps just the thread when no requirement matches', () => {
+    const requirementRoot = join(home, 'workspace')
+    const dir = join(requirementRoot, 'reqs', '需求一-20260101')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '需求一' }))
+    const paths = memoryPaths(store, 'pm', { scope: 'session', conversation: 'REQ-1', requirementRoot })
+    // A shard written before the header existed keeps its content, with the line added.
+    mkdirSync(join(home, 'humans', 'pm', 'memory'), { recursive: true })
+    writeFileSync(paths.file, '# now\n\n## State | old\n', 'utf8')
+    renderMemoryContext(paths)
+    const content = readFileSync(paths.file, 'utf8')
+    expect(content.split('\n')[0]).toBe('线程：REQ-1 ｜ 需求：需求一')
+    expect(content).toContain('# now')
+    renderMemoryContext(paths)
+    expect(readFileSync(paths.file, 'utf8').match(/线程：/g)).toHaveLength(1)
+    // A chat shard has no requirement, so it names only the thread.
+    const chat = memoryPaths(store, 'pm', { scope: 'session', conversation: 'chat-1', requirementRoot })
+    ensureMemory(chat.file, chat.header)
+    expect(readFileSync(chat.file, 'utf8').split('\n')[0]).toBe('线程：chat-1')
+  })
+
+  it('keeps the mapping line when a shard is compacted', () => {
+    const requirementRoot = join(home, 'workspace')
+    const dir = join(requirementRoot, 'reqs', '需求一-20260101')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify({ thread: 'REQ-1', name: '需求一' }))
+    const paths = memoryPaths(store, 'pm', { scope: 'session', conversation: 'REQ-1', requirementRoot })
+    ensureMemory(paths.file, paths.header)
+    compactMemory(paths)
+    expect(readFileSync(paths.file, 'utf8').split('\n')[0]).toBe('线程：REQ-1 ｜ 需求：需求一')
+  })
+
   it('archives each conversation into its own directory', () => {
     const paths = session('REQ-1')
     ensureMemory(paths.file)

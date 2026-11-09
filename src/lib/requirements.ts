@@ -53,6 +53,17 @@ const SCAFFOLD_DIRS = ['files', 'nodes'] as const
 /** Directory under the requirement root that holds archived requirements and their index. */
 export const ARCHIVE_DIR = '_archive'
 
+/** The workspace-root index of every requirement. A view, written by the tool. */
+export const PROJECT_LIST_FILE = 'project-list.md'
+
+/** Header the tool writes when the requirement list does not exist yet. */
+const PROJECT_LIST_HEADER = [
+  '# 需求清单',
+  '',
+  '| 需求名 | 线程名 | 触发人 | 日期 |',
+  '|---|---|---|---|',
+]
+
 /** Header of the archive index, written once by the first archive. */
 const ARCHIVE_INDEX_HEADER = [
   '| 需求名 | 线程名 | 归档时间 | 节点数 | 最后阶段 |',
@@ -188,7 +199,46 @@ export function createRequirement(
   // created here: their owners write them, and an empty folder would only invite
   // someone else to put a file in it.
   for (const folder of SCAFFOLD_DIRS) mkdirSync(join(path, folder), { recursive: true })
+  // The list is a view of the directories, so creating a directory is what owns the
+  // row. Leaving it to the model is how the two drifted apart.
+  appendProjectRow(root, {
+    name,
+    thread,
+    trigger: trigger.name ?? trigger.chatId ?? '—',
+    date: new Date().toISOString().slice(0, 10),
+  })
   return { dir, path, metaPath }
+}
+
+/**
+ * Append one requirement's row to the workspace list.
+ *
+ * The list is a view, not a second source of truth: a person may add to it, and the
+ * tool only guarantees that every requirement it creates gets its row. A file that
+ * already names the thread is left alone, so a retry cannot duplicate a row.
+ *
+ * @param root - the requirement root, which is also the workspace root.
+ * @param row - the four cells the row records.
+ */
+function appendProjectRow(
+  root: string,
+  row: { name: string; thread: string; trigger: string; date: string },
+): void {
+  const path = join(root, PROJECT_LIST_FILE)
+  const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+  if (projectRowExists(existing, row.thread)) return
+  const header = existing ? '' : PROJECT_LIST_HEADER.join('\n') + '\n'
+  const line = `| ${cell(row.name)} | ${cell(row.thread)} | ${cell(row.trigger)} | ${row.date} |`
+  appendFileSync(path, header + line + '\n', 'utf8')
+}
+
+/** Whether the list already names one thread. */
+function projectRowExists(body: string, thread: string): boolean {
+  return body.split('\n').some((line) => {
+    if (!line.startsWith('|')) return false
+    // The leading and trailing pipes leave an empty cell on each end.
+    return line.split(TABLE_CELL).slice(1, -1).some((value) => value.trim() === thread)
+  })
 }
 
 /**
