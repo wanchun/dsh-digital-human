@@ -36,8 +36,11 @@ afterEach(() => {
 
 /** The two records the tool surface talks about. */
 const people: Record<string, any> = {
-  pm: { id: 'pm', name: '研发PM助手', enabled: true, peers: ['dev'], im: { botId: 'wecom_1', targetId: 'leader' } },
+  pm: { id: 'pm', name: '研发PM助手', enabled: true, peers: ['dev', 'front'], im: { botId: 'wecom_1', targetId: 'leader' } },
   dev: { id: 'dev', name: '开发助手', enabled: true, im: { botId: '', targetId: '' } },
+  // A front-desk record: it serves the person who filed the requirement, so its
+  // address is that person's chat and never a thread name.
+  front: { id: 'front', name: '需求前台', enabled: true, sessionKey: 'chat', im: { botId: 'wecom_1', targetId: '' } },
   off: { id: 'off', name: '停用', enabled: false, im: { botId: '', targetId: '' } },
 }
 
@@ -113,6 +116,12 @@ function serviceStub(overrides: Record<string, unknown> = {}) {
     // a call that gives no address still has to open one.
     threadTarget: async (id: string, options: any) => {
       record('threadTarget', id, options)
+      return undefined
+    },
+    // The trigger-chat lookup a chat-keyed peer needs. Undefined by default: no
+    // Session has been seen for the chat, so a dispatch to one must refuse.
+    chatTarget: async (id: string, chatId: string) => {
+      record('chatTarget', id, chatId)
       return undefined
     },
     noteEdge: async (id: string, edge: any) => { record('noteEdge', id, edge) },
@@ -399,11 +408,11 @@ describe('the chat tools', () => {
     expect(message).toBe(`需求目录：${requirementDir}\n节点：开发\n\nx`)
   })
 
-  it('adds no receipt request on a new handover that names a known Session', async () => {
-    // `session_id` and `mode` no longer imply anything: only the flag decides.
+  it('adds no receipt request on a new handover', async () => {
+    // `mode` does not imply the flag: only `expect_receipt` decides.
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({
-      to: 'dev', message: 'x', session_id: 'session-them-1', mode: 'new', requirement: REQ, node: '自测',
+      to: 'dev', message: 'x', mode: 'new', requirement: REQ, node: '自测',
     })
     const message = service.calls.find((entry) => entry.method === 'send')!.args[1].message
     expect(message).not.toContain('回执给我')
@@ -422,7 +431,7 @@ describe('the chat tools', () => {
     // let two peers ask each other forever, so the caller omits the flag.
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({
-      to: 'dev', message: '【回执】REQ-1 开发完成', session_id: 'session-them-1', requirement: REQ, node: '开发',
+      to: 'dev', message: '【回执】REQ-1 开发完成', requirement: REQ, node: '开发',
     })
     const message = service.calls.find((entry) => entry.method === 'send')!.args[1].message
     expect(message).not.toContain('完成后请用 digital_human_send 回执给我')
@@ -476,59 +485,87 @@ describe('the chat tools', () => {
     expect(service.calls.filter((entry) => entry.method === 'send')[1].args[1].deadline).toBeUndefined()
   })
 
-  it('drops a Session address when the send names a requirement', async () => {
+  it('offers no Session parameter, because a remembered id is not an address', () => {
+    const send = toolOf(build(serviceStub()), 'digital_human_send')
+    expect(send.parameters.properties.session_id).toBeUndefined()
+    expect(send.description).not.toContain('session_id')
+  })
+
+  it('ignores a stray Session address and keeps the requirement thread', async () => {
+    // session_id is gone from the contract. A caller that still passes one gets the
+    // requirement's thread: a remembered id belongs to the thread it was minted for,
+    // so honouring it would deliver this requirement's work somewhere else.
     const service = serviceStub()
     const send = toolOf(build(service), 'digital_human_send')
     await send.execute({ to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
+      .toMatchObject({ conversationId: REQ, sessionId: undefined })
   })
 
-  it('lets the requirement thread outrank a remembered Session id', async () => {
-    // A remembered id belongs to the thread it was minted for; the requirement that
-    // names this send decides which Session answers, or the work lands in another
-    // requirement's Session.
-    const service = serviceStub()
-    const send = toolOf(build(service), 'digital_human_send')
-    await send.execute({ to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
-  })
-
-  it('ignores a Session address that is not a string', async () => {
-    const service = serviceStub()
-    const send = toolOf(build(service), 'digital_human_send')
-    await send.execute({ to: 'dev', message: 'x', session_id: 7, requirement: REQ })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
-  })
-
-  it('reports the Session it delivered into', async () => {
+  it('reports the conversation it delivered into, not a Session id to remember', async () => {
     const service = serviceStub()
     const detail = (await toolOf(build(service), 'digital_human_send')
       .execute({ to: 'dev', message: 'x', requirement: REQ })).detail
-    expect(detail).toContain('session-1')
+    expect(detail).toContain('REQ-1')
+    expect(detail).not.toContain('record that id')
   })
 
-  it('replies into the Session that asked when no address is given', async () => {
-    // The transport knows which Session asked on this thread; the model only says who.
+  it('never lets an edge choose where a dispatch lands', async () => {
+    // Edges record who talked to whom. They are not an address: the requirement's
+    // thread names the Session, so the transport is not even asked.
     const service = serviceStub({
-      threadTarget: async () => ({ sessionId: 'session-pm-work', conversationId: 'REQ-1', via: 'inbound' }),
+      threadTarget: async () => {
+        throw new Error('a dispatch must not resolve an address from an edge')
+      },
     })
-    const send = toolOf(build(service), 'digital_human_send')
-    const result = await send.execute(
+    const result = await toolOf(build(service), 'digital_human_send').execute(
       { to: 'dev', message: 'x', requirement: REQ },
       { agent: { session: { header: { id: 'session-me-1' } } } },
     )
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
-      .toMatchObject({ sessionId: 'session-pm-work', conversationId: 'REQ-1' })
-    expect(result).toMatchObject({ sessionId: 'session-pm-work', conversationId: 'REQ-1' })
-    expect(service.calls.find((entry) => entry.method === 'noteEdge')!.args[1])
-      .toMatchObject({ dir: 'out', selfSession: 'session-me-1', peer: 'dev', peerSession: 'session-pm-work' })
+      .toMatchObject({ conversationId: 'REQ-1', sessionId: undefined })
+    expect(service.calls.some((entry) => entry.method === 'threadTarget')).toBe(false)
+    expect(result).toMatchObject({ conversationId: 'REQ-1' })
   })
 
-  it('lets the requirement thread win over an explicit Session address', async () => {
+  it('addresses a chat-keyed peer by the trigger chat in meta.json', async () => {
+    writeFileSync(join(requirementDir, 'meta.json'), JSON.stringify({
+      thread: REQ, name: REQ_NAME, trigger: { name: '万纯', chatId: 'wohR_trigger' },
+    }))
     const service = serviceStub()
+    const lookups: unknown[][] = []
+    service.chatTarget = async (id: string, chatId: string) => {
+      lookups.push([id, chatId])
+      return 'session-chat-1'
+    }
     await toolOf(build(service), 'digital_human_send')
-      .execute({ to: 'dev', message: 'x', session_id: 'session-them-2', requirement: REQ })
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1].sessionId).toBeUndefined()
+      .execute({ to: 'front', message: 'x', requirement: REQ })
+    expect(lookups).toEqual([['front', 'wohR_trigger']])
+    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
+      .toMatchObject({
+        conversationId: 'wohR_trigger',
+        sessionId: 'session-chat-1',
+        triggerChat: 'wohR_trigger',
+      })
+  })
+
+  it('refuses a chat-keyed peer when the requirement records no trigger', async () => {
+    const service = serviceStub()
+    await expect(toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'front', message: 'x', requirement: REQ }))
+      .rejects.toThrow(/缺触发人/)
+    expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
+  })
+
+  it('refuses a trigger chat that has no Session yet', async () => {
+    writeFileSync(join(requirementDir, 'meta.json'), JSON.stringify({
+      thread: REQ, name: REQ_NAME, trigger: { name: '万纯', chatId: 'wohR_trigger' },
+    }))
+    const service = serviceStub({ chatTarget: async () => undefined })
+    await expect(toolOf(build(service), 'digital_human_send')
+      .execute({ to: 'front', message: 'x', requirement: REQ }))
+      .rejects.toThrow(/聊天会话/)
+    expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
   })
 
   it('refuses to reach a digital human outside the declared peers', async () => {
@@ -639,20 +676,7 @@ describe('the chat tools', () => {
     expect(argsOf('stop')[1]).toBe('session-pm-work')
   })
 
-  it('keeps the named thread when the edge carries none', async () => {
-    const service = serviceStub({
-      threadTarget: async () => ({ sessionId: 'session-pm-work', via: 'inbound' }),
-    })
-    await toolOf(build(service), 'digital_human_send')
-      .execute(
-        { to: 'dev', message: 'x', conversation_id: 'REQ-1', requirement: REQ },
-        { agent: { session: { header: { id: 'session-me-1' } } } },
-      )
-    expect(service.calls.find((entry) => entry.method === 'send')!.args[1])
-      .toMatchObject({ sessionId: 'session-pm-work', conversationId: 'REQ-1' })
-  })
-
-  it('still addresses by conversation when the transport cannot resolve edges', async () => {
+  it('still addresses by the requirement thread when the transport cannot resolve edges', async () => {
     const service = serviceStub({ threadTarget: undefined })
     await toolOf(build(service), 'digital_human_send')
       .execute({ to: 'dev', message: 'x', requirement: REQ })
@@ -725,7 +749,7 @@ describe('the chat tools', () => {
     expect(service.calls.some((entry) => entry.method === 'send')).toBe(false)
   })
 
-  it('names the requirement conversation even when a Session address is passed', async () => {
+  it('keeps the requirement conversation when a stray Session address is passed', async () => {
     const service = serviceStub()
     await toolOf(build(service), 'digital_human_send').execute({ to: 'dev', message: 'x', session_id: 'session-them-1', requirement: REQ })
     expect(service.calls.find((entry) => entry.method === 'send')!.args[1].conversationId).toBe(REQ)

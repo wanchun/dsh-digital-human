@@ -17,7 +17,7 @@ import { basename, join } from 'node:path'
 import { requireConversation } from './chat.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
-import { ARCHIVE_DIR, REQUIREMENTS_DIR, archiveRequirement, attachFile, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
+import { ARCHIVE_DIR, REQUIREMENTS_DIR, archiveRequirement, attachFile, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readRequirementTrigger, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
 import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
 import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
@@ -155,8 +155,7 @@ function receiptLine(thread: string, node: any): string {
  * The caller decides. `expect_receipt: true` says this send hands over work, so the
  * answer is due; every other send carries no line. A receipt, a reply, a
  * cancellation and an amendment all omit it: asking for a receipt in a receipt
- * would let two peers ask each other forever. The tool never infers the flag from
- * `session_id` or `mode`.
+ * would let two peers ask each other forever. The tool never infers the flag from `mode`.
  *
  * The line is part of the message text: it is neither a fact nor context.
  */
@@ -239,20 +238,19 @@ async function threadNames(service, humanId) {
 }
 
 /**
- * The address a call about one peer should use.
+ * The address a read or a stop about one peer should use.
  *
- * An explicit Session id wins. Otherwise the transport's edges decide: the Session
- * that last asked, then the one this Session last wrote to, then the thread's home.
- * A thread nobody has used resolves to nothing, which is what opens it.
+ * The transport's edges decide: the Session that last asked, then the one this
+ * Session last wrote to, then the thread's home. A thread nobody has used resolves
+ * to nothing, which is what opens it. A dispatch never comes here: its requirement
+ * names the thread, and no remembered Session decides where work lands.
  *
  * @returns the address to pass on, with the thread name it belongs to.
  */
-async function addressOf(service, humanId, peer, { conversationId, sessionId, exec }: {
+async function addressOf(service, humanId, peer, { conversationId, exec }: {
   conversationId?: string
-  sessionId?: string
   exec?: unknown
 }) {
-  if (sessionId) return { sessionId, conversationId }
   const selfSession = callerSession(exec)
   // Without the caller's own Session there is nothing to scope an edge to, so the
   // named thread is the only address the call has.
@@ -429,6 +427,29 @@ function requirementConversation(requirement, dir, requested) {
 }
 
 /**
+ * The trigger person's chat, the only address a chat-keyed peer has.
+ *
+ * The requirement's `meta.json` records who filed it. A chat-keyed record serves
+ * that person, so the chat id is the address; a requirement without one is refused
+ * instead of guessing a chat, because the guess would reach the wrong person.
+ *
+ * @param dir - the requirement directory, whose `meta.json` carries the trigger.
+ * @param thread - the requirement's thread name, for the refusal message.
+ * @returns the chat id to address the peer by.
+ * @throws when the requirement records no trigger chat id.
+ */
+function requirementTriggerChat(dir: string, thread: string): string {
+  const chatId = String(readRequirementTrigger(dir).chatId ?? '').trim()
+  if (!chatId) {
+    throw new Error(
+      `digital_human_send refused: 需求 ${JSON.stringify(thread)} 的 meta.json 没有 trigger.chatId（缺触发人）。`
+      + ' 建档时填写触发人的 chatId，再派单；地址推不出来时不猜。',
+    )
+  }
+  return chatId
+}
+
+/**
  * Chat and IM tools for one digital human.
  * @param options.service - the `digitalHumans` Host service.
  * @param options.humanId - the owning digital human.
@@ -461,6 +482,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
     const owner = sessionId ? service.ownerOf?.(sessionId) : undefined
     return memoryPaths(service.store, humanId, {
       scope: 'session',
+      requirementRoot: requirementRoot(await self()),
       ...(owner?.humanId === humanId && owner?.conversationId ? { conversation: owner.conversationId } : {}),
     })
   }
@@ -493,9 +515,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       + 'Delivery is asynchronous, like handing over a task. Set wait_seconds to wait for its reply, '
       + 'then read it with digital_human_messages, or poll with digital_human_status. '
       + 'The conversation is the requirement\'s own thread, shared by every role, so all of a '
-      + 'requirement\'s Sessions file under one requirement node. Omit the address to reply in the '
-      + 'thread this Session already shares with the peer — the transport sends it back to the Session '
-      + 'that asked. Pass session_id to choose a Session. '
+      + 'requirement\'s Sessions file under one requirement node. The requirement is the address: '
+      + 'there is no Session parameter. A peer addressed by a chat reaches the trigger person\'s chat '
+      + 'recorded in the requirement\'s meta.json, and a missing trigger is refused, never guessed. '
       + 'Every send is also a work item: a reply to its running turn amends the item already open, '
       + 'and a new dispatch gets its own. The detail says which it became. '
       + 'Pass expect_receipt: true only when you hand work to a person or a peer and need the result '
@@ -533,8 +555,6 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
           + 'When given it must equal the requirement\'s thread name or its directory name: one requirement '
           + 'runs in one conversation shared by every role, so a role suffix is refused.',
       },
-      // The other form of the same address, for answering the Session that asked.
-      session_id: { type: 'string', description: 'The target Session id to deliver into, as reported by a <dsh_peer_source> block. Use this to answer the Session that asked for the work.' },
       wait_seconds: {
         type: 'number',
         description: `Wait up to this many seconds for the target to finish its turn, at most ${WAIT_MAX_SECONDS}. Defaults to 0 (return as soon as the message is accepted).`,
@@ -706,30 +726,32 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       const addressed: Array<{ peer: any; address: any }> = []
       for (const target of targets) {
         const peer = await resolvePeer(service, me, target)
-        // No address means "the thread this Session is already in": the edges say which
-        // Session of the peer last asked here, and a reply goes back to it. An explicit
-        // name is the requirement's own thread, so the lookup is scoped to it.
-        const address = await addressOf(service, humanId, peer, {
-          conversationId: typeof args.conversation_id === 'string' ? conversation : undefined,
-          // A requirement names its own conversation, and that name alone decides
-          // which Session of the peer answers: a remembered id belongs to whichever
-          // thread it was minted for, so honouring it here would deliver this
-          // requirement's work into another requirement's Session. The name wins.
-          sessionId: requirement !== undefined || typeof args.session_id !== 'string'
-            ? undefined
-            : args.session_id,
-          exec,
-        })
-        // A requirement always names its own thread, so a send that found no edge
-        // still has an address: it opens that requirement's conversation.
-        addressed.push({ peer, address: { sessionId: address.sessionId, conversationId: conversation } })
+        // A requirement-keyed record is addressed by the requirement's thread name.
+        // No remembered Session decides where the work lands: an id belongs to the
+        // thread it was minted for, and honouring one is how a dispatch reached the
+        // wrong requirement. A chat-keyed record is addressed by the trigger person
+        // recorded in the requirement's meta.json, never by the newest Session.
+        if (peer.sessionKey === 'chat') {
+          const chatId = requirementTriggerChat(requirementDir, requirement.thread)
+          const chatSession = await service.chatTarget?.(peer.id, chatId)
+          if (!chatSession) {
+            throw new Error(
+              `digital_human_send refused: ${peer.id} 是聊天键角色，但触发人 ${JSON.stringify(chatId)} `
+              + '还没有与它的聊天会话，地址推不出来。让触发人先给它发一条消息，再派单。',
+            )
+          }
+          addressed.push({ peer, address: { sessionId: chatSession, conversationId: chatId, triggerChat: chatId } })
+          continue
+        }
+        // The requirement always names its own thread, so the address is complete
+        // before any delivery: it opens or reuses that requirement's conversation.
+        addressed.push({ peer, address: { sessionId: undefined, conversationId: conversation } })
       }
       // Same targets, same thread, same words, within a minute: this is a retry of a
       // handover that already landed, not a second piece of work.
       const fingerprint = JSON.stringify([
         [...targets].sort(),
         typeof args.conversation_id === 'string' ? args.conversation_id : null,
-        typeof args.session_id === 'string' ? args.session_id : null,
         mode ?? null,
         deliveryMode,
         note ?? null,
@@ -752,6 +774,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
         const delivered = await service.send(peer.id, {
           conversationId: address.conversationId,
           sessionId: address.sessionId,
+          ...(address.triggerChat ? { triggerChat: address.triggerChat } : {}),
           message,
           from: humanId,
           fromSession,
@@ -815,7 +838,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
             ? `Delivered to ${peer.name} (${peer.id}) and its turn finished. Read the reply with digital_human_messages.`
             : `Delivered to ${peer.name} (${peer.id}). Its reply is not ready; poll with digital_human_status.`)
             + taskLine
-            + ` It runs in ${delivered.sessionId}; record that id to reach the same Session again.`
+            + ` It runs in ${delivered.conversationId}; address it by that conversation next time, not by a remembered Session id.`
             // The transport files every Session under its thread. When it could not,
             // the receipt says so: a silent miss is what left a role's index empty.
             + (delivered.notice ? ` Not filed in the conversation index: ${delivered.notice}.` : ''),

@@ -1,5 +1,5 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -7,11 +7,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   archiveRequirement,
   attachFile,
+  createRequirement,
   findArchivedRequirementDir,
   findRequirementDir,
+  layoutViolations,
   phaseOf,
   readArchivedRequirementDirs,
   readRequirementDirs,
+  readRequirementTrigger,
   readState,
   renderDigest,
   restoreRequirement,
@@ -58,6 +61,84 @@ describe('requirement directory metadata', () => {
   it('answers an empty map without a requirement root', () => {
     expect(readRequirementDirs(undefined).size).toBe(0)
     expect(readRequirementDirs(join(root, 'absent')).size).toBe(0)
+  })
+})
+describe('requirement layout', () => {
+  it('creates the protocol files and the two landing folders, and nothing else', () => {
+    const created = createRequirement(root, { thread: 'REQ-LAYOUT', name: '分层校验' })
+    expect(readdirSync(created.path).sort()).toEqual(['files', 'meta.json', 'nodes', 'params.md'].sort())
+    // The role folders are written by their owners, not by the scaffold.
+    expect(existsSync(join(created.path, 'analysis'))).toBe(false)
+    expect(existsSync(join(created.path, 'design'))).toBe(false)
+  })
+
+  it('reports a misplaced document at the root and accepts the protocol files', async () => {
+    const created = createRequirement(root, { thread: 'REQ-CLEAN', name: '干净目录' })
+    expect(layoutViolations(created.path)).toEqual([])
+    // A protocol file and a folder are both in place.
+    await writeFile(join(created.path, 'state.json'), '{}')
+    await mkdir(join(created.path, 'files', 'srs'), { recursive: true })
+    expect(layoutViolations(created.path)).toEqual([])
+    // Material left in the root is the violation the check exists for.
+    await writeFile(join(created.path, 'SRS.md'), 'x')
+    await writeFile(join(created.path, '原型.png'), 'x')
+    await writeFile(join(created.path, '.DS_Store'), 'x')
+    const violations = layoutViolations(created.path)
+    expect(violations).toHaveLength(2)
+    expect(violations).toEqual(expect.arrayContaining(['SRS.md', '原型.png']))
+  })
+})
+describe('project list', () => {
+  const listPath = () => join(root, 'project-list.md')
+
+  it('creates the list with its header and appends one row', () => {
+    createRequirement(root, {
+      thread: 'REQ-ONE',
+      name: '需求一',
+      trigger: { name: '万纯', chatId: 'wohR_1' },
+    })
+    const body = readFileSync(listPath(), 'utf8')
+    expect(body).toContain('# 需求清单')
+    expect(body).toContain('| 需求名 | 线程名 | 状态 | 日期 |')
+    const row = body.split('\n').find((line) => line.startsWith('| 需求一'))
+    expect(row).toMatch(/^\| 需求一 \| REQ-ONE \| 已建档 \| \d{4}-\d{2}-\d{2} \|$/)
+  })
+
+  it('adds a row per requirement without repeating the header', () => {
+    createRequirement(root, { thread: 'REQ-ONE', name: '需求一' })
+    createRequirement(root, { thread: 'REQ-TWO', name: '需求二' })
+    const lines = readFileSync(listPath(), 'utf8').split('\n')
+    expect(lines.filter((line) => line.startsWith('| 需求名'))).toHaveLength(1)
+    expect(lines.filter((line) => line.includes('| REQ-ONE |'))).toHaveLength(1)
+    expect(lines.filter((line) => line.includes('| REQ-TWO |'))).toHaveLength(1)
+  })
+
+  it('leaves one row when the same requirement is created again', () => {
+    createRequirement(root, { thread: 'REQ-ONE', name: '需求一' })
+    createRequirement(root, { thread: 'REQ-ONE', name: '需求一' })
+    expect(readFileSync(listPath(), 'utf8').match(/\| REQ-ONE \|/g)).toHaveLength(1)
+  })
+
+  it('opens the row at 已建档, the state a person scans for', () => {
+    createRequirement(root, { thread: 'REQ-CHAT', name: '聊天需求', trigger: { chatId: 'wohR_2' } })
+    expect(readFileSync(listPath(), 'utf8')).toContain('| 聊天需求 | REQ-CHAT | 已建档 |')
+  })
+})
+describe('requirement trigger', () => {
+  it('reads the trigger person and chat id from meta.json', async () => {
+    await meta('组织基线验证-20261102', JSON.stringify({
+      thread: 'qs-org-baseline-verify-20261102',
+      name: '组织基线验证',
+      trigger: { name: '万纯', chatId: 'wohR_trigger' },
+    }))
+    expect(readRequirementTrigger(join(root, 'reqs', '组织基线验证-20261102')))
+      .toEqual({ name: '万纯', chatId: 'wohR_trigger' })
+  })
+
+  it('reads no trigger from a missing or plain meta.json', async () => {
+    expect(readRequirementTrigger(join(root, 'reqs', 'absent'))).toEqual({})
+    await meta('half', JSON.stringify({ thread: 't-only', name: '名字' }))
+    expect(readRequirementTrigger(join(root, 'reqs', 'half'))).toEqual({})
   })
 })
 describe('derived phase', () => {

@@ -22,6 +22,7 @@
 
 import { mkdirSync, readFileSync, readdirSync, statSync, renameSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { readRequirementDirs } from './requirements.js'
 import { conversationSlug } from './slug.js'
 
 /** Archive a memory file once it grows past this many bytes. */
@@ -60,6 +61,8 @@ export interface MemoryPathOptions {
   memoryScope?: 'record' | 'session' | string
   conversation?: string
   conversationId?: string
+  /** The requirement root, where the shard's Chinese name is read from meta.json. */
+  requirementRoot?: string
 }
 
 /** The conversation a session-scoped path uses when the caller names none. */
@@ -83,7 +86,8 @@ export function memoryPaths(store, humanId, options: MemoryPathOptions | string 
   const scope = opts.scope ?? opts.memoryScope
   const base = store.dir(humanId)
   if (scope === 'session') {
-    const slug = conversationSlug(opts.conversation ?? opts.conversationId) || DEFAULT_CONVERSATION_SLUG
+    const thread = opts.conversation ?? opts.conversationId
+    const slug = conversationSlug(thread) || DEFAULT_CONVERSATION_SLUG
     // `_shared.md` is a reserved file beside the per-conversation ones; a
     // conversation with that name would overwrite the cross-requirement notes.
     if (slug === '_shared') throw new Error('conversation "_shared" is reserved for shared memory')
@@ -94,6 +98,10 @@ export function memoryPaths(store, humanId, options: MemoryPathOptions | string 
       sharedFile: join(root, '_shared.md'),
       archiveDir: join(root, slug),
       runDir: join(root, slug, 'run'),
+      // The shard names the thread it belongs to and, when a requirement owns that
+      // thread, the requirement name a person reads. The two never share a key, so
+      // the first line is the only place they meet.
+      header: shardHeader(thread, opts.requirementRoot),
     }
   }
   return {
@@ -102,6 +110,24 @@ export function memoryPaths(store, humanId, options: MemoryPathOptions | string 
     archiveDir: join(base, 'memory'),
     runDir: join(base, 'memory', 'run'),
   }
+}
+
+/**
+ * The first line of one memory shard: its thread and, when known, the requirement.
+ *
+ * The requirement directory's `meta.json` is the only place the Chinese name lives.
+ * A shard for a chat has no requirement, and keeps the thread name alone: inventing
+ * a name would make the mapping wrong instead of absent.
+ *
+ * @param thread - the conversation the shard is keyed by.
+ * @param requirementRoot - the requirement root; absent for a record-scoped read.
+ * @returns the header line, or undefined when there is no thread to name.
+ */
+export function shardHeader(thread: string | undefined, requirementRoot?: string): string | undefined {
+  const label = String(thread ?? '').trim()
+  if (!label) return undefined
+  const name = requirementRoot ? readRequirementDirs(requirementRoot).get(label)?.name : undefined
+  return name ? `线程：${label} ｜ 需求：${name}` : `线程：${label}`
 }
 
 /** UTF-8 size of one string. Budgets are bytes because one Chinese character is three. */
@@ -141,11 +167,43 @@ export function readMemory(file) {
   }
 }
 
-/** Create the memory skeleton when the file is absent. */
-export function ensureMemory(file) {
-  if (existsSync(file)) return false
+/**
+ * Create the memory skeleton when the file is absent.
+ *
+ * A session-scoped shard carries a header line naming its thread and requirement.
+ * A file that predates the header gets it prepended once, so the mapping is true
+ * for every shard, not only the ones created after this change.
+ *
+ * @param file - the memory file.
+ * @param header - the shard's first line, when it has one.
+ * @returns whether the file was created or changed.
+ */
+export function ensureMemory(file, header?: string) {
+  const line = String(header ?? '').trim()
+  if (existsSync(file)) return line ? ensureHeaderLine(file, line) : false
   mkdirSync(join(file, '..'), { recursive: true })
-  writeFileSync(file, skeleton(new Date().toISOString().slice(0, 16).replace('T', '-')), 'utf8')
+  const body = skeleton(new Date().toISOString().slice(0, 16).replace('T', '-'))
+  writeFileSync(file, line ? `${line}\n\n${body}` : body, 'utf8')
+  return true
+}
+
+/**
+ * Put the mapping line first, once.
+ *
+ * Existing content is never reordered or trimmed: only a missing header is added.
+ * A file whose first line already names a thread is left alone, so a name a person
+ * corrected by hand survives the next read.
+ */
+function ensureHeaderLine(file: string, line: string): boolean {
+  let content = ''
+  try {
+    content = readFileSync(file, 'utf8')
+  } catch {
+    return false
+  }
+  const first = content.split('\n', 1)[0] ?? ''
+  if (first.startsWith('线程：')) return false
+  writeFileSync(file, `${line}\n\n${content}`, 'utf8')
   return true
 }
 
@@ -403,7 +461,9 @@ export function compactMemory(paths) {
   const stamp = stampNow()
   const target = nextArchivePath(paths, stamp)
   renameSync(paths.file, target)
-  writeFileSync(paths.file, skeleton(stamp), 'utf8')
+  // A fresh shard is still the same shard: it keeps its mapping line.
+  const body = skeleton(stamp)
+  writeFileSync(paths.file, paths.header ? `${paths.header}\n\n${body}` : body, 'utf8')
   return target
 }
 
@@ -554,7 +614,7 @@ export function renderMemoryContext(paths) {
   // Unlike `memory.md`, nobody asked for it by path, so without this the first
   // prompt of a fresh conversation would show an empty memory and the model would
   // have to invent a file before it could record anything.
-  if (paths.scope === 'session' && paths.file) ensureMemory(paths.file)
+  if (paths.scope === 'session' && paths.file) ensureMemory(paths.file, paths.header)
   const snapshot = buildSnapshot(paths)
   const parts = [MEMORY_INSTRUCTIONS, '', '### Memory map', '', renderSnapshot(snapshot), '', '### Pre-loaded `# now`', '']
   if (!snapshot.exists) {
@@ -622,6 +682,8 @@ export interface MemoryPaths {
   archiveDir: string
   /** The shared cross-conversation file; only a session-scoped path has one. */
   sharedFile?: string
+  /** The first line of a session-scoped shard: its thread, and its requirement. */
+  header?: string
   [key: string]: unknown
 }
 

@@ -679,6 +679,8 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     home,
     /** Which digital human and conversation a session belongs to, if any. */
     ownerOf: (sessionId: string, humanId?: string) => chat.ownerOf(sessionId, humanId),
+    /** The Session one trigger person's chat already runs in, if any. */
+    chatTarget: (humanId: string, chatId: string) => chat.sessionForChat(humanId, chatId),
     store,
     chat,
     presetIdOf,
@@ -732,9 +734,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
      */
     async send(
       idOrName: string,
-      { conversationId, sessionId, message, from, fromSession, mode, taskId, note, deadline, deliveryMode }: {
+      { conversationId, sessionId, triggerChat, message, from, fromSession, mode, taskId, note, deadline, deliveryMode }: {
         conversationId?: string
         sessionId?: string
+        /** The trigger person's chat id, for a chat-keyed record. */
+        triggerChat?: string
         message?: string
         from?: string
         fromSession?: string
@@ -755,6 +759,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
       const delivery = {
         conversationId,
         sessionId,
+        ...(triggerChat ? { triggerChat } : {}),
         message,
         from,
         // The caller's own Session rides along, so the answer can come back to it.
@@ -1376,7 +1381,11 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
     if (!human || human.memory === false || human.memoryScope !== 'session') return decision
     const isTurnStart = decision.messages.some((message) => message?.source?.kind === 'user')
     if (!isTurnStart) return decision
-    const paths = memoryPaths(store, human.id, { scope: 'session', conversation: owner.conversationId })
+    const paths = memoryPaths(store, human.id, {
+      scope: 'session',
+      conversation: owner.conversationId,
+      requirementRoot: human.workspace || join(store.home, 'workspace'),
+    })
     const text = renderMemoryContext(paths)
     if (!text) return decision
     const message = {

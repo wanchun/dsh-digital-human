@@ -36,8 +36,33 @@ export interface RequirementDir {
 /** Directory under the requirement root that holds one directory per requirement. */
 export const REQUIREMENTS_DIR = 'reqs'
 
+/**
+ * Files a requirement keeps in its own root.
+ *
+ * Everything else belongs in a folder: material in `files/`, analysis products in
+ * `analysis/`, design work in `design/`, and conclusion evidence in `nodes/`.
+ */
+export const PROTOCOL_FILES = ['meta.json', 'params.md', 'state.json', 'brief.md', 'progress.md'] as const
+
+/** The file names the protocol reserves, for a constant-time lookup. */
+const PROTOCOL_FILE_SET = new Set<string>(PROTOCOL_FILES)
+
+/** Folders the scaffold creates on day one, so every product has an obvious home. */
+const SCAFFOLD_DIRS = ['files', 'nodes'] as const
+
 /** Directory under the requirement root that holds archived requirements and their index. */
 export const ARCHIVE_DIR = '_archive'
+
+/** The workspace-root index of every requirement. A view, written by the tool. */
+export const PROJECT_LIST_FILE = 'project-list.md'
+
+/** Header the tool writes when the requirement list does not exist yet. */
+const PROJECT_LIST_HEADER = [
+  '# 需求清单',
+  '',
+  '| 需求名 | 线程名 | 状态 | 日期 |',
+  '|---|---|---|---|',
+]
 
 /** Header of the archive index, written once by the first archive. */
 const ARCHIVE_INDEX_HEADER = [
@@ -128,7 +153,7 @@ export interface CreatedRequirement {
  */
 export function createRequirement(
   root: string,
-  input: { thread: string; name: string; subsystems?: Array<Record<string, string>> },
+  input: { thread: string; name: string; subsystems?: Array<Record<string, string>>; trigger?: { name?: string; chatId?: string } },
 ): CreatedRequirement {
   const thread = String(input.thread || '').trim()
   const name = String(input.name || '').trim()
@@ -139,7 +164,19 @@ export function createRequirement(
   const path = join(root, REQUIREMENTS_DIR, dir)
   mkdirSync(path, { recursive: true })
   const metaPath = join(path, 'meta.json')
-  const meta = { thread, name, createdAt: new Date().toISOString(), subsystems: input.subsystems ?? [] }
+  const trigger = {
+    ...(input.trigger?.name ? { name: String(input.trigger.name).trim() } : {}),
+    ...(input.trigger?.chatId ? { chatId: String(input.trigger.chatId).trim() } : {}),
+  }
+  const meta = {
+    thread,
+    name,
+    createdAt: new Date().toISOString(),
+    subsystems: input.subsystems ?? [],
+    // Who filed it: the one person a front-desk record must reach. Filled at intake
+    // and read back when a peer's question has to land in that person's chat.
+    ...(Object.keys(trigger).length > 0 ? { trigger } : {}),
+  }
   writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n', 'utf8')
   const rows = (input.subsystems ?? []).map((row) =>
     `| ${row.subsystem ?? ''} | ${row.version ?? ''} | ${row.deployBranch ?? ''} | ${row.env ?? ''} |`)
@@ -148,6 +185,7 @@ export function createRequirement(
     '',
     `- 需求名称：${name}`,
     `- 线程名：${thread}`,
+    `- 触发人：${trigger.name ?? '待补充'}${trigger.chatId ? `（${trigger.chatId}）` : ''}`,
     '',
     '## 子系统参数',
     '',
@@ -157,7 +195,102 @@ export function createRequirement(
     '',
   ].join('\n')
   writeFileSync(join(path, 'params.md'), params, 'utf8')
+  // The two landing folders every role shares. `analysis/` and `design/` are not
+  // created here: their owners write them, and an empty folder would only invite
+  // someone else to put a file in it.
+  for (const folder of SCAFFOLD_DIRS) mkdirSync(join(path, folder), { recursive: true })
+  // The list is a view of the directories, so creating a directory is what owns the
+  // row. Leaving it to the model is how the two drifted apart.
+  appendProjectRow(root, {
+    name,
+    thread,
+    state: '已建档',
+    date: new Date().toISOString().slice(0, 10),
+  })
   return { dir, path, metaPath }
+}
+
+/**
+ * Append one requirement's row to the workspace list.
+ *
+ * The list is a view, not a second source of truth: a person may add to it, and the
+ * tool only guarantees that every requirement it creates gets its row. A file that
+ * already names the thread is left alone, so a retry cannot duplicate a row.
+ *
+ * @param root - the requirement root, which is also the workspace root.
+ * @param row - the four cells the row records: the name, its thread, the state a person scans, and the date.
+ */
+function appendProjectRow(
+  root: string,
+  row: { name: string; thread: string; state: string; date: string },
+): void {
+  const path = join(root, PROJECT_LIST_FILE)
+  const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+  if (projectRowExists(existing, row.thread)) return
+  const header = existing ? '' : PROJECT_LIST_HEADER.join('\n') + '\n'
+  const line = `| ${cell(row.name)} | ${cell(row.thread)} | ${cell(row.state)} | ${row.date} |`
+  appendFileSync(path, header + line + '\n', 'utf8')
+}
+
+/** Whether the list already names one thread. */
+function projectRowExists(body: string, thread: string): boolean {
+  return body.split('\n').some((line) => {
+    if (!line.startsWith('|')) return false
+    // The leading and trailing pipes leave an empty cell on each end.
+    return line.split(TABLE_CELL).slice(1, -1).some((value) => value.trim() === thread)
+  })
+}
+
+/**
+ * List the files that sit in a requirement's root but do not belong there.
+ *
+ * The root holds protocol files only. This is a read for tests and for a manual
+ * health check: it never moves a file and blocks no write, so a misplaced document
+ * is reported where it is instead of being deleted or silently relocated.
+ *
+ * Directories are not violations — the scaffold and the role folders live at the
+ * root on purpose. A name that starts with a dot is skipped: it is an OS or editor
+ * artifact, not a requirement document.
+ *
+ * @param dirPath - the requirement directory to inspect.
+ * @returns the offending file names, sorted; empty when the root is clean.
+ */
+export function layoutViolations(dirPath: string): string[] {
+  return readdirSync(dirPath, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith('.') && !PROTOCOL_FILE_SET.has(entry.name))
+    .map((entry) => entry.name)
+    .sort()
+}
+
+/** The person a requirement was filed for, as `meta.json` records them. */
+export interface RequirementTrigger {
+  name?: string
+  /** The IM chat the trigger person answers, and the address a chat-keyed peer uses. */
+  chatId?: string
+}
+
+/**
+ * Read the trigger person one requirement's `meta.json` records.
+ *
+ * The chat key addresses a peer by the person who filed the requirement, so this is
+ * the only address a chat-keyed delivery has. A missing or malformed file reads as
+ * "no trigger": the caller refuses the send instead of guessing a chat.
+ */
+export function readRequirementTrigger(dirPath: string): RequirementTrigger {
+  let parsed: any
+  try {
+    parsed = JSON.parse(readFileSync(join(dirPath, 'meta.json'), 'utf8'))
+  } catch {
+    return {}
+  }
+  const trigger = parsed?.trigger
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return {}
+  const name = typeof trigger.name === 'string' ? trigger.name.trim() : ''
+  const chatId = typeof trigger.chatId === 'string' ? trigger.chatId.trim() : ''
+  return {
+    ...(name ? { name } : {}),
+    ...(chatId ? { chatId } : {}),
+  }
 }
 
 /** The phase a requirement is in: derived from its nodes, never stored. */

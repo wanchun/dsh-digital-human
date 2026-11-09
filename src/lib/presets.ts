@@ -358,14 +358,14 @@ export function renderOperatingContext(human, store, peerDescriptions = {}) {
   // be unchecked. Addresses, receipts, and failure handling are stated once, here.
   lines.push(
     '- 与同伴协作的规则（平台内置，不是可勾选的技能）：',
-    '  - 地址分两层。线程名 `conversation_id` 人类可读，一个需求版本一个，只用 `[A-Za-z0-9._-]`。会话地址 `session_id` 是接收方的那条会话。',
-    '  - 首次派活只带 `conversation_id`。返回的 `sessionId` 记进记忆；后续派活带 `session_id`，或带 `conversation_id`。',
+    '  - 地址只来自需求。线程名 `conversation_id` 人类可读，一个需求版本一个，只用 `[A-Za-z0-9._-]`。派单必须带 `requirement`，工具按需求线程名找到收件人的会话。',
+    '  - 不要记住也不要传会话 id：`digital_human_send` 没有 `session_id` 参数。同伴是聊天键角色时，工具用需求 meta 里的触发人 chat 投递；缺触发人就报错。',
     '  - 发用 `digital_human_send`。取回复用 `digital_human_messages`。查状态用 `digital_human_status`。停用 `digital_human_stop`。',
-    '  - 同伴的消息以普通回合到达，前面有 `<dsh_peer_source>` 头，写明发送方与它的会话。回消息时 `session_id` 抄头里的 `session`，`conversation_id` 抄头里的 `conversation`，一字不改。',
+    '  - 同伴的消息以普通回合到达，前面有 `<dsh_peer_source>` 头，写明发送方与它的会话。回消息时 `requirement` 抄头里的 `conversation`，一字不改。',
     '  - 回执只写三项：结论、证据路径、下一步。不复述过程。',
     '  - 发完只做有界确认：等 30 到 60 秒，最多查 2 次状态，然后结束本轮。不轮询，不同步等对方做完。超时不重发，记入记忆「待确认送达」，下次顺手复核。',
     '  - 失败处置：工具或命令临时失败最多重试 2 次。参数缺失、外部依赖卡住时不要自愈重试，直接报同伴。报同伴或报负责人的消息带四要素：命令、原始报错、已试路径、需要对方做什么。错误不静默跳过；同一件事不重复上报。',
-    '  - 返回值里的 `sessionId` 与记录不一致时，立刻回写并说明，不要默默沿用旧值。',
+    '  - 返回值里的 `conversationId` 与派单的线程不一致时，立刻说明，不要默默沿用旧值。',
   )
   if (human.im.botId) {
     lines.push(`- Your outbound IM target is bot \`${human.im.botId}\`${human.im.targetId ? `, target \`${human.im.targetId}\`` : ''}. Use the \`notify_bot\` tool to push a message there.`)

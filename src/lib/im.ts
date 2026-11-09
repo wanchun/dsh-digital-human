@@ -77,23 +77,53 @@ const CONTEXT_GUIDANCE = [
  */
 export function directSenderOf(home: string, botId: string | undefined, sessionId: string): string | null {
   if (!botId || !sessionId) return null
-  const store = channelStore(botId)
-  if (!store) return null
-  const file = join(dirname(home), 'integrations', store, 'bots', botId, 'state.json')
-  let state: unknown
-  try {
-    state = JSON.parse(readFileSync(file, 'utf8'))
-  } catch {
-    return null
-  }
-  if (!isRecord(state) || !isRecord(state.sessions)) return null
+  const sessions = stateSessions(home, botId)
+  if (!sessions) return null
   const wanted = sessionId.replace(/^session-/, '')
-  for (const [key, value] of Object.entries(state.sessions)) {
+  for (const [key, value] of Object.entries(sessions)) {
     if (typeof value !== 'string' || value.replace(/^session-/, '') !== wanted) continue
     const senderId = key.startsWith('direct:') ? key.slice('direct:'.length).trim() : ''
     return senderId || null
   }
   return null
+}
+
+/**
+ * The Session one IM chat already runs in.
+ *
+ * The channel keys each conversation as `<type>:<id>` — `direct:<sender>` for a
+ * person and `group:<chat>` for a group — so a chat id is enough to find the
+ * Session the platform opened for it. This is the fact a chat-keyed delivery reads
+ * instead of a remembered Session id.
+ *
+ * @returns the Session id, or undefined when this bot has never seen the chat.
+ */
+export function sessionForChat(home: string, botId: string | undefined, chatId: string): string | undefined {
+  const wanted = String(chatId ?? '').trim()
+  if (!botId || !wanted) return undefined
+  const sessions = stateSessions(home, botId)
+  if (!sessions) return undefined
+  for (const [key, value] of Object.entries(sessions)) {
+    if (typeof value !== 'string') continue
+    if (key === wanted || key.endsWith(`:${wanted}`)) return value
+  }
+  return undefined
+}
+
+/** The per-chat session map one bot's channel state carries. */
+function stateSessions(home: string, botId: string | undefined): Record<string, unknown> | undefined {
+  const id = String(botId ?? '').trim()
+  const store = channelStore(id)
+  if (!store) return undefined
+  const file = join(dirname(home), 'integrations', store, 'bots', id, 'state.json')
+  let state: unknown
+  try {
+    state = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return undefined
+  }
+  if (!isRecord(state) || !isRecord(state.sessions)) return undefined
+  return state.sessions
 }
 
 /**
