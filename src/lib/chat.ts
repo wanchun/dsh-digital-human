@@ -782,6 +782,17 @@ export class HumanChat {
       const filed = await this.#remember(human.id, named, resolved, { takeOver: false })
       return { sessionId: filed.sessionId, conversation, ...(filed.refused ? { notice: filed.refused } : {}) }
     }
+    // A chat-keyed record serves people, not threads: a peer that quotes a
+    // requirement lands in the chat the record already serves, so one front-desk
+    // Session stays the one place a person reads. Threads are for executors.
+    if (human.sessionKey === 'chat') {
+      const existing = await this.lookup(human.id, DEFAULT_CONVERSATION)
+      if (typeof existing === 'string') {
+        return { sessionId: existing, conversation: DEFAULT_CONVERSATION }
+      }
+      const chatName = requireConversation(text)
+      return { sessionId: await this.ensureSession(human, chatName, presetId), conversation: chatName }
+    }
     const conversation = requireConversation(text)
     return { sessionId: await this.ensureSession(human, conversation, presetId), conversation }
   }
