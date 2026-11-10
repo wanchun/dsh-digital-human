@@ -268,3 +268,40 @@ describe('unpacking', () => {
   })
 
 })
+
+describe('skills travel with a bundle', () => {
+  const skillsRoot = () => {
+    const root = join(home, 'skills')
+    mkdirSync(join(root, 'qs-assistant'), { recursive: true })
+    writeFileSync(join(root, 'qs-assistant', 'SKILL.md'), '# qs\\n')
+    mkdirSync(join(root, 'qs-assistant', 'scripts'), { recursive: true })
+    writeFileSync(join(root, 'qs-assistant', 'scripts', 'run.sh'), 'echo hi\\n')
+    return root
+  }
+
+  it('carries every skill the records name, with its files', () => {
+    const { archive } = packHumans(home, [human({ skills: ['qs-assistant'] })], { skillsRoot: skillsRoot() })
+    const files = Object.keys(readTar(gunzipSync(archive)))
+    expect(files).toContain('skills/qs-assistant/SKILL.md')
+    expect(files).toContain('skills/qs-assistant/scripts/run.sh')
+  })
+
+  it('installs a carried skill into the global root on import', async () => {
+    const { archive } = packHumans(home, [human({ skills: ['qs-assistant'] })], { skillsRoot: skillsRoot() })
+    const target = join(home, 'fresh-skills')
+    const result = await unpackHumans(home, archive, { skillsRoot: target })
+    expect(result.skills?.installed).toEqual(['qs-assistant'])
+    expect(readFileSync(join(target, 'qs-assistant', 'SKILL.md'), 'utf8')).toContain('qs')
+    expect(existsSync(join(target, 'qs-assistant', 'scripts', 'run.sh'))).toBe(true)
+  })
+
+  it('leaves a skill this machine already has alone', async () => {
+    const { archive } = packHumans(home, [human({ skills: ['qs-assistant'] })], { skillsRoot: skillsRoot() })
+    const target = join(home, 'local-skills')
+    mkdirSync(join(target, 'qs-assistant'), { recursive: true })
+    writeFileSync(join(target, 'qs-assistant', 'SKILL.md'), '# local edit\\n')
+    const result = await unpackHumans(home, archive, { skillsRoot: target })
+    expect(result.skills?.kept).toEqual(['qs-assistant'])
+    expect(readFileSync(join(target, 'qs-assistant', 'SKILL.md'), 'utf8')).toContain('local edit')
+  })
+})

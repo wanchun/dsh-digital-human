@@ -31,11 +31,14 @@
  */
 
 import { gunzipSync, gzipSync } from 'node:zlib'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Human } from './types.js'
 import { composeRecord, configText, normalizeHuman, parsePersona, personaText, requireSlug } from './store.js'
+
+/** A skill directory name the installer accepts: no separators, no traversal. */
+const SKILL_NAME = /^[A-Za-z0-9._-]+$/
 
 /** Bundle format identifier, so a foreign archive is refused rather than guessed at. */
 export const BUNDLE_FORMAT = 'dsh-digital-human/2'
@@ -174,10 +177,26 @@ export interface BundlePreview {
  * @param options.includeMemory - whether to carry the memory file.
  * @returns the gzipped archive, and the manifest it embeds.
  */
+
+/** Every regular file under one directory, in a stable order. */
+function walkFiles(dir: string): string[] {
+  const out: string[] = []
+  const visit = (current: string): void => {
+    for (const name of readdirSync(current).sort()) {
+      const full = join(current, name)
+      const stat = statSync(full)
+      if (stat.isDirectory()) visit(full)
+      else if (stat.isFile()) out.push(full)
+    }
+  }
+  visit(dir)
+  return out
+}
+
 export function packHumans(
   home: string,
   humans: Human[],
-  { includeMemory = false }: { includeMemory?: boolean } = {},
+  { includeMemory = false, skillsRoot }: { includeMemory?: boolean; skillsRoot?: string } = {},
 ): { archive: Buffer; manifest: BundleManifest } {
   if (humans.length === 0) throw new Error('there is no digital human to export')
   const files: Record<string, Buffer> = {}
@@ -189,6 +208,21 @@ export function packHumans(
     const stripped: Human = { ...human, im: { botId: '', targetId: '' } }
     files[`humans/${human.id}/persona.md`] = Buffer.from(personaText(stripped), 'utf8')
     files[`humans/${human.id}/config.json`] = Buffer.from(configText(stripped), 'utf8')
+  }
+
+  // A record names the skills it may use, and a skill is a directory of files. Without
+  // them the import lands on a machine where the whitelist points at nothing, so the
+  // bundle carries the named ones and the import installs them into the global root.
+  const skillNames = skillsRoot === undefined
+    ? []
+    : [...new Set(records.flatMap((human) => human.skills ?? []))].sort()
+  for (const name of skillNames) {
+    const dir = join(skillsRoot as string, name)
+    if (!existsSync(dir)) continue
+    for (const file of walkFiles(dir)) {
+      const relative = file.slice(dir.length + 1)
+      files[`skills/${name}/${relative}`] = readFileSync(file)
+    }
   }
 
   let memory = false
@@ -289,6 +323,8 @@ export interface ImportResult {
   /** Whether any id differs from the one the bundle carried. */
   renamed: boolean
   memory: boolean
+  /** Skills written into the global root, and those already there that were left alone. */
+  skills?: { installed: string[]; kept: string[] }
   /** The records to store, with the ids the import actually used. */
   records: Human[]
 }
@@ -296,8 +332,9 @@ export interface ImportResult {
 /**
  * Write one bundle's contents into the registry.
  *
- * Only the records and the memory are written. A bundle's skill tree, if it has
- * one, is untouched: skills belong to the machine's global root now.
+ * The records and the memory are written here. A skill the bundle carries is
+ * installed into the machine's global root, because that root is where a record's
+ * whitelist resolves; a skill already present is left as this machine has it.
  *
  * @param home - the registry root.
  * @param archive - the uploaded bundle, holding one record or many.
@@ -307,7 +344,7 @@ export interface ImportResult {
 export async function unpackHumans(
   home: string,
   archive: Buffer,
-  { id }: { id?: string } = {},
+  { id, skillsRoot }: { id?: string; skillsRoot?: string } = {},
 ): Promise<ImportResult> {
   const preview = readBundle(archive)
   if (id !== undefined && preview.humans.length !== 1) {
@@ -328,10 +365,34 @@ export async function unpackHumans(
       memory = true
     }
   }
+  // A skill already on this machine is this machine's: importing must not rewrite prose
+  // someone edited here. Missing ones are installed, so the whitelist the records carry
+  // points at real directories after an import.
+  const installed: string[] = []
+  const kept: string[] = []
+  if (skillsRoot !== undefined) {
+    for (const [name, body] of Object.entries(files)) {
+      if (!name.startsWith('skills/')) continue
+      const rest = name.slice('skills/'.length)
+      const slash = rest.indexOf('/')
+      if (slash <= 0) continue
+      const skill = rest.slice(0, slash)
+      if (!SKILL_NAME.test(skill)) continue
+      if (existsSync(join(skillsRoot, skill)) && !installed.includes(skill)) {
+        if (!kept.includes(skill)) kept.push(skill)
+        continue
+      }
+      const target = join(skillsRoot, skill, rest.slice(slash + 1))
+      await mkdir(dirname(target), { recursive: true })
+      await writeFile(target, body)
+      if (!installed.includes(skill)) installed.push(skill)
+    }
+  }
   return {
     ids: records.map((record) => record.id),
     renamed: records.some((record, at) => record.id !== preview.humans[at].id),
     memory,
+    skills: { installed: installed.sort(), kept: kept.sort() },
     records,
   }
 }

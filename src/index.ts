@@ -1193,7 +1193,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
             label = human.id
           }
           if (humans.length === 0) return new Response('there is no digital human to export', { status: 404 })
-          const { archive } = packHumans(home, humans, { includeMemory })
+          const { archive } = packHumans(home, humans, { includeMemory, skillsRoot })
           const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '')
           return new Response(archive, {
             status: 200,
@@ -1217,6 +1217,7 @@ export async function apply(ctx: Ctx, raw: Config | null = {}): Promise<void> {
           }
           const result = await unpackHumans(home, archive, {
             id: url.searchParams.get('id') ?? undefined,
+            skillsRoot,
           })
           for (const record of result.records) await store.upsert(record as HumanPatch, seed)
           await refresh()
