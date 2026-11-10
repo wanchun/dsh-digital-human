@@ -74,12 +74,17 @@ describe('packing', () => {
       exportedAt: expect.any(String),
       humans: [{ id: 'pm', name: '研发PM助手' }],
       memory: false,
+      stripped: ['im bindings', 'config values', 'subscriptions'],
     })
     const preview = readBundle(archive)
     expect(preview.humans).toHaveLength(1)
     expect(preview.humans[0].systemPrompt).toContain('{{bot}}')
     // A binding is the machine's, not the record's.
     expect(preview.humans[0].im).toEqual({ botId: '', targetId: '' })
+    // Deployment values are the machine's too: they travel as blanks the import
+    // page fills in, guided by the schema that still rides along.
+    expect(preview.humans[0].config ?? {}).toEqual({})
+    expect(preview.humans[0].subscriptions ?? []).toEqual([])
   })
 
   it('writes the persona and the config, never a combined record', async () => {

@@ -159,6 +159,8 @@ export interface BundleManifest {
   humans: Array<{ id: string; name: string }>
   /** Whether the bundle carries any memory file. */
   memory: boolean
+  /** What was stripped because it names this deployment. */
+  stripped: string[]
 }
 
 /** What a bundle holds, as the import page shows it before anything is written. */
@@ -205,7 +207,15 @@ export function packHumans(
     // A binding is the machine's, not the record's: the bot id, its default target
     // and the claimed owner all name things that do not exist elsewhere. Writing
     // empty fields rather than deleting them keeps the config shape stable.
-    const stripped: Human = { ...human, im: { botId: '', targetId: '' } }
+    // Values that name THIS deployment (its team, its leader, its routine jobs) do not
+    // travel: an import fills them in on the import page, guided by the schema that
+    // still rides along. Stripping keeps the shape stable and the package clean.
+    const stripped: Human = {
+      ...human,
+      im: { botId: '', targetId: '' },
+      config: {},
+      subscriptions: [],
+    }
     files[`humans/${human.id}/persona.md`] = Buffer.from(personaText(stripped), 'utf8')
     files[`humans/${human.id}/config.json`] = Buffer.from(configText(stripped), 'utf8')
   }
@@ -240,6 +250,7 @@ export function packHumans(
     exportedAt: new Date().toISOString(),
     humans: records.map((human) => ({ id: human.id, name: human.name })),
     memory,
+    stripped: ['im bindings', 'config values', 'subscriptions'],
   }
   files['manifest.json'] = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
   return { archive: gzipSync(writeTar(files)), manifest }
