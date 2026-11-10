@@ -1,6 +1,6 @@
 {
   "name": "@harrywan/dsh-digital-human",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "Configurable digital humans for DSH: persona, memory, peers, IM binding, schedule.",
   "license": "MIT",
   "author": "wanchun",
@@ -97,6 +97,7 @@
     "test:unit": "vitest run --coverage",
     "test:unit:watch": "vitest",
     "migrate": "node tools/migrate.mjs",
-    "test:integration": "node test/smoke.mjs && node test/memory.mjs && node test/apply.mjs && node test/wiring.mjs && node test/schema.mjs && node test/im.mjs"
+    "test:integration": "node test/smoke.mjs && node test/memory.mjs && node test/apply.mjs && node test/wiring.mjs && node test/schema.mjs && node test/im.mjs",
+    "prepublishOnly": "pnpm run test"
   }
 }
