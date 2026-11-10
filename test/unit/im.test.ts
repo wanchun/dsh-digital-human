@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { claimOwner, directSenderOf, directSenders, syncBotToHuman } from '../../src/lib/im'
+import { chatForSession, claimOwner, directSenderOf, directSenders, syncBotToHuman } from '../../src/lib/im'
 
 let root = ''
 let home = ''
@@ -367,5 +367,14 @@ describe('syncBotToHuman', () => {
     const connection = connectionStub()
     await syncBotToHuman({ get: () => connection }, target)
     expect(dirname(home)).toBe(root)
+  })
+})
+
+describe('chatForSession', () => {
+  it('names the chat a Session answers in, the reverse of sessionForChat', () => {
+    stateFor('wecom_b1', { 'direct:wohR_1': 'session-a', 'group:wr_2': 'session-b' })
+    expect(chatForSession(home, 'wecom_b1', 'session-a')).toBe('direct:wohR_1')
+    expect(chatForSession(home, 'wecom_b1', 'session-b')).toBe('group:wr_2')
+    expect(chatForSession(home, 'wecom_b1', 'session-unknown')).toBeUndefined()
   })
 })

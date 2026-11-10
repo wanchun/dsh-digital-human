@@ -370,3 +370,23 @@ export async function syncBotToHuman(
   }
   return results
 }
+
+/**
+ * The chat one Session answers in, read from the same per-chat map the reverse
+ * lookup uses. A reply inside that Session is delivered to the chat by the IM
+ * bridge itself, so a second push to the same chat is the same message twice.
+ * @param home - the digital-human root, whose sibling holds the IM integrations.
+ * @param botId - the bot whose channel state carries the map.
+ * @param sessionId - the Session a reply would come from.
+ * @returns the chat id, with its direct:/group: prefix, or undefined.
+ */
+export function chatForSession(home: string, botId: string | undefined, sessionId: string): string | undefined {
+  const wanted = String(sessionId ?? '').trim()
+  if (!botId || !wanted) return undefined
+  const sessions = stateSessions(home, botId)
+  if (!sessions) return undefined
+  for (const [key, value] of Object.entries(sessions)) {
+    if (typeof value === 'string' && value === wanted) return key
+  }
+  return undefined
+}

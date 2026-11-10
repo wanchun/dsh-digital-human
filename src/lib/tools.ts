@@ -15,6 +15,7 @@
 
 import { basename, join } from 'node:path'
 import { requireConversation } from './chat.js'
+import { chatForSession } from './im.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
 import { ARCHIVE_DIR, REQUIREMENTS_DIR, archiveRequirement, attachFile, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readRequirementTrigger, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
@@ -1236,7 +1237,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       },
       render: (_args, value) => renderText(value),
     },
-    async execute(args) {
+    async execute(args, exec) {
       const dshIm = ctx.get('dshIm')
       if (!dshIm) throw new Error('the IM plugin is not active, so no bot can send')
       const im = await botOf()
@@ -1251,6 +1252,13 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       }
       const text = String(args.message ?? '').trim()
       if (!text) throw new Error('message must not be empty')
+      // One chat, one copy. A reply written in this Session is delivered to its
+      // chat by the IM bridge, so pushing to that same chat would arrive twice.
+      // The mapping is the bridge's own, so this is a fact, not a guess.
+      const answering = chatForSession(service.store.home, botId, callerSession(exec) ?? '')
+      if (answering !== undefined && (answering === to || answering.endsWith(':' + to))) {
+        return { detail: '已由本轮会话回复送达，未重复发送。', botId, targetId: to }
+      }
       const options = { format: args.format === 'markdown' ? 'markdown' : 'plain' }
       // `to` is checked against the saved targets first, and anything the bot
       // does not already report is taken as a raw platform chat id and sent to directly:
@@ -1308,7 +1316,7 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       bot_id: { type: 'string', description: 'IM bot id. Defaults to the bot bound to you.' },
     },
     output: TEXT_OUTPUT,
-    async execute(args) {
+    async execute(args, exec) {
       const dshIm = ctx.get('dshIm')
       if (!dshIm) throw new Error('the IM plugin is not active, so no bot targets exist')
       const im = await botOf()
