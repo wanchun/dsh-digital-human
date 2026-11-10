@@ -17,6 +17,7 @@ import {
   Button,
   Checkbox,
   IconChevronDownOutlineRegular,
+  IconChevronLeftOutlineRegular,
   IconChevronRightOutlineRegular,
   IconFolderCloseRegular,
   IconNewChatOutlineRegular,
@@ -160,7 +161,8 @@ const STYLE = `
   flex: 0 0 auto; border: 0; background: transparent;
   color: var(--dsw-alias-label-tertiary);
   font: inherit; font-size: 12px; line-height: 16px;
-  padding: 4px 8px; border-radius: var(--dsw-radius-md); cursor: pointer;
+  padding: 4px; border-radius: var(--dsw-radius-md); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .dh-tree-link:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .dh-tree-link:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
@@ -1736,7 +1738,9 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace, 
       <div className="dh-tree-head">
         <span className="dh-tree-title">数字人视图</span>
         {/* An escape hatch, not the switch: the way in and out is the foot's row. */}
-        <button type="button" className="dh-tree-link" onClick={onClose}>回到原生</button>
+        <button type="button" className="dh-tree-link" onClick={onClose} title="回到原生" aria-label="回到原生">
+          <IconChevronLeftOutlineRegular size={16} />
+        </button>
       </div>
       {state.loading ? <p className="dh-tree-hint">加载中…</p> : null}
       {state.error ? (
@@ -1744,7 +1748,9 @@ function DigitalHumansTree({ rpc: injected, openSession, onClose, getWorkspace, 
           <p className="dh-tree-error-text">读取需求失败：{state.error}</p>
           <div className="dh-tree-actions">
             <Button variant="outline" size="sm" onClick={() => { void load() }}>重试</Button>
-            <Button variant="ghost" size="sm" onClick={onClose}>回到原生列表</Button>
+            <Button variant="ghost" size="sm" onClick={onClose} title="回到原生" aria-label="回到原生">
+              <IconChevronLeftOutlineRegular size={16} />
+            </Button>
           </div>
         </div>
       ) : null}

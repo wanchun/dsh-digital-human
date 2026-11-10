@@ -31,6 +31,10 @@ export function IconChevronDownOutlineRegular() {
   return <span data-icon="chevron" />
 }
 
+export function IconChevronLeftOutlineRegular() {
+  return <svg data-icon="chevron-left" />
+}
+
 export function IconChevronRightOutlineRegular() {
   return <span data-icon="chevron-right" />
 }
