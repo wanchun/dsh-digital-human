@@ -1,6 +1,6 @@
 {
   "name": "@harrywan/dsh-digital-human",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Configurable digital humans for DSH: persona, memory, peers, IM binding, schedule.",
   "license": "MIT",
   "author": "wanchun",
