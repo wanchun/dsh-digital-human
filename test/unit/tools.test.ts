@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { buildHumanTools, buildRegistryTool } from '../../src/lib/tools'
@@ -148,6 +148,18 @@ function serviceStub(overrides: Record<string, unknown> = {}) {
 
 /** The context the tools read, with an optional IM service. */
 const ctxWith = (dshIm?: unknown) => ({ get: (name: string) => (name === 'dshIm' ? dshIm : undefined) })
+
+/** Register one delivery-target alias in the bridge registry under this home. */
+function aliasFor(botId: string, alias: string, chatId: string) {
+  const file = join(home, '..', 'integrations', 'dsh-wecom', 'workspaces.json')
+  let d: any = {}
+  try { d = JSON.parse(readFileSync(file, 'utf8')) } catch { d = {} }
+  d.deliveryTargets = d.deliveryTargets ?? {}
+  d.deliveryTargets[botId] = d.deliveryTargets[botId] ?? {}
+  d.deliveryTargets[botId][alias] = { name: alias, kind: 'user', route: { chatId } }
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, JSON.stringify(d))
+}
 
 const toolOf = (tools: any[], name: string) => tools.find((tool) => tool.name === name)
 
@@ -1123,6 +1135,21 @@ describe('the requirement tools', () => {
 })
 
 describe('notify_bot', () => {
+
+  it('counts a target alias to this chat as already covered', async () => {
+    // The person writes the alias they know, the bridge's map names the raw chat
+    // id: one chat, two spellings. The push must still be skipped.
+    const stateDir = join(home, '..', 'integrations', 'dsh-wecom', 'bots', 'wecom_1')
+    mkdirSync(stateDir, { recursive: true })
+    writeFileSync(join(stateDir, 'state.json'), JSON.stringify({ version: 1, sessions: { 'direct:wohR_1': 'session-me' } }))
+    aliasFor('wecom_1', 'harrywan-direct', 'wohR_1')
+    const send = vi.fn(async () => ({ ok: true }))
+    const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [{ targetId: 'harrywan-direct' }] }), 'notify_bot')
+    const result = await notify.execute({ message: 'hi', to: 'harrywan-direct' }, { agent: { session: { header: { id: 'session-me' } } } })
+    expect(send).not.toHaveBeenCalled()
+    expect(String(result.detail)).toContain('未重复发送')
+  })
+
   const build = (service: any, dshIm?: unknown) => buildHumanTools({ ctx: ctxWith(dshIm), service, humanId: 'pm' })
 
   it('refuses a message with no explicit target', async () => {

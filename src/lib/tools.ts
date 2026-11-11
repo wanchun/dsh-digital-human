@@ -15,7 +15,7 @@
 
 import { basename, join } from 'node:path'
 import { requireConversation } from './chat.js'
-import { chatForSession } from './im.js'
+import { chatForSession, chatIdOfTarget } from './im.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
 import { ARCHIVE_DIR, REQUIREMENTS_DIR, archiveRequirement, attachFile, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readRequirementTrigger, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
@@ -1256,7 +1256,10 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       // chat by the IM bridge, so pushing to that same chat would arrive twice.
       // The mapping is the bridge's own, so this is a fact, not a guess.
       const answering = chatForSession(service.store.home, botId, callerSession(exec) ?? '')
-      if (answering !== undefined && (answering === to || answering.endsWith(':' + to))) {
+      // A target alias and the chat it routes to are two spellings of one chat, so
+      // the comparison runs on the chat id both spellings resolve to.
+      const resolved = chatIdOfTarget(service.store.home, botId, to)
+      if (answering !== undefined && (answering === resolved || answering.endsWith(':' + resolved) || answering === to || answering.endsWith(':' + to))) {
         return { detail: '已由本轮会话回复送达，未重复发送。', botId, targetId: to }
       }
       const options = { format: args.format === 'markdown' ? 'markdown' : 'plain' }

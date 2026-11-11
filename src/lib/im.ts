@@ -390,3 +390,27 @@ export function chatForSession(home: string, botId: string | undefined, sessionI
   }
   return undefined
 }
+
+
+/**
+ * The chat id a delivery target alias routes to, read from the bridge's own
+ * registry. A raw chat id is returned as itself, so a caller that never saw the
+ * alias list still resolves.
+ */
+export function chatIdOfTarget(home: string, botId: string | undefined, target: string): string {
+  const wanted = String(target ?? '').trim()
+  if (!botId || !wanted) return wanted
+  const store = channelStore(botId)
+  if (!store) return wanted
+  const file = join(dirname(home), 'integrations', store, 'workspaces.json')
+  let registry: unknown
+  try {
+    registry = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return wanted
+  }
+  const entry = (registry as any)?.deliveryTargets?.[botId]?.[wanted]
+  const chatId = entry?.route?.chatId
+  return typeof chatId === 'string' && chatId ? chatId : wanted
+}
+
