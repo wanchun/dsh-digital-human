@@ -1259,8 +1259,17 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       // A target alias and the chat it routes to are two spellings of one chat, so
       // the comparison runs on the chat id both spellings resolve to.
       const resolved = chatIdOfTarget(service.store.home, botId, to)
-      if (answering !== undefined && (answering === resolved || answering.endsWith(':' + resolved) || answering === to || answering.endsWith(':' + to))) {
-        return { detail: '已由本轮会话回复送达，未重复发送。', botId, targetId: to }
+      const sameChat = answering !== undefined
+        && (answering === resolved || answering.endsWith(':' + resolved) || answering === to || answering.endsWith(':' + to))
+      // The chat this Session serves hears the reply itself: the bridge delivers it.
+      // A push to that same chat is a second message to one person in one turn, and
+      // silently claiming it was delivered would lose whatever it said. Refuse, and
+      // name the rule, so the model folds the content into its reply.
+      if (sameChat) {
+        throw new Error(
+          `notify_bot 不用于本会话已送达的人：${to} 就在当前会话里，把内容写进你的回复即可；`
+          + 'notify_bot 只发给本会话之外的目标。',
+        )
       }
       const options = { format: args.format === 'markdown' ? 'markdown' : 'plain' }
       // `to` is checked against the saved targets first, and anything the bot

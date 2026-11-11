@@ -1145,9 +1145,9 @@ describe('notify_bot', () => {
     aliasFor('wecom_1', 'harrywan-direct', 'wohR_1')
     const send = vi.fn(async () => ({ ok: true }))
     const notify = toolOf(build(serviceStub(), { send, listTargets: async () => [{ targetId: 'harrywan-direct' }] }), 'notify_bot')
-    const result = await notify.execute({ message: 'hi', to: 'harrywan-direct' }, { agent: { session: { header: { id: 'session-me' } } } })
+    await expect(notify.execute({ message: 'hi', to: 'harrywan-direct' }, { agent: { session: { header: { id: 'session-me' } } } }))
+      .rejects.toThrow(/本会话已送达/)
     expect(send).not.toHaveBeenCalled()
-    expect(String(result.detail)).toContain('未重复发送')
   })
 
   const build = (service: any, dshIm?: unknown) => buildHumanTools({ ctx: ctxWith(dshIm), service, humanId: 'pm' })
