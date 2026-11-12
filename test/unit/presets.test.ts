@@ -314,6 +314,43 @@ describe('renderOperatingContext', () => {
     const human = record({ subscriptions: [{ cron: '0 3 * * *', prompt: 'b', enabled: false }] })
     expect(renderOperatingContext(human, store)).not.toContain('wake-ups')
   })
+
+  /** The platform collaboration rules, isolated from the rest of the context. */
+  const collaborationRules = (human: Record<string, unknown> = {}) => {
+    const context = renderOperatingContext(record({ im: { botId: 'test' }, ...human }), store)
+    const start = context.indexOf('与同伴协作的规则')
+    // A renamed heading must fail the assertions below, not hand them an empty string.
+    if (start === -1) throw new Error('the collaboration rules are missing from the operating context')
+    const end = context.indexOf('\n- ', start)
+    // The test target guarantees a following top-level line; a missing slice fails closed.
+    if (end === -1) throw new Error('the collaboration rules have no end boundary')
+    return context.slice(start, end)
+  }
+
+  it('keeps requirement state in the record and only reusable knowledge in memory', () => {
+    // The boundary between the two stores is the one handoff rule no tool owns:
+    // every tool documents its own fields, but none says where a conclusion lives.
+    const rules = collaborationRules()
+    expect(rules).toMatch(/需求记录/)
+    expect(rules).toMatch(/记忆/)
+    expect(rules).toMatch(/报告内容/)
+  })
+
+  it('states when a phase handoff counts as complete', () => {
+    const rules = collaborationRules()
+    const completionRule = rules.split('\n').find((line) => line.includes('阶段交接'))
+    expect(completionRule ?? '').toMatch(/同时满足.*结果.*写入指定文件.*状态.*指向该文件/)
+  })
+
+  it('leaves the field-level rules to the send tool schema', () => {
+    // Each dispatch field documents itself in the schema the model receives on every
+    // step. A second copy here would drift from that one, which the writing guide
+    // forbids: one rule, one place.
+    const rules = collaborationRules()
+    expect(rules).not.toMatch(/expect_receipt/)
+    expect(rules).not.toMatch(/`facts`/)
+    expect(rules).not.toMatch(/digital_human_requirement_read/)
+  })
 })
 
 describe('buildPresetDefinition', () => {
