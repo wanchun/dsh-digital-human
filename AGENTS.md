@@ -16,6 +16,6 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
 
 # 文档写作
 
-所有交付文档遵循 ASD-STE100 的 80%：短句、一句一个意思、主动语态、固定用词。
+所有交付文档遵循80%的 ASD-STE100。
 
 人设、playbook、上下文预算与派单字段的细则见 `docs/agents/writing.md`。
