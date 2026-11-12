@@ -1473,7 +1473,9 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       kind: {
         type: 'string',
         enum: ['nodes', 'self-test', 'files'],
-        description: 'Which folder of the requirement the file belongs to. Defaults to nodes.',
+        description: 'Which folder of the requirement the file belongs to. Defaults to nodes. '
+          + '分析产物（拷问/领域模型/设计）勿走此工具，直接写 analysis/ 目录。'
+          + 'nodes 文件名约定（不强制）：有票用 票号- 开头，合派允许 02+05-，无票用 fix-/deploy-/all- 前缀（2026-11-12 拍板）。',
       },
     },
     output: {
