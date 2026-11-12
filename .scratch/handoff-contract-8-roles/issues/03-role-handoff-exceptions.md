@@ -1,7 +1,7 @@
 # 03 · 角色级交接例外（三处，仅三处）
 
 Type: task
-Status: ready-for-agent
+Status: resolved
 
 ## What to build
 
@@ -28,3 +28,14 @@ Status: ready-for-agent
 ## 边界
 
 人设不在插件仓库，没有分支可合。直接改文件，报告改动的行。
+## Answer
+
+三处各改一行，无顺带改动。
+
+| 文件 | 改动 |
+|---|---|
+| `humans/pm-assistant/persona.md` | 第 6 条派单补 `expect_receipt: true` |
+| `humans/lead-assistant/persona.md` | 派节点映射：端到端改为「确需浏览器验证或跨系统链路才派，纯后端不派」；补「上线准备 → release-assistant，带请求事项与已完成的自测、部署证据路径」 |
+| `humans/release-assistant/persona.md` | 「什么时候开始」补一行：派单要带请求事项与已完成的自测、部署证据路径，缺证据回发起人要 |
+
+快照仓库提交 `f2c7092`（3 files changed, 3 insertions, 2 deletions）。
