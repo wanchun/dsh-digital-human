@@ -314,6 +314,52 @@ describe('renderOperatingContext', () => {
     const human = record({ subscriptions: [{ cron: '0 3 * * *', prompt: 'b', enabled: false }] })
     expect(renderOperatingContext(human, store)).not.toContain('wake-ups')
   })
+
+  /** The platform collaboration rules, isolated from the rest of the context. */
+  const collaborationRules = (human: Record<string, unknown> = {}) => {
+    const context = renderOperatingContext(record(human), store)
+    const start = context.indexOf('与同伴协作的规则')
+    const end = context.indexOf('\n- ', start)
+    return context.slice(start, end === -1 ? undefined : end)
+  }
+
+  it('states what each dispatch field carries', () => {
+    const rules = collaborationRules()
+    expect(rules).toMatch(/`facts`[^\n]*绝对路径/)
+    expect(rules).toMatch(/`context`[^\n]*一句话进度/)
+    expect(rules).toMatch(/`context`[^\n]*上一步结论的路径/)
+    expect(rules).toMatch(/正文[^\n]*要什么结果/)
+    expect(rules).toMatch(/正文[^\n]*验收判据/)
+    expect(rules).toMatch(/正文[^\n]*证据/)
+  })
+
+  it('asks for a receipt only on assigned work', () => {
+    const rules = collaborationRules()
+    expect(rules).toMatch(/`expect_receipt`[^\n]*派活/)
+    expect(rules).toContain('提问、答复、回执、取消不带')
+  })
+
+  it('separates requirement context from memory', () => {
+    const rules = collaborationRules()
+    expect(rules).toContain('digital_human_requirement_read')
+    expect(rules).toContain('不重读历史会话')
+    expect(rules).toMatch(/路径从摘要或派单的 `facts` 取/)
+    expect(rules).toContain('需求状态与证据属于需求记录')
+    expect(rules).toContain('记忆只放跨需求可复用的结论和未闭环口径')
+  })
+
+  it('states each handoff rule once', () => {
+    const rules = collaborationRules()
+    for (const phrase of ['一句话进度', '验收判据', '`expect_receipt`', 'digital_human_requirement_read', '不重读历史会话', '记忆只放']) {
+      expect(rules.split(phrase).length - 1, phrase).toBe(1)
+    }
+  })
+
+  it('does not restate the forbiddance the tool already enforces', () => {
+    // The send tool rejects the forbidden fields. Repeating the list here would give
+    // the model a second copy that can drift from the mechanism.
+    expect(collaborationRules()).not.toMatch(/步骤|注意事项|命令清单/)
+  })
 })
 
 describe('buildPresetDefinition', () => {
