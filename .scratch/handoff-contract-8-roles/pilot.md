@@ -1,46 +1,84 @@
 # 八角色交接试点 · 测量记录
 
-状态：**未执行**（工单 04 标 blocked）。
+状态：**机制链路已验证；八角色 token 对比未做**。
 
-## 为什么没跑
+## 怎么跑的
 
-试点观察真实需求中的适用角色交接。
-当前缺少以下条件：
+隔离宿主：现有 `~/.dsh-sandbox`，端口 3099，独立 `DSH_HOME`。
+临时 overlay 关掉 IM 与 MCP，数字人注册表指向 `digital-human/handoff-verification`。
+不碰 3080 与生产注册表。
 
-1. 当前没有排期中的真实需求。需求须有子系统、版本和测试环境。
-2. 隔离沙箱未就绪，也未获启动授权。
-   启动须获用户明确许可，并使用 3099。不得操作 3080。
-   沙箱需凭据，并需在页面驱动数字人。
-3. 试点跨千手和 pace，耗时预计数小时。
-   只走适用角色：PM、负责人、开发、部署和自测。
-   有页面或跨系统验证时才加端到端。
+驱动方式：不用页面。用 URL token 换 `dsh-auth` cookie，再 POST `/api/digital-human`，
+调用管理通道的 `chat.send`。它和 `digital_human_send` 走同一条投递路径。
 
-条件未满足前不跑。硬跑会产生伪造数据。
+两个合成角色：`pm-pilot`（派单方）与 `lead-pilot`（承接方）。
+都关掉记忆、不给技能、只声明一个 peer。
 
-## 已完成的替代验证
+## 链路结果
 
-| 验证 | 结果 |
+一轮跑通，全部产物落在需求目录：
+
+```
+reqs/交接试点-20261112/
+  meta.json
+  params.md
+  state.json          nodes.handoff-verification.status=done，evidence 指向报告
+  nodes/all-handoff-pilot.md
+```
+
+五步都通：派单送达 → 读摘要 → 写报告 → 标 done 带证据指针 → 回执。
+`state.json` 同时满足新加的完成判据：结果写进指定文件，状态指向该文件。
+
+## 三个实测发现
+
+### 1. 沙箱跑的是 `build/host`，不是 `src/`
+
+第一次跑，新规则没进提示词。原因：profile 链到插件目录，入口是 `build/host/index.js`，
+而我只改了 `src/lib/presets.ts`。
+
+`pnpm run build:host` 之后重跑，提示词里出现：
+`阶段交接完成需同时满足：结果写入指定文件，状态指向该文件。`
+
+**结论：改源码后必须重建，沙箱才看得见。**单测跑 TS 源码，不会暴露这个差异。
+
+### 2. 极简角色仍然挂 39 个工具
+
+`pm-pilot` 关记忆、无技能、单 peer、人设不到 300 字。它实际可见的工具：
+
+```
+bash web_fetch subagent subagent_fork workflow todo_write update_goal create_goal
+present read_image interrupt_agent list_agents send_message wait_agent skill
+digital_human_* (11) fs/edit/glob/grep/read/write ask_user_question set_session_title job_*
+```
+
+这来自 `src/lib/presets.ts` 的 `BASELINE_ROWS`：每个数字人都复制一份标准工具集。
+
+两个后果：
+
+- 在 profile 里禁用 `tool-web` **不管用**，数字人 preset 自己又挂了一份，`web_fetch` 仍在。
+- 每个角色都为全部工具定义付费。之前实测工具定义约 26.6K tokens，是每次请求的固定成本。
+
+`pm-pilot` 还调了 14 次 `bash`，尽管人设没让它用。工具多，行为就散。
+
+### 3. 一轮简单交接用了 8 次模型调用
+
+| 指标 | 值 |
 |---|---|
-| 全量单测 `pnpm exec vitest run` | 23 文件、867 项通过 |
-| 类型检查 `pnpm run typecheck` | host 与 client 均干净 |
-| 集成 `pnpm run test:integration` | 483 项全过 |
-| 运行时规则渲染 | 测试断言双条件，并检查字段规则不重复 |
-| 派单契约 | `test/unit/tools.test.ts` 覆盖字段顺序、禁止字段拒绝、回执开关、amend/cancel |
+| 模型调用 | 8 |
+| 未命中输入 token | 24,308 |
+| 缓存读 token | 68,544 |
+| 合计 | 94,886 |
 
-这些结果只能验证机制和提示词。
-它们**不能**证明真实流程更省 token。
+这是「派单 + 读摘要 + 写报告 + 标 done + 回执」的代价，还没算真实业务工作。
+
+## 没做的事
+
+- 没有跑完整八角色链路（分析/开发/部署/自测/端到端/上线准备）。需要真实需求与真实平台。
+- 没有基线对比，所以**不能声称省 token**。
+- 样本只有 1 轮，不足以下结论。
 
 ## 下次怎么跑
 
-1. 等真实需求排期，准备隔离沙箱。
-   启动前先取得用户对 3099 的明确许可。
-   使用独立 `DSH_HOME`，关闭 IM。
-   不操作 3080。
-2. 选择单仓库、标准复杂度的后台需求。
-3. 记录每个角色的 `inputTokens + cacheReadTokens`。
-   记录交接字节、补问、重复派单、状态轮询、返工和缺证据次数。
-4. 与基线对比。没有数据支持的收益不写。
-
-## 已知的测量口径
-
-单次上下文 = 一次模型请求的 `inputTokens + cacheReadTokens`。读法见 `dsh-digital-human-debug` 技能的会话日志一节。
+1. 用真实需求，走 3080 的生产角色，而不是合成角色。
+2. 记录每个角色的 `inputTokens + cacheReadTokens`、交接消息字节、补问、重复派单、轮询、返工、缺证据次数。
+3. 先测「收窄工具面」前后同一任务的两组数据，再谈收益。
