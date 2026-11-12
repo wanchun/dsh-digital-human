@@ -5,37 +5,38 @@ Status: resolved
 
 ## What to build
 
-共享运行时协作规则（`renderOperatingContext` 的「与同伴协作的规则」段）只写了寻址、回执三项和收件箱用法。它缺两类共同规则：
-
-**派单字段语义**
-
-- `facts`：已确认的事实与相关文件的绝对路径。
-- `context`：一句话进度，加上一步结论的路径，不贴全文。
-- 正文：要什么结果、验收判据、要什么证据。
-- `expect_receipt`：派活才带；提问、答复、回执、取消不带。
-
-**上下文读取与写入分工**
-
-- 每轮先读需求摘要（`digital_human_requirement_read`），不重读历史会话。
-- 只读当次任务需要的文件；路径从摘要或派单的 `facts` 取。
-- 需求状态与证据属于需求记录；记忆只放跨需求可复用结论与未闭环口径。
-
-不要写工具已经拒绝的字段清单（步骤、命令、注意事项）。机制已保证的事不重复写。不要复制写作规范整段。
+共享运行时协作规则（`renderOperatingContext` 的「与同伴协作的规则」段）只写了寻址、回执三项和收件箱用法。它缺共同交接规则。
 
 ## Acceptance
 
-- 协作规则段包含上述语义，每条只出现一次。
-- 新增单测（`test/unit/presets.test.ts` 既有写法）：断言上述语义存在，且禁止字段清单没有被重复陈述。
+- 协作规则段补齐缺的语义，每条只出现一次。
+- 新增单测（`test/unit/presets.test.ts` 既有写法）：断言语义存在。
 - 不锁死整段提示词原文，只断言必需语义。
 - `presets.test.ts`、`tools.test.ts` 全过。
 
 ## Seam
 
 `src/lib/presets.ts` 的 `renderOperatingContext`；测试走 `test/unit/presets.test.ts`。
+
 ## Answer
 
-`src/lib/presets.ts` 的协作规则段补 4 条（365–369 行）：派单字段分工（facts / context / 正文）、`expect_receipt` 门槛、摘要优先与按需读文件、需求记录与记忆分工。
+**首次实现走偏，已按审查收敛。**
 
-`test/unit/presets.test.ts` 新增 5 个用例：四类字段语义、回执门槛、上下文读写分工、每条语义只出现一次、不复述工具已拒绝的字段清单。测试只断言必需语义，不锁死整段原文。
+第一版把四条字段语义都写进运行时规则，重复了 `digital_human_send` 已逐字段声明的内容（`facts` / `context` / `message` / `expect_receipt` 的参数描述）。这违反 `docs/agents/writing.md` 九条判据第 2 条「同一条规则只写一处」。
 
-提交 `869bfe7`（2 files changed, 50 insertions），已合入集成分支。全量单测 869/869 通过。
+收敛后只补**没有任何工具声明**的两条，都在 `src/lib/presets.ts` 的协作规则段：
+
+1. `需求状态、证据与报告内容属于需求记录。记忆只放跨需求可复用的结论和未闭环口径。`
+2. `阶段交接算完成，要结果已写入指定文件，且状态指向该文件。`
+
+字段级规则留在 `digital_human_send` 的 schema 里，运行时不再复制。
+
+`test/unit/presets.test.ts` 三个用例：
+
+- 需求记录与记忆的分工存在（含「报告内容」）。
+- 阶段交接的完成判据存在。
+- 字段级规则**不在**运行时段：`expect_receipt`、`facts`、`digital_human_requirement_read` 都不出现。这条锁住「不重复」这个设计决定。
+
+测试只断言语义，不断言整句原文。切片函数在找不到标题时抛错，不会拿空串蒙过断言。
+
+验证：全量单测 869/869，typecheck 干净，集成 42/42。
