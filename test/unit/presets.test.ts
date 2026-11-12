@@ -317,12 +317,14 @@ describe('renderOperatingContext', () => {
 
   /** The platform collaboration rules, isolated from the rest of the context. */
   const collaborationRules = (human: Record<string, unknown> = {}) => {
-    const context = renderOperatingContext(record(human), store)
+    const context = renderOperatingContext(record({ im: { botId: 'test' }, ...human }), store)
     const start = context.indexOf('与同伴协作的规则')
     // A renamed heading must fail the assertions below, not hand them an empty string.
     if (start === -1) throw new Error('the collaboration rules are missing from the operating context')
     const end = context.indexOf('\n- ', start)
-    return context.slice(start, end === -1 ? undefined : end)
+    // The test target guarantees a following top-level line; a missing slice fails closed.
+    if (end === -1) throw new Error('the collaboration rules have no end boundary')
+    return context.slice(start, end)
   }
 
   it('keeps requirement state in the record and only reusable knowledge in memory', () => {
@@ -336,8 +338,8 @@ describe('renderOperatingContext', () => {
 
   it('states when a phase handoff counts as complete', () => {
     const rules = collaborationRules()
-    expect(rules).toMatch(/写入指定文件/)
-    expect(rules).toMatch(/状态指向/)
+    const completionRule = rules.split('\n').find((line) => line.includes('阶段交接'))
+    expect(completionRule ?? '').toMatch(/同时满足.*结果.*写入指定文件.*状态.*指向该文件/)
   })
 
   it('leaves the field-level rules to the send tool schema', () => {
