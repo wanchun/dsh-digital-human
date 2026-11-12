@@ -177,7 +177,7 @@ const calls = [
   }],
   ['digital_human_requirement_read', { requirement: 'REQ-SCHEMA' }],
   ['digital_human_requirement_update', { requirement: 'REQ-SCHEMA', node: 'dev', status: 'running' }],
-  ['digital_human_requirement_attach', { requirement: 'REQ-SCHEMA', name: 'probe.md', content: 'x' }],
+  ['digital_human_requirement_attach', { requirement: 'REQ-SCHEMA', name: 'all-probe.md', content: 'x' }],
   ['digital_human_requirement_archive', { requirement: 'REQ-SCHEMA' }],
   ['digital_human_requirement_restore', { requirement: 'REQ-SCHEMA' }],
   ['memory_status', {}],

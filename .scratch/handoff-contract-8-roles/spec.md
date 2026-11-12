@@ -5,21 +5,33 @@ labels: [ready-for-agent]
 
 ## Problem Statement
 
-八个数字人共同完成一条需求。每个角色有自己的职责和会话。它们需要用短消息交接工作，并用需求文件保存事实和证据。
+八个数字人共同完成一项需求。每个角色有自己的职责和会话。
+它们用短消息交接，并在需求文件中保存事实与证据。
 
-插件已经提供需求寻址、结构化派单、工作项和回执机制。当前规则分布在工具描述、共享运行时提示、写作规范和角色 playbook 中。旧组织规格也以五个角色为前提。
+插件已有需求寻址、结构化派单、工作项和回执。
+规则分散在工具说明、运行时提示、写作规范和角色 playbook。
+旧组织规范仍以五个角色为前提。
 
-因此，团队缺少一份针对当前八角色的交接约定。交接可能重复事实和文件内容。执行者也可能收到过多做法指令。收件人需要重读聊天历史，或再次询问已有信息。这会增加上下文和返工。
+因此，团队缺少八角色共用的交接约定。
+交接可能重复事实，也可能传入过多做法指令。
+收件人可能重读历史，或再次询问已有信息。
+这会增加上下文和返工。
 
-本规格只处理八角色的派单、回执和文件指针约定。它不重设计需求账本或工作流状态机。
+本规格只定义派单、回执和文件指针。
+它不重设计需求账本或工作流状态机。
 
 ## Solution
 
-建立一份简短、统一的交接契约。插件工具定义字段和传递行为。共享运行时提示说明全角色共用的协作规则。角色 playbook 只保留本角色的判断和验收要求。
+建立简短、统一的交接契约。工具定义字段和传递行为。
+运行时提示说明共用规则。角色 playbook 保留本角色的判断和验收要求。
 
-每次交接只传收件人完成当前工作所需的事实、验收要求和文件指针。收件人从需求摘要开始，只读本次需要的文件。完成后写入证据，并向派单方回结论、证据路径和下一步。
+每次交接只传当前工作需要的事实、验收要求和文件指针。
+收件人先读需求摘要，再读本次需要的文件。
+完成后写入证据，并回结论、证据路径和下一步。
 
-阶段状态和证据索引写入现有需求文件。消息不复述完整需求、历史、报告或日志。只在需求适用时经过分析、验证、端到端和上线准备角色。
+阶段状态和证据索引写入现有需求文件。
+消息不复述完整需求、历史、报告或日志。
+只安排适用的分析、验证、端到端和上线准备角色。
 
 ## User Stories
 
@@ -96,9 +108,13 @@ The lead remains the normal coordinator. Analysis, QA, E2E, deployment, and rele
 
 ### Source of truth and change scope
 
-The send tool owns the accepted fields, routing, work-item behavior, and fixed receipt insertion. The shared runtime context owns common model-facing handoff rules. Role playbooks own role-specific judgment and acceptance criteria. The maintainer guide explains how to author those rules but does not define a competing protocol.
+The send tool owns fields, routing, work items, and receipt insertion.
+The runtime context owns common model-facing rules.
+Role playbooks own role-specific judgment and acceptance criteria.
+The maintainer guide explains authoring. It does not define another protocol.
 
-Only update these surfaces where the current eight-role contract is missing or inconsistent. Keep changes small. Do not rewrite all eight playbooks if a shared rule fixes the gap.
+Update only surfaces with missing or inconsistent rules.
+Keep changes small. Do not rewrite all eight playbooks for a shared gap.
 
 Do not introduce a numeric message or token cap in this change. Measure a representative pilot first. Use existing compaction only after durable results are written, when a session needs continued work; do not require a new session for every ticket.
 
@@ -111,8 +127,11 @@ Do not introduce a numeric message or token cap in this change. Measure a repres
 - Verify that new, amend, and cancel behavior addresses the intended work item and does not duplicate or retire a different item.
 - Verify that role context states the shared contract once and role playbooks retain only role-specific decision criteria.
 - Use the existing tool-execution tests as prior art for field rendering, forbidden fields, receipt behavior, and delivery assertions.
-- Run a sandbox pilot across applicable transitions: PM to lead, analysis only when needed, lead to developer, deployment to QA and conditional E2E, and explicit release preparation. Do not force all eight roles into every requirement.
-- In the pilot, record per-role request input tokens, handoff size, clarification count, repeat sends, status polls, rework, and missing-evidence cases. Compare with a baseline. Do not claim token reduction until measurements support it.
+- Run a sandbox pilot for applicable transitions only.
+- Do not force all eight roles into every requirement.
+- Record per-role input tokens and handoff size.
+- Record clarifications, repeat sends, polls, rework, and missing evidence.
+- Compare with a baseline. Claim no token reduction without evidence.
 - Do not use production sessions or production deployment for the pilot.
 
 A good test observes the message received, the work item changed, the correct reply returned, or the durable evidence recorded. It does not assert private helper calls or exact prompt prose beyond the required contract.
