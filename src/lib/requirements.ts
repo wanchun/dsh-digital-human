@@ -440,6 +440,31 @@ export function renderDigest(state: RequirementState): string {
 }
 
 /** Fold one evidence file into the requirement, returning its absolute path. */
+/**
+ * Filename shapes each attach shelf accepts. A convention, enforced only where
+ * it keeps two files with one number from meaning two different things: nodes
+ * names carry a ticket id or a nature prefix so the same number never points at
+ * two shelves' worth of evidence.
+ */
+const NODES_NAME = /^(?:\d{2}(?:\+\d{2})?-|all-|fix-|deploy-|w\d+-)/
+const ANALYSIS_WORDS = /(拷问|领域模型|设计|spec|ticket|questionnaire|decision)/i
+
+/**
+ * Refuse a name whose file would land on the wrong shelf. The error names the
+ * rule, so the model corrects the same turn instead of guessing.
+ */
+export function attachNameProblem(name: string, kind: string): string | undefined {
+  if (kind === 'nodes') {
+    if (ANALYSIS_WORDS.test(name)) {
+      return '分析产物（拷问/领域模型/设计/spec）不落在 nodes/：直接写 analysis/ 目录，不走 attach。'
+    }
+    if (!NODES_NAME.test(name)) {
+      return 'nodes 文件名须以 票号-（如 07-）、合派 票号+票号-（02+05-）、或性质前缀 all-/fix-/deploy-/w<N>- 开头，例如 07-dev-ASR规则.md 或 all-deploy-F1.md。'
+    }
+  }
+  return undefined
+}
+
 export function attachFile(dirPath: string, input: { name: string; content: string; kind?: string }): string {
   const kind = input.kind === 'self-test' ? 'self-test' : input.kind === 'files' ? 'files' : 'nodes'
   const target = join(dirPath, kind)

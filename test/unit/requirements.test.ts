@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   archiveRequirement,
   attachFile,
+  attachNameProblem,
   createRequirement,
   findArchivedRequirementDir,
   findRequirementDir,
@@ -416,5 +417,30 @@ describe('requirement state', () => {
     expect(() => restoreRequirement(root, join(root, '_archive', archived.dir), fallback))
       .toThrow(/restore target already exists/)
     expect(readFileSync(join(dir(), 'live.md'), 'utf8')).toBe('new')
+  })
+})
+
+describe('attachNameProblem', () => {
+  it('refuses an analysis artifact aimed at nodes', () => {
+    expect(attachNameProblem('日粒度批次-拷问清单.md', 'nodes')).toContain('analysis')
+    expect(attachNameProblem('领域模型-设计说明.md', 'nodes')).toContain('analysis')
+  })
+
+  it('refuses a bare nodes name with no ticket id or nature prefix', () => {
+    expect(attachNameProblem('企业id下拉搜索.md', 'nodes')).toContain('票号')
+  })
+
+  it('accepts ticket-prefixed, merged, and nature-prefixed nodes names', () => {
+    expect(attachNameProblem('07-dev-ASR规则.md', 'nodes')).toBeUndefined()
+    expect(attachNameProblem('02+05-对账批次.md', 'nodes')).toBeUndefined()
+    expect(attachNameProblem('all-deploy-F1.md', 'nodes')).toBeUndefined()
+    expect(attachNameProblem('fix-entry-md5.md', 'nodes')).toBeUndefined()
+    expect(attachNameProblem('deploy-ff1-d6.md', 'nodes')).toBeUndefined()
+    expect(attachNameProblem('w3-冒烟记录.md', 'nodes')).toBeUndefined()
+  })
+
+  it('leaves other shelves alone', () => {
+    expect(attachNameProblem('自测报告-F首轮.md', 'self-test')).toBeUndefined()
+    expect(attachNameProblem('SRS_V1.1.md', 'files')).toBeUndefined()
   })
 })

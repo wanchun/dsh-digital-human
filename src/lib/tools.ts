@@ -18,7 +18,7 @@ import { requireConversation } from './chat.js'
 import { chatForSession, chatIdOfTarget } from './im.js'
 import { archiveHistory, buildSnapshot, compactMemory, memoryPaths, renderSnapshot } from './memory.js'
 import { presetIdOf } from './presets.js'
-import { ARCHIVE_DIR, REQUIREMENTS_DIR, archiveRequirement, attachFile, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readRequirementTrigger, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
+import { ARCHIVE_DIR, REQUIREMENTS_DIR, archiveRequirement, attachFile, attachNameProblem, createRequirement, findArchivedRequirementDir, findRequirementDir, readRequirementDirs, readRequirementTrigger, readState, renderDigest, restoreRequirement, writeState } from './requirements.js'
 import { lastActivityOf, renderUsageReport, usageWindow } from './usage.js'
 import type { UsageRow } from './usage.js'
 import type { HumanPatch } from './types.js'
@@ -1493,10 +1493,16 @@ export function buildHumanTools({ ctx, service, humanId, memory = true, im = tru
       const { dir } = await requirementContext(args.requirement, 'digital_human_requirement_attach')
       const name = String(args.name ?? '').trim()
       if (!name) throw new Error('name is required')
+      const kind = args.kind === 'self-test' ? 'self-test' : args.kind === 'files' ? 'files' : 'nodes'
+      // The shelf sanitizes slashes away (a/b → a-b), so the convention is checked
+      // on the sanitized shape the file will actually land under.
+      const shelved = name.replace(/[\\/]+/g, '-')
+      const problem = attachNameProblem(shelved, kind)
+      if (problem) throw new Error(problem)
       const file = attachFile(dir, {
         name,
         content: String(args.content ?? ''),
-        kind: args.kind === 'self-test' ? 'self-test' : args.kind === 'files' ? 'files' : 'nodes',
+        kind,
       })
       return { detail: `Attached ${name} to ${file}.`, path: file }
     },

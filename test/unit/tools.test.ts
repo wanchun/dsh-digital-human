@@ -965,16 +965,17 @@ describe('the requirement tools', () => {
     expect(result.path).toBe(join(requirementDir, 'self-test', 'report.md'))
     expect(result.detail).toContain(result.path)
     expect(readFileSync(result.path, 'utf8')).toBe('# ok')
-    // The default folder is nodes, where a node's own evidence belongs.
-    const node = await attach.execute({ requirement: REQ, name: 'dev.md', content: 'x' })
-    expect(node.path).toBe(join(requirementDir, 'nodes', 'dev.md'))
+    // The default folder is nodes, where a node's own evidence belongs; a name
+    // there carries a ticket id or a nature prefix (2026-11-12 convention).
+    const node = await attach.execute({ requirement: REQ, name: 'w1-dev.md', content: 'x' })
+    expect(node.path).toBe(join(requirementDir, 'nodes', 'w1-dev.md'))
     expect(undeclaredKeys(attach.output.schema, result)).toEqual([])
   })
 
   it('keeps a slash in the name from leaving the evidence folder', async () => {
     const attach = toolOf(build(), 'digital_human_requirement_attach')
-    const result = await attach.execute({ requirement: REQ, name: '../escape.md', content: 'x' })
-    expect(result.path).toBe(join(requirementDir, 'nodes', '..-escape.md'))
+    const result = await attach.execute({ requirement: REQ, name: 'fix-/escape.md', content: 'x' })
+    expect(result.path).toBe(join(requirementDir, 'nodes', 'fix--escape.md'))
   })
 
   it('refuses an attachment with no name, and an unknown requirement', async () => {
