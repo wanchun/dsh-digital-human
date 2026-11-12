@@ -1,7 +1,7 @@
 # 01 · 运行时协作规则补齐共同交接语义
 
 Type: task
-Status: ready-for-agent
+Status: resolved
 
 ## What to build
 
@@ -32,3 +32,10 @@ Status: ready-for-agent
 ## Seam
 
 `src/lib/presets.ts` 的 `renderOperatingContext`；测试走 `test/unit/presets.test.ts`。
+## Answer
+
+`src/lib/presets.ts` 的协作规则段补 4 条（365–369 行）：派单字段分工（facts / context / 正文）、`expect_receipt` 门槛、摘要优先与按需读文件、需求记录与记忆分工。
+
+`test/unit/presets.test.ts` 新增 5 个用例：四类字段语义、回执门槛、上下文读写分工、每条语义只出现一次、不复述工具已拒绝的字段清单。测试只断言必需语义，不锁死整段原文。
+
+提交 `869bfe7`（2 files changed, 50 insertions），已合入集成分支。全量单测 869/869 通过。
